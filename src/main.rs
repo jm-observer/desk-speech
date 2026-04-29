@@ -4,7 +4,7 @@ use log::LevelFilter::Info;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = logger::logger_feature("app", "debug", Info, false).build();
-    let _ = custom_utils::daemon::daemon();
+    let _ = custom_utils::daemon::daemon().await;
     // remember to print msg via stdio
     tool::run().await
 }

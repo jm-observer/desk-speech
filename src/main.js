@@ -2,9 +2,13 @@ const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { save, ask } = window.__TAURI__.dialog;
 const { open: openUrl } = window.__TAURI__.shell;
 
+const AUTO_COPY_STORAGE_KEY = "auto-copy-enabled";
+const AUTO_COPY_MIN_INTERVAL_MS = 500;
+
 const startBtn = document.querySelector("#start-btn");
 const stopBtn = document.querySelector("#stop-btn");
 const clearBtn = document.querySelector("#clear-btn");
+const correctionBtn = document.querySelector("#correction-btn");
 const statusEl = document.querySelector("#status");
 const recordingIndicator = document.querySelector("#recording-indicator");
 const elapsedTimer = document.querySelector("#elapsed-timer");
@@ -26,6 +30,15 @@ const setNumThreads = document.querySelector("#set-num-threads");
 const settingsApplyBtn = document.querySelector("#settings-apply");
 const settingsCancelBtn = document.querySelector("#settings-cancel");
 const deviceSelect = document.querySelector("#device-select");
+const autoCopyToggle = document.querySelector("#auto-copy-toggle");
+const correctionModal = document.querySelector("#correction-modal");
+const correctionBody = document.querySelector("#correction-body");
+const correctionCloseBtn = document.querySelector("#correction-close-btn");
+const correctionAddBtn = document.querySelector("#correction-add-btn");
+const newSourceInput = document.querySelector("#new-source");
+const newTargetInput = document.querySelector("#new-target");
+const newPriorityInput = document.querySelector("#new-priority");
+const newEnabledInput = document.querySelector("#new-enabled");
 
 let recording = false;
 let pollTimer = null;
@@ -34,14 +47,170 @@ let lastSegments = [];
 let modelsReady = false;
 let recordingStartTime = null;
 let hasDevices = false;
-
-// ---------------------------------------------------------------------------
-// Model initialization polling
-// ---------------------------------------------------------------------------
+let currentSessionId = null;
+let tailAfterId = 0;
+let correctionRules = [];
+let lastAutoCopySign = "";
+let lastAutoCopyAtMs = 0;
 
 startBtn.disabled = true;
 statusEl.textContent = "Loading models...";
 statusEl.className = "status status-working";
+
+autoCopyToggle.checked = localStorage.getItem(AUTO_COPY_STORAGE_KEY) !== "0";
+autoCopyToggle.addEventListener("change", () => {
+  localStorage.setItem(AUTO_COPY_STORAGE_KEY, autoCopyToggle.checked ? "1" : "0");
+});
+
+async function loadInitialData() {
+  await Promise.all([loadCorrectionRules(), loadLatestSession()]);
+}
+
+async function loadLatestSession() {
+  try {
+    const sessions = await invoke("list_sessions", { page: 0, pageSize: 1 });
+    if (!sessions.length) {
+      currentSessionId = null;
+      tailAfterId = 0;
+      return;
+    }
+    currentSessionId = sessions[0].id;
+    const segments = await invoke("list_session_segments", {
+      sessionId: currentSessionId,
+      page: 0,
+      pageSize: 200,
+    });
+    applyDbSegments(segments, false);
+  } catch (err) {
+    flashStatus(`Load history error: ${err}`, true);
+  }
+}
+
+async function loadCorrectionRules() {
+  const rows = await invoke("list_correction_rules");
+  correctionRules = rows;
+  renderCorrectionRules();
+}
+
+function renderCorrectionRules() {
+  correctionBody.innerHTML = "";
+  correctionRules.forEach((rule) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="checkbox" class="rule-enabled" data-id="${rule.id}" ${rule.enabled ? "checked" : ""} /></td>
+      <td>${escapeHtml(rule.source)}</td>
+      <td>${escapeHtml(rule.target)}</td>
+      <td><input type="number" class="rule-priority" data-id="${rule.id}" value="${rule.priority}" step="1" /></td>
+      <td><button class="rule-del-btn" data-id="${rule.id}">删除</button></td>
+    `;
+    correctionBody.appendChild(tr);
+  });
+}
+
+correctionBtn.addEventListener("click", async () => {
+  try {
+    await loadCorrectionRules();
+    correctionModal.style.display = "flex";
+  } catch (err) {
+    flashStatus(`Load rules error: ${err}`, true);
+  }
+});
+
+correctionCloseBtn.addEventListener("click", () => {
+  correctionModal.style.display = "none";
+});
+
+correctionModal.addEventListener("click", (e) => {
+  if (e.target === correctionModal) {
+    correctionModal.style.display = "none";
+  }
+});
+
+correctionAddBtn.addEventListener("click", async () => {
+  const source = newSourceInput.value.trim();
+  const target = newTargetInput.value.trim();
+  const priority = parseInt(newPriorityInput.value, 10);
+  if (!source) {
+    flashStatus("源词不能为空", true);
+    return;
+  }
+  if (Number.isNaN(priority)) {
+    flashStatus("优先级必须是整数", true);
+    return;
+  }
+
+  try {
+    await invoke("create_correction_rule", {
+      source,
+      target,
+      priority,
+      enabled: newEnabledInput.checked,
+    });
+    await invoke("reload_correction_rules");
+    await loadCorrectionRules();
+    newSourceInput.value = "";
+    newTargetInput.value = "";
+    newPriorityInput.value = "100";
+    newEnabledInput.checked = true;
+    flashStatus("规则已新增");
+  } catch (err) {
+    flashStatus(`Create rule error: ${err}`, true);
+  }
+});
+
+correctionBody.addEventListener("change", async (e) => {
+  const enabledEl = e.target.closest(".rule-enabled");
+  const priorityEl = e.target.closest(".rule-priority");
+  if (!enabledEl && !priorityEl) {
+    return;
+  }
+
+  const id = parseInt((enabledEl || priorityEl).dataset.id, 10);
+  const rule = correctionRules.find((r) => r.id === id);
+  if (!rule) {
+    return;
+  }
+
+  const priorityInput = correctionBody.querySelector(`.rule-priority[data-id="${id}"]`);
+  const enabledInput = correctionBody.querySelector(`.rule-enabled[data-id="${id}"]`);
+  const priority = parseInt(priorityInput.value, 10);
+  if (Number.isNaN(priority)) {
+    flashStatus("优先级必须是整数", true);
+    priorityInput.value = String(rule.priority);
+    return;
+  }
+
+  try {
+    await invoke("update_correction_rule", {
+      id,
+      source: rule.source,
+      target: rule.target,
+      priority,
+      enabled: enabledInput.checked,
+    });
+    await invoke("reload_correction_rules");
+    await loadCorrectionRules();
+  } catch (err) {
+    flashStatus(`Update rule error: ${err}`, true);
+  }
+});
+
+correctionBody.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".rule-del-btn");
+  if (!btn) {
+    return;
+  }
+
+  const id = parseInt(btn.dataset.id, 10);
+  try {
+    await invoke("delete_correction_rule", { id });
+    await invoke("reload_correction_rules");
+    await loadCorrectionRules();
+    flashStatus("规则已删除");
+  } catch (err) {
+    flashStatus(`Delete rule error: ${err}`, true);
+  }
+});
 
 async function loadDevices() {
   try {
@@ -73,6 +242,7 @@ async function loadDevices() {
     deviceSelect.disabled = false;
     if (modelsReady) {
       startBtn.disabled = false;
+      correctionBtn.disabled = false;
       statusEl.textContent = "";
       statusEl.className = "status";
     }
@@ -92,6 +262,7 @@ deviceSelect.addEventListener("change", async () => {
 });
 
 loadDevices();
+loadInitialData();
 
 function pollInitStatus() {
   invoke("get_init_status")
@@ -100,6 +271,7 @@ function pollInitStatus() {
         modelsReady = true;
         startBtn.disabled = !hasDevices;
         settingsBtn.disabled = false;
+        correctionBtn.disabled = false;
         clearBtn.disabled = false;
         if (hasDevices) {
           statusEl.textContent = "";
@@ -108,6 +280,7 @@ function pollInitStatus() {
       } else if (res.status === 2) {
         startBtn.disabled = true;
         settingsBtn.disabled = true;
+        correctionBtn.disabled = true;
         statusEl.textContent = `Initialization failed: ${res.error}`;
         statusEl.className = "status status-error";
       } else {
@@ -123,20 +296,12 @@ function pollInitStatus() {
 
 pollInitStatus();
 
-// ---------------------------------------------------------------------------
-// External links
-// ---------------------------------------------------------------------------
-
 document.querySelectorAll("a[href]").forEach((a) => {
   a.addEventListener("click", (e) => {
     e.preventDefault();
     openUrl(e.currentTarget.href);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Copy / Export handlers
-// ---------------------------------------------------------------------------
 
 copyTextBtn.addEventListener("click", async () => {
   const text = lastSegments.map((s) => s.text).join("\n");
@@ -145,9 +310,7 @@ copyTextBtn.addEventListener("click", async () => {
 });
 
 copyTimedBtn.addEventListener("click", async () => {
-  const lines = lastSegments.map(
-    (s) => `[${s.wall_start} --> ${s.wall_end}] ${s.text}`
-  );
+  const lines = lastSegments.map((s) => `[${s.wall_start} --> ${s.wall_end}] ${s.text}`);
   await navigator.clipboard.writeText(lines.join("\n"));
   flashStatus("Text with time copied.");
 });
@@ -158,7 +321,9 @@ exportSrtBtn.addEventListener("click", async () => {
     filters: [{ name: "SubRip", extensions: ["srt"] }],
   });
 
-  if (filePath === null) return;
+  if (filePath === null) {
+    return;
+  }
 
   try {
     await invoke("export_srt", { path: filePath });
@@ -174,7 +339,9 @@ saveAllBtn.addEventListener("click", async () => {
     filters: [{ name: "WAV Audio", extensions: ["wav"] }],
   });
 
-  if (filePath === null) return;
+  if (filePath === null) {
+    return;
+  }
 
   try {
     await invoke("save_all_audio", { path: filePath });
@@ -183,10 +350,6 @@ saveAllBtn.addEventListener("click", async () => {
     flashStatus(`Save error: ${err}`, true);
   }
 });
-
-// ---------------------------------------------------------------------------
-// Audio player & row sync
-// ---------------------------------------------------------------------------
 
 let lastActiveIdx = -1;
 
@@ -209,9 +372,7 @@ player.addEventListener("timeupdate", () => {
 
 player.addEventListener("ended", () => {
   lastActiveIdx = -1;
-  resultsBody
-    .querySelectorAll("tr.active")
-    .forEach((tr) => tr.classList.remove("active"));
+  resultsBody.querySelectorAll("tr.active").forEach((tr) => tr.classList.remove("active"));
 });
 
 function findSegmentIndex(t) {
@@ -231,7 +392,6 @@ function findSegmentIndex(t) {
   return -1;
 }
 
-// Click a table row to seek to that segment
 resultsBody.addEventListener("click", (e) => {
   if (e.target.closest(".save-seg-btn")) {
     e.stopPropagation();
@@ -244,7 +404,9 @@ resultsBody.addEventListener("click", (e) => {
   }
 
   const tr = e.target.closest("tr");
-  if (!tr) return;
+  if (!tr) {
+    return;
+  }
   const idx = parseInt(tr.dataset.idx, 10);
   if (idx >= 0 && idx < lastSegments.length) {
     player.pause();
@@ -263,9 +425,7 @@ resultsBody.addEventListener("click", (e) => {
 async function saveSegment(idx) {
   const seg = lastSegments[idx];
   const wallPart = seg.wall_start.replace(/[:\s]/g, "-");
-  const textPart = seg.text
-    .replace(/[^\w一-鿿]/g, "_")
-    .slice(0, 30);
+  const textPart = seg.text.replace(/[^\w一-鿿]/g, "_").slice(0, 30);
   const defaultName = `segment-${idx + 1}-${wallPart}-${textPart}.wav`;
 
   const filePath = await save({
@@ -273,7 +433,9 @@ async function saveSegment(idx) {
     filters: [{ name: "WAV Audio", extensions: ["wav"] }],
   });
 
-  if (filePath === null) return;
+  if (filePath === null) {
+    return;
+  }
 
   try {
     await invoke("save_segment_as_wav", {
@@ -287,12 +449,10 @@ async function saveSegment(idx) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Start / Stop recording
-// ---------------------------------------------------------------------------
-
 startBtn.addEventListener("click", async () => {
-  if (recording || !modelsReady) return;
+  if (recording || !modelsReady) {
+    return;
+  }
 
   try {
     await invoke("start_recording");
@@ -302,9 +462,12 @@ startBtn.addEventListener("click", async () => {
   }
 
   recording = true;
+  currentSessionId = null;
+  tailAfterId = 0;
   startBtn.style.display = "none";
   stopBtn.style.display = "";
   settingsBtn.disabled = true;
+  correctionBtn.disabled = true;
   clearBtn.disabled = true;
   deviceSelect.disabled = true;
   recordingIndicator.style.display = "flex";
@@ -325,17 +488,23 @@ stopBtn.addEventListener("click", async () => {
 });
 
 clearBtn.addEventListener("click", async () => {
-  if (recording) return;
+  if (recording) {
+    return;
+  }
 
-  const confirmed = await ask(
-    "This will clear all recognition results and recorded audio. Continue?",
-    { title: "Clear All", kind: "warning" }
-  );
-  if (!confirmed) return;
+  const confirmed = await ask("This will clear all recognition results and recorded audio. Continue?", {
+    title: "Clear All",
+    kind: "warning",
+  });
+  if (!confirmed) {
+    return;
+  }
 
   try {
     await invoke("clear_results");
     lastSegments = [];
+    currentSessionId = null;
+    tailAfterId = 0;
     resultsBody.innerHTML = "";
     resultsEl.style.display = "none";
     playerWrapper.style.display = "none";
@@ -350,48 +519,25 @@ clearBtn.addEventListener("click", async () => {
 });
 
 function updateElapsedTimer() {
-  if (!recordingStartTime) return;
+  if (!recordingStartTime) {
+    return;
+  }
   const secs = Math.floor((Date.now() - recordingStartTime) / 1000);
   const m = Math.floor(secs / 60);
   const s = secs % 60;
-  elapsedTimer.textContent =
-    String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+  elapsedTimer.textContent = String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
 }
 
-// ---------------------------------------------------------------------------
-// Polling
-// ---------------------------------------------------------------------------
-
 function startPolling() {
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer) {
+    clearInterval(pollTimer);
+  }
   pollTimer = setInterval(async () => {
     try {
       const state = await invoke("get_recording_state");
+      applyLegacySegments(state.segments);
+      await syncDbSegments();
 
-      // Append new rows
-      const prevLen = lastSegments.length;
-      lastSegments = state.segments;
-      for (let i = prevLen; i < state.segments.length; i++) {
-        const seg = state.segments[i];
-        const duration = (seg.end - seg.start).toFixed(2);
-        const tr = document.createElement("tr");
-        tr.dataset.idx = i;
-        tr.innerHTML = `
-          <td>${escapeHtml(stripYear(seg.wall_start))}</td>
-          <td>${escapeHtml(stripYear(seg.wall_end))}</td>
-          <td>${duration}s</td>
-          <td>${escapeHtml(seg.text)}</td>
-          <td><button class="save-seg-btn" data-idx="${i}" title="Save as WAV">&#128190;</button></td>
-        `;
-        resultsBody.appendChild(tr);
-      }
-      if (state.segments.length > prevLen) {
-        resultsEl.style.display = "block";
-        const lastRow = resultsBody.lastElementChild;
-        if (lastRow) lastRow.scrollIntoView({ behavior: "smooth", block: "end" });
-      }
-
-      // Check if recording stopped
       if (!state.recording && recording) {
         clearInterval(pollTimer);
         pollTimer = null;
@@ -404,21 +550,21 @@ function startPolling() {
         stopBtn.style.display = "none";
         stopBtn.disabled = false;
         settingsBtn.disabled = false;
+        correctionBtn.disabled = false;
         clearBtn.disabled = false;
         deviceSelect.disabled = false;
         recordingIndicator.style.display = "none";
 
         const totalSecs = state.elapsed_secs;
-        statusEl.textContent = `Done. ${state.segments.length} segment(s) in ${totalSecs.toFixed(1)}s.`;
+        statusEl.textContent = `Done. ${lastSegments.length} segment(s) in ${totalSecs.toFixed(1)}s.`;
         statusEl.className = "status status-done";
 
-        // Load recorded audio for playback
         try {
           const audioPath = await invoke("get_recorded_audio_path");
           player.src = convertFileSrc(audioPath);
           playerWrapper.style.display = "block";
         } catch (err) {
-          if (state.segments.length > 0) {
+          if (lastSegments.length > 0) {
             flashStatus(`Could not load playback: ${err}`, true);
           }
         }
@@ -435,6 +581,7 @@ function startPolling() {
       stopBtn.style.display = "none";
       stopBtn.disabled = false;
       settingsBtn.disabled = false;
+      correctionBtn.disabled = false;
       clearBtn.disabled = false;
       deviceSelect.disabled = false;
       recordingIndicator.style.display = "none";
@@ -444,12 +591,127 @@ function startPolling() {
   }, 200);
 }
 
-// ---------------------------------------------------------------------------
-// Settings modal
-// ---------------------------------------------------------------------------
+function applyLegacySegments(segments) {
+  if (!segments.length) {
+    return;
+  }
+
+  const normalized = segments.map((seg) => ({
+    id: null,
+    start: seg.start,
+    end: seg.end,
+    wall_start: seg.wall_start,
+    wall_end: seg.wall_end,
+    text: seg.text,
+    sign: `${seg.start}-${seg.end}-${seg.text}`,
+  }));
+
+  for (const seg of normalized) {
+    if (lastSegments.some((oldSeg) => oldSeg.sign === seg.sign)) {
+      continue;
+    }
+    appendSegment(seg);
+    maybeAutoCopy(seg);
+  }
+}
+
+async function syncDbSegments() {
+  if (!currentSessionId) {
+    const sessions = await invoke("list_sessions", { page: 0, pageSize: 1 });
+    if (!sessions.length) {
+      return;
+    }
+    currentSessionId = sessions[0].id;
+    const existing = await invoke("list_session_segments", {
+      sessionId: currentSessionId,
+      page: 0,
+      pageSize: 200,
+    });
+    applyDbSegments(existing, true);
+    return;
+  }
+
+  const delta = await invoke("tail_session_segments", {
+    sessionId: currentSessionId,
+    afterId: tailAfterId,
+    limit: 200,
+  });
+  applyDbSegments(delta, true);
+}
+
+function applyDbSegments(dbSegments, fromTail) {
+  for (const seg of dbSegments) {
+    const sign = `${seg.start_sec}-${seg.end_sec}-${seg.text_corrected}`;
+    const normalized = {
+      id: seg.id,
+      start: seg.start_sec,
+      end: seg.end_sec,
+      wall_start: seg.wall_start,
+      wall_end: seg.wall_end,
+      text: seg.text_corrected,
+      sign,
+    };
+    if (lastSegments.some((s) => (normalized.id !== null && s.id === normalized.id) || s.sign === sign)) {
+      tailAfterId = Math.max(tailAfterId, seg.id);
+      continue;
+    }
+    appendSegment(normalized);
+    tailAfterId = Math.max(tailAfterId, seg.id);
+    if (fromTail) {
+      maybeAutoCopy(normalized);
+    }
+  }
+}
+
+function appendSegment(seg) {
+  const idx = lastSegments.length;
+  const duration = (seg.end - seg.start).toFixed(2);
+  const tr = document.createElement("tr");
+  tr.dataset.idx = idx;
+  tr.innerHTML = `
+    <td>${escapeHtml(stripYear(seg.wall_start))}</td>
+    <td>${escapeHtml(stripYear(seg.wall_end))}</td>
+    <td>${duration}s</td>
+    <td>${escapeHtml(seg.text)}</td>
+    <td><button class="save-seg-btn" data-idx="${idx}" title="Save as WAV">&#128190;</button></td>
+  `;
+  resultsBody.appendChild(tr);
+  lastSegments.push(seg);
+  resultsEl.style.display = "block";
+  const lastRow = resultsBody.lastElementChild;
+  if (lastRow) {
+    lastRow.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+}
+
+async function maybeAutoCopy(seg) {
+  if (!autoCopyToggle.checked) {
+    return;
+  }
+  if (seg.sign === lastAutoCopySign) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastAutoCopyAtMs < AUTO_COPY_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(seg.text);
+    lastAutoCopySign = seg.sign;
+    lastAutoCopyAtMs = now;
+    const preview = seg.text.length > 24 ? `${seg.text.slice(0, 24)}...` : seg.text;
+    flashStatus(`已自动复制：${preview}`);
+  } catch (err) {
+    flashStatus(`自动复制失败: ${err}`, true);
+  }
+}
 
 settingsBtn.addEventListener("click", async () => {
-  if (!modelsReady || recording) return;
+  if (!modelsReady || recording) {
+    return;
+  }
 
   try {
     const s = await invoke("get_settings");
@@ -483,31 +745,23 @@ settingsApplyBtn.addEventListener("click", async () => {
     num_threads: parseInt(setNumThreads.value, 10),
   };
 
-  if (
-    isNaN(newSettings.threshold) ||
-    newSettings.threshold < 0 ||
-    newSettings.threshold > 1
-  ) {
+  if (Number.isNaN(newSettings.threshold) || newSettings.threshold < 0 || newSettings.threshold > 1) {
     flashStatus("Threshold must be between 0.0 and 1.0", true);
     return;
   }
-  if (isNaN(newSettings.min_silence_duration) || newSettings.min_silence_duration < 0) {
+  if (Number.isNaN(newSettings.min_silence_duration) || newSettings.min_silence_duration < 0) {
     flashStatus("Min silence duration must be >= 0", true);
     return;
   }
-  if (isNaN(newSettings.min_speech_duration) || newSettings.min_speech_duration < 0) {
+  if (Number.isNaN(newSettings.min_speech_duration) || newSettings.min_speech_duration < 0) {
     flashStatus("Min speech duration must be >= 0", true);
     return;
   }
-  if (isNaN(newSettings.max_speech_duration) || newSettings.max_speech_duration <= 0) {
+  if (Number.isNaN(newSettings.max_speech_duration) || newSettings.max_speech_duration <= 0) {
     flashStatus("Max speech duration must be > 0", true);
     return;
   }
-  if (
-    isNaN(newSettings.num_threads) ||
-    newSettings.num_threads < 1 ||
-    newSettings.num_threads > 16
-  ) {
+  if (Number.isNaN(newSettings.num_threads) || newSettings.num_threads < 1 || newSettings.num_threads > 16) {
     flashStatus("Threads must be between 1 and 16", true);
     return;
   }
@@ -520,6 +774,7 @@ settingsApplyBtn.addEventListener("click", async () => {
     modelsReady = false;
     startBtn.disabled = true;
     settingsBtn.disabled = true;
+    correctionBtn.disabled = true;
     statusEl.textContent = "Reloading models...";
     statusEl.className = "status status-working";
     pollInitStatus();
@@ -530,17 +785,12 @@ settingsApplyBtn.addEventListener("click", async () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function escapeHtml(text) {
   const el = document.createElement("span");
   el.textContent = text;
   return el.innerHTML;
 }
 
-// "2026-04-21 18:52:28" -> "18:52:28" (time only for display)
 function stripYear(wall) {
   const parts = wall.split(" ");
   return parts.length >= 2 ? parts[parts.length - 1] : wall;
@@ -551,7 +801,9 @@ function flashStatus(msg, isError, durationMs) {
   const prev = { text: statusEl.textContent, cls: statusEl.className };
   statusEl.textContent = msg;
   statusEl.className = isError ? "status status-error" : "status status-done";
-  if (flashTimer) clearTimeout(flashTimer);
+  if (flashTimer) {
+    clearTimeout(flashTimer);
+  }
   flashTimer = setTimeout(() => {
     statusEl.textContent = prev.text;
     statusEl.className = prev.cls;
