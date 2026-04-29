@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use repository::{CorrectionRule, NewRule, NewSegment, SegmentRow};
+use repository::{CorrectionRule, NewRule, NewSegment, SegmentRow, SessionRow};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -18,13 +18,12 @@ pub struct SpeechDatabase {
 impl SpeechDatabase {
     pub fn init(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create database directory: {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create database directory: {}", parent.display()))?;
         }
 
-        let conn = Connection::open(db_path)
-            .with_context(|| format!("failed to open sqlite db: {}", db_path.display()))?;
+        let conn =
+            Connection::open(db_path).with_context(|| format!("failed to open sqlite db: {}", db_path.display()))?;
         schema::run_migrations(&conn)?;
 
         Ok(Self {
@@ -35,83 +34,72 @@ impl SpeechDatabase {
     pub fn create_session(&self) -> Result<String> {
         let session_id = Uuid::new_v4().to_string();
         let now = now_str();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::create_session(&conn, &session_id, &now)
     }
 
     pub fn close_session(&self, session_id: &str) -> Result<()> {
         let now = now_str();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::close_session(&conn, session_id, &now)
     }
 
     pub fn insert_segment(&self, segment: NewSegment) -> Result<()> {
         let now = now_str();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::insert_segment(&conn, &segment, &now)
     }
 
-    pub fn list_segments(
-        &self,
-        session_id: &str,
-        page: u32,
-        page_size: u32,
-    ) -> Result<Vec<SegmentRow>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    pub fn list_segments(&self, session_id: &str, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::list_segments(&conn, session_id, page, page_size)
+    }
+
+    pub fn list_sessions(&self, page: u32, page_size: u32) -> Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        repository::list_sessions(&conn, page, page_size)
+    }
+
+    pub fn tail_segments(&self, session_id: &str, after_id: i64, limit: u32) -> Result<Vec<SegmentRow>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        repository::tail_segments(&conn, session_id, after_id, limit)
+    }
+
+    pub fn session_exists(&self, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        repository::session_exists(&conn, session_id)
     }
 
     pub fn upsert_rule(&self, rule: NewRule) -> Result<()> {
         let now = now_str();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::upsert_rule(&conn, &rule, &now)
     }
 
     pub fn delete_rule(&self, rule_id: i64) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::delete_rule(&conn, rule_id)
     }
 
+    pub fn update_rule(&self, rule_id: i64, rule: NewRule) -> Result<()> {
+        let now = now_str();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        repository::update_rule(&conn, rule_id, &rule, &now)
+    }
+
     pub fn list_rules(&self) -> Result<Vec<CorrectionRule>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::list_rules(&conn)
     }
 
     pub fn bump_rule_version(&self, checksum: &str) -> Result<i64> {
         let now = now_str();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::bump_rule_version(&conn, checksum, &now)
     }
 
     pub fn get_latest_rule_version(&self) -> Result<Option<(i64, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::get_latest_rule_version(&conn)
     }
 }

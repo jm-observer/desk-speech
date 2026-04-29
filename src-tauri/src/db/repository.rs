@@ -43,6 +43,16 @@ pub struct SegmentRow {
     pub created_at: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct SessionRow {
+    pub id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub sample_rate: i64,
+    pub channel_count: i64,
+    pub created_at: String,
+}
+
 pub fn create_session(conn: &Connection, session_id: &str, now: &str) -> Result<String> {
     conn.execute(
         "INSERT INTO sessions(id, started_at, created_at) VALUES (?1, ?2, ?2)",
@@ -59,6 +69,17 @@ pub fn close_session(conn: &Connection, session_id: &str, now: &str) -> Result<(
     )
     .with_context(|| format!("failed to close session {session_id}"))?;
     Ok(())
+}
+
+pub fn session_exists(conn: &Connection, session_id: &str) -> Result<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("failed to check session existence: {session_id}"))?;
+    Ok(count > 0)
 }
 
 pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Result<()> {
@@ -80,12 +101,7 @@ pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
     Ok(())
 }
 
-pub fn list_segments(
-    conn: &Connection,
-    session_id: &str,
-    page: u32,
-    page_size: u32,
-) -> Result<Vec<SegmentRow>> {
+pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
     if page_size == 0 {
         return Err(anyhow!("page_size must be greater than 0"));
     }
@@ -123,6 +139,75 @@ pub fn list_segments(
     Ok(rows)
 }
 
+pub fn list_sessions(conn: &Connection, page: u32, page_size: u32) -> Result<Vec<SessionRow>> {
+    if page_size == 0 {
+        return Err(anyhow!("page_size must be greater than 0"));
+    }
+
+    let offset = page as u64 * page_size as u64;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, started_at, ended_at, sample_rate, channel_count, created_at
+             FROM sessions
+             ORDER BY started_at DESC
+             LIMIT ?1 OFFSET ?2",
+        )
+        .context("failed to prepare list_sessions statement")?;
+
+    let mapped = stmt
+        .query_map(params![page_size, offset], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                started_at: row.get(1)?,
+                ended_at: row.get(2)?,
+                sample_rate: row.get(3)?,
+                channel_count: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .context("failed to query list_sessions")?;
+
+    let rows = mapped
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to collect sessions")?;
+    Ok(rows)
+}
+
+pub fn tail_segments(conn: &Connection, session_id: &str, after_id: i64, limit: u32) -> Result<Vec<SegmentRow>> {
+    if limit == 0 {
+        return Err(anyhow!("limit must be greater than 0"));
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, start_sec, end_sec, wall_start, wall_end, text_raw, text_corrected, created_at
+             FROM segments
+             WHERE session_id = ?1 AND id > ?2
+             ORDER BY id ASC
+             LIMIT ?3",
+        )
+        .context("failed to prepare tail_segments statement")?;
+    let mapped = stmt
+        .query_map(params![session_id, after_id, limit], |row| {
+            Ok(SegmentRow {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                start_sec: row.get(2)?,
+                end_sec: row.get(3)?,
+                wall_start: row.get(4)?,
+                wall_end: row.get(5)?,
+                text_raw: row.get(6)?,
+                text_corrected: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })
+        .context("failed to query tail_segments")?;
+
+    let rows = mapped
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to collect tail segments")?;
+    Ok(rows)
+}
+
 pub fn upsert_rule(conn: &Connection, rule: &NewRule, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO correction_rules(source, target, enabled, priority, updated_at)
@@ -136,11 +221,26 @@ pub fn upsert_rule(conn: &Connection, rule: &NewRule, now: &str) -> Result<()> {
 }
 
 pub fn delete_rule(conn: &Connection, rule_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM correction_rules WHERE id = ?1", params![rule_id])
+        .with_context(|| format!("failed to delete rule {rule_id}"))?;
+    Ok(())
+}
+
+pub fn update_rule(conn: &Connection, rule_id: i64, rule: &NewRule, now: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM correction_rules WHERE id = ?1",
-        params![rule_id],
+        "UPDATE correction_rules
+         SET source = ?1, target = ?2, enabled = ?3, priority = ?4, updated_at = ?5
+         WHERE id = ?6",
+        params![
+            rule.source,
+            rule.target,
+            rule.enabled as i32,
+            rule.priority,
+            now,
+            rule_id
+        ],
     )
-    .with_context(|| format!("failed to delete rule {rule_id}"))?;
+    .with_context(|| format!("failed to update rule {rule_id}"))?;
     Ok(())
 }
 
@@ -192,18 +292,11 @@ pub fn bump_rule_version(conn: &Connection, checksum: &str, now: &str) -> Result
 
 pub fn get_latest_rule_version(conn: &Connection) -> Result<Option<(i64, String)>> {
     let mut stmt = conn
-        .prepare(
-            "SELECT version, checksum FROM correction_rule_versions ORDER BY version DESC LIMIT 1",
-        )
+        .prepare("SELECT version, checksum FROM correction_rule_versions ORDER BY version DESC LIMIT 1")
         .context("failed to prepare get_latest_rule_version")?;
 
-    let mut rows = stmt
-        .query([])
-        .context("failed to query latest rule version")?;
-    if let Some(row) = rows
-        .next()
-        .context("failed to read latest rule version row")?
-    {
+    let mut rows = stmt.query([]).context("failed to query latest rule version")?;
+    if let Some(row) = rows.next().context("failed to read latest rule version row")? {
         let version = row.get(0)?;
         let checksum = row.get(1)?;
         Ok(Some((version, checksum)))

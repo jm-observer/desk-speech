@@ -3,11 +3,10 @@
 use std::path::Path;
 
 use sherpa_onnx::{
-    OfflineCanaryModelConfig, OfflineDolphinModelConfig, OfflineFireRedAsrCtcModelConfig,
-    OfflineFireRedAsrModelConfig, OfflineFunASRNanoModelConfig, OfflineMedAsrCtcModelConfig,
-    OfflineMoonshineModelConfig, OfflineNemoEncDecCtcModelConfig,
-    OfflineOmnilingualAsrCtcModelConfig, OfflineParaformerModelConfig, OfflineQwen3ASRModelConfig,
-    OfflineRecognizerConfig, OfflineSenseVoiceModelConfig, OfflineTransducerModelConfig,
+    OfflineCanaryModelConfig, OfflineDolphinModelConfig, OfflineFireRedAsrCtcModelConfig, OfflineFireRedAsrModelConfig,
+    OfflineFunASRNanoModelConfig, OfflineMedAsrCtcModelConfig, OfflineMoonshineModelConfig,
+    OfflineNemoEncDecCtcModelConfig, OfflineOmnilingualAsrCtcModelConfig, OfflineParaformerModelConfig,
+    OfflineQwen3ASRModelConfig, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig, OfflineTransducerModelConfig,
     OfflineWenetCtcModelConfig, OfflineWhisperModelConfig, OfflineZipformerCtcModelConfig,
 };
 
@@ -128,9 +127,7 @@ pub fn get_model_config(model_type: u32, model_dir: &Path) -> Option<OfflineReco
         7 => {
             // sherpa-onnx-nemo-fast-conformer-ctc-be-de-en-es-fr-hr-it-pl-ru-uk-20k
             let mut config = OfflineRecognizerConfig::default();
-            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig {
-                model: p("model.onnx"),
-            };
+            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig { model: p("model.onnx") };
             config.model_config.tokens = p("tokens.txt");
             config.model_config.num_threads = 2;
             config.model_config.debug = true;
@@ -140,9 +137,7 @@ pub fn get_model_config(model_type: u32, model_dir: &Path) -> Option<OfflineReco
         8 => {
             // sherpa-onnx-nemo-fast-conformer-ctc-en-24500
             let mut config = OfflineRecognizerConfig::default();
-            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig {
-                model: p("model.onnx"),
-            };
+            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig { model: p("model.onnx") };
             config.model_config.tokens = p("tokens.txt");
             config.model_config.num_threads = 2;
             config.model_config.debug = true;
@@ -152,9 +147,7 @@ pub fn get_model_config(model_type: u32, model_dir: &Path) -> Option<OfflineReco
         9 => {
             // sherpa-onnx-nemo-fast-conformer-ctc-en-de-es-fr-14288
             let mut config = OfflineRecognizerConfig::default();
-            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig {
-                model: p("model.onnx"),
-            };
+            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig { model: p("model.onnx") };
             config.model_config.tokens = p("tokens.txt");
             config.model_config.num_threads = 2;
             config.model_config.debug = true;
@@ -164,9 +157,7 @@ pub fn get_model_config(model_type: u32, model_dir: &Path) -> Option<OfflineReco
         10 => {
             // sherpa-onnx-nemo-fast-conformer-ctc-es-1424
             let mut config = OfflineRecognizerConfig::default();
-            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig {
-                model: p("model.onnx"),
-            };
+            config.model_config.nemo_ctc = OfflineNemoEncDecCtcModelConfig { model: p("model.onnx") };
             config.model_config.tokens = p("tokens.txt");
             config.model_config.num_threads = 2;
             config.model_config.debug = true;
@@ -685,9 +676,7 @@ pub fn get_model_config(model_type: u32, model_dir: &Path) -> Option<OfflineReco
         48 => {
             // sherpa-onnx-wenetspeech-wu-u2pp-conformer-ctc-zh-2026-02-03
             let mut config = OfflineRecognizerConfig::default();
-            config.model_config.wenet_ctc = OfflineWenetCtcModelConfig {
-                model: p("model.onnx"),
-            };
+            config.model_config.wenet_ctc = OfflineWenetCtcModelConfig { model: p("model.onnx") };
             config.model_config.tokens = p("tokens.txt");
             config.model_config.num_threads = 2;
             config.model_config.debug = true;

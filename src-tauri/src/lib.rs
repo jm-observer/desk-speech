@@ -1,24 +1,37 @@
 mod audio_buffer;
+mod commands {
+    pub mod correction;
+    pub mod history;
+}
+mod correction;
 pub mod db;
 mod model_registry;
 
 use audio_buffer::{RollingAudioBuffer, SAMPLE_RATE};
 use model_registry::get_model_config;
 use serde::{Deserialize, Serialize};
-use sherpa_onnx::{
-    LinearResampler, OfflineRecognizer, SileroVadModelConfig, VadModelConfig, VoiceActivityDetector,
-};
+use sherpa_onnx::{LinearResampler, OfflineRecognizer, SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::correction::CorrectionEngine;
+use crate::db::repository::NewSegment;
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use tauri::Manager;
+
+const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
+
+#[derive(Clone)]
+enum DbEvent {
+    InsertSegment { segment: NewSegment },
+    CloseSession { session_id: String },
+}
 
 /// Which ASR model to bundle. Build scripts patch these via sed.
 const MODEL_TYPE: u32 = 15;
@@ -71,6 +84,9 @@ struct AppState {
     segments: Arc<Mutex<Vec<SegmentResult>>>,
     recorded_audio: Arc<Mutex<RollingAudioBuffer>>,
     db: Arc<Mutex<Option<db::SpeechDatabase>>>,
+    db_writer: Arc<Mutex<Option<SyncSender<DbEvent>>>>,
+    current_session_id: Arc<Mutex<Option<String>>>,
+    correction_engine: Arc<CorrectionEngine>,
     start_wall_clock: Arc<Mutex<Option<chrono::DateTime<Local>>>>,
     start_instant: Arc<Mutex<Option<Instant>>>,
     init_status: Arc<AtomicU8>,
@@ -85,14 +101,22 @@ struct RecordingAnchor {
     audio_offset: u64,
 }
 
+struct RecordingRuntime<'a> {
+    stop_signal: &'a AtomicBool,
+    segments: &'a Arc<Mutex<Vec<SegmentResult>>>,
+    correction_engine: &'a CorrectionEngine,
+    db_writer: Option<&'a SyncSender<DbEvent>>,
+    session_id: &'a str,
+    recorded_audio: &'a Arc<Mutex<RollingAudioBuffer>>,
+    anchor: &'a RecordingAnchor,
+    selected_device: Option<&'a str>,
+}
+
 // ---------------------------------------------------------------------------
 // cpal microphone capture
 // ---------------------------------------------------------------------------
 
-fn build_input_stream(
-    device: &cpal::Device,
-    tx: mpsc::Sender<Vec<f32>>,
-) -> Result<cpal::Stream, String> {
+fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Result<cpal::Stream, String> {
     let supported = device
         .default_input_config()
         .map_err(|e| format!("No input config: {e}"))?;
@@ -163,8 +187,7 @@ fn build_input_stream(
                     let mono: Vec<f32> = data
                         .chunks(channels)
                         .map(|frame| {
-                            let sum: f32 =
-                                frame.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).sum();
+                            let sum: f32 = frame.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).sum();
                             sum / channels as f32
                         })
                         .collect();
@@ -189,6 +212,9 @@ fn recognize_segment(
     recognizer: &OfflineRecognizer,
     segment: &sherpa_onnx::SpeechSegment,
     segments: &Arc<Mutex<Vec<SegmentResult>>>,
+    correction_engine: &CorrectionEngine,
+    session_id: &str,
+    db_writer: Option<&SyncSender<DbEvent>>,
     base_wall: &chrono::DateTime<Local>,
     audio_offset_samples: u64,
 ) {
@@ -208,16 +234,15 @@ fn recognize_segment(
     recognizer.decode(&stream);
 
     if let Some(r) = stream.get_result() {
-        let text = r.text.trim().to_string();
-        if !text.is_empty()
-            && !text
+        let text_raw = r.text.trim().to_string();
+        if !text_raw.is_empty()
+            && !text_raw
                 .chars()
                 .all(|c| c.is_ascii_punctuation() || c.is_ascii_whitespace())
         {
-            let wall_start =
-                *base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
-            let wall_end = *base_wall
-                + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
+            let text_corrected = correction_engine.apply(&text_raw);
+            let wall_start = *base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
+            let wall_end = *base_wall + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
 
             if let Ok(mut segs) = segments.lock() {
                 segs.push(SegmentResult {
@@ -225,8 +250,27 @@ fn recognize_segment(
                     end: rel_end,
                     wall_start: wall_start.format("%Y-%m-%d %H:%M:%S").to_string(),
                     wall_end: wall_end.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    text,
+                    text: text_corrected.clone(),
                 });
+            }
+
+            if let Some(writer) = db_writer {
+                let event = DbEvent::InsertSegment {
+                    segment: NewSegment {
+                        session_id: session_id.to_string(),
+                        start_sec: rel_start,
+                        end_sec: rel_end,
+                        wall_start: wall_start.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        wall_end: wall_end.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        text_raw,
+                        text_corrected,
+                    },
+                };
+                if let Err(err) = writer.try_send(event) {
+                    if matches!(err, TrySendError::Full(_)) {
+                        eprintln!("[db-worker] queue full, dropping segment event");
+                    }
+                }
             }
         }
     }
@@ -266,10 +310,7 @@ fn list_input_devices() -> Result<Vec<InputDevice>, String> {
 }
 
 #[tauri::command]
-fn set_input_device(
-    device_name: Option<String>,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn set_input_device(device_name: Option<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change device while recording".to_string());
     }
@@ -327,31 +368,41 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
     eprintln!("[start_recording] starting at {now}");
 
+    let session_id = {
+        let db_guard = state.db.lock().map_err(|e| e.to_string())?;
+        let db = db_guard.as_ref().ok_or("Database not initialized")?;
+        db.create_session().map_err(|e| e.to_string())?
+    };
+    *state.current_session_id.lock().map_err(|e| e.to_string())? = Some(session_id.clone());
     let stop_signal = Arc::clone(&state.stop_signal);
     let recording = Arc::clone(&state.recording);
     let segments = Arc::clone(&state.segments);
     let recorded_audio = Arc::clone(&state.recorded_audio);
     let recognizer_arc = Arc::clone(&state.recognizer);
     let vad_arc = Arc::clone(&state.vad);
+    let correction_engine = Arc::clone(&state.correction_engine);
+    let db_writer = state.db_writer.lock().map_err(|e| e.to_string())?.as_ref().cloned();
+    let current_session_id = Arc::clone(&state.current_session_id);
     let anchor = RecordingAnchor {
         base_wall: now,
         audio_offset,
     };
-    let selected_device = state
-        .selected_device
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone();
+    let selected_device = state.selected_device.lock().map_err(|e| e.to_string())?.clone();
 
     std::thread::spawn(move || {
         let result = run_recording(
             recognizer,
             vad,
-            &stop_signal,
-            &segments,
-            &recorded_audio,
-            &anchor,
-            selected_device.as_deref(),
+            RecordingRuntime {
+                stop_signal: &stop_signal,
+                segments: &segments,
+                correction_engine: &correction_engine,
+                db_writer: db_writer.as_ref(),
+                session_id: &session_id,
+                recorded_audio: &recorded_audio,
+                anchor: &anchor,
+                selected_device: selected_device.as_deref(),
+            },
         );
 
         match result {
@@ -369,6 +420,14 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
         }
 
         recording.store(false, Ordering::SeqCst);
+        if let Some(writer) = db_writer.as_ref() {
+            let _ = writer.try_send(DbEvent::CloseSession {
+                session_id: session_id.clone(),
+            });
+        }
+        if let Ok(mut guard) = current_session_id.lock() {
+            *guard = None;
+        }
         eprintln!("[recording thread] stopped");
     });
 
@@ -378,27 +437,19 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
 fn run_recording(
     recognizer: OfflineRecognizer,
     vad: VoiceActivityDetector,
-    stop_signal: &AtomicBool,
-    segments: &Arc<Mutex<Vec<SegmentResult>>>,
-    recorded_audio: &Arc<Mutex<RollingAudioBuffer>>,
-    anchor: &RecordingAnchor,
-    selected_device: Option<&str>,
+    runtime: RecordingRuntime<'_>,
 ) -> Result<(OfflineRecognizer, VoiceActivityDetector), String> {
     let host = cpal::default_host();
-    let device = if let Some(name) = selected_device {
+    let device = if let Some(name) = runtime.selected_device {
         host.input_devices()
             .map_err(|e| format!("Cannot enumerate devices: {e}"))?
             .find(|d| d.name().ok().as_deref() == Some(name))
             .ok_or_else(|| format!("Device not found: {name}"))?
     } else {
-        host.default_input_device()
-            .ok_or("No default input device")?
+        host.default_input_device().ok_or("No default input device")?
     };
 
-    eprintln!(
-        "[recording] device: {:?}",
-        device.name().unwrap_or_default()
-    );
+    eprintln!("[recording] device: {:?}", device.name().unwrap_or_default());
 
     let supported = device
         .default_input_config()
@@ -423,7 +474,7 @@ fn run_recording(
     let mut vad_buf: Vec<f32> = Vec::new();
 
     loop {
-        if stop_signal.load(Ordering::Relaxed) {
+        if runtime.stop_signal.load(Ordering::Relaxed) {
             break;
         }
 
@@ -435,7 +486,7 @@ fn run_recording(
                     samples
                 };
 
-                if let Ok(mut audio) = recorded_audio.lock() {
+                if let Ok(mut audio) = runtime.recorded_audio.lock() {
                     audio.push_samples(&pcm);
                 }
 
@@ -449,9 +500,12 @@ fn run_recording(
                         recognize_segment(
                             &recognizer,
                             &segment,
-                            segments,
-                            &anchor.base_wall,
-                            anchor.audio_offset,
+                            runtime.segments,
+                            runtime.correction_engine,
+                            runtime.session_id,
+                            runtime.db_writer,
+                            &runtime.anchor.base_wall,
+                            runtime.anchor.audio_offset,
                         );
                         vad.pop();
                     }
@@ -480,14 +534,17 @@ fn run_recording(
         recognize_segment(
             &recognizer,
             &segment,
-            segments,
-            &anchor.base_wall,
-            anchor.audio_offset,
+            runtime.segments,
+            runtime.correction_engine,
+            runtime.session_id,
+            runtime.db_writer,
+            &runtime.anchor.base_wall,
+            runtime.anchor.audio_offset,
         );
         vad.pop();
     }
 
-    let seg_count = segments.lock().map(|s| s.len()).unwrap_or(0);
+    let seg_count = runtime.segments.lock().map(|s| s.len()).unwrap_or(0);
     eprintln!("[recording] flushed, total segments: {seg_count}");
 
     Ok((recognizer, vad))
@@ -505,11 +562,7 @@ fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
         return Err("Cannot clear while recording".to_string());
     }
     state.segments.lock().map_err(|e| e.to_string())?.clear();
-    state
-        .recorded_audio
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clear();
+    state.recorded_audio.lock().map_err(|e| e.to_string())?.clear();
     *state.start_wall_clock.lock().map_err(|e| e.to_string())? = None;
     *state.start_instant.lock().map_err(|e| e.to_string())? = None;
     eprintln!("[clear_results] cleared all segments and audio");
@@ -543,12 +596,92 @@ fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingSta
 }
 
 #[tauri::command]
-fn save_segment_as_wav(
-    path: String,
-    start: f32,
-    end: f32,
+fn list_sessions(
+    page: u32,
+    page_size: u32,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<commands::history::DbSessionDto>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::history::list_sessions(db, page, page_size)
+}
+
+#[tauri::command]
+fn list_session_segments(
+    session_id: String,
+    page: u32,
+    page_size: u32,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<commands::history::DbSegmentDto>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::history::list_session_segments(db, &session_id, page, page_size)
+}
+
+#[tauri::command]
+fn tail_session_segments(
+    session_id: String,
+    after_id: i64,
+    limit: u32,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<commands::history::DbSegmentDto>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::history::tail_session_segments(db, &session_id, after_id, limit)
+}
+
+#[tauri::command]
+fn list_correction_rules(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<commands::correction::CorrectionRuleDto>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::correction::list_correction_rules(db)
+}
+
+#[tauri::command]
+fn create_correction_rule(
+    source: String,
+    target: String,
+    priority: i32,
+    enabled: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::correction::create_correction_rule(db, &state.correction_engine, source, target, priority, enabled)
+}
+
+#[tauri::command]
+fn update_correction_rule(
+    id: i64,
+    source: String,
+    target: String,
+    priority: i32,
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::correction::update_correction_rule(db, &state.correction_engine, id, source, target, priority, enabled)
+}
+
+#[tauri::command]
+fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::correction::delete_correction_rule(db, &state.correction_engine, id)
+}
+
+#[tauri::command]
+fn reload_correction_rules(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    commands::correction::reload_correction_rules(db, &state.correction_engine)
+}
+
+#[tauri::command]
+fn save_segment_as_wav(path: String, start: f32, end: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
@@ -587,10 +720,7 @@ fn get_recorded_audio_path(state: tauri::State<'_, AppState>) -> Result<String, 
     let tmp_str = tmp.to_str().ok_or("Invalid temp path")?.to_string();
     let samples = audio.snapshot_all();
     write_wav(&tmp_str, &samples)?;
-    eprintln!(
-        "[get_recorded_audio_path] wrote {tmp_str} ({} samples)",
-        samples.len()
-    );
+    eprintln!("[get_recorded_audio_path] wrote {tmp_str} ({} samples)", samples.len());
     Ok(tmp_str)
 }
 
@@ -638,27 +768,18 @@ fn write_wav(path: &str, samples: &[f32]) -> Result<(), String> {
 
     use std::io::Write;
     w.write_all(b"RIFF").map_err(|e| e.to_string())?;
-    w.write_all(&file_size.to_le_bytes())
-        .map_err(|e| e.to_string())?;
+    w.write_all(&file_size.to_le_bytes()).map_err(|e| e.to_string())?;
     w.write_all(b"WAVE").map_err(|e| e.to_string())?;
     w.write_all(b"fmt ").map_err(|e| e.to_string())?;
-    w.write_all(&16u32.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    w.write_all(&1u16.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    w.write_all(&1u16.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    w.write_all(&16000u32.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    w.write_all(&byte_rate.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    w.write_all(&2u16.to_le_bytes())
-        .map_err(|e| e.to_string())?;
-    w.write_all(&16u16.to_le_bytes())
-        .map_err(|e| e.to_string())?;
+    w.write_all(&16u32.to_le_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(&1u16.to_le_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(&1u16.to_le_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(&16000u32.to_le_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(&byte_rate.to_le_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(&2u16.to_le_bytes()).map_err(|e| e.to_string())?;
+    w.write_all(&16u16.to_le_bytes()).map_err(|e| e.to_string())?;
     w.write_all(b"data").map_err(|e| e.to_string())?;
-    w.write_all(&data_size.to_le_bytes())
-        .map_err(|e| e.to_string())?;
+    w.write_all(&data_size.to_le_bytes()).map_err(|e| e.to_string())?;
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
         let pcm = (clamped * 32767.0) as i16;
@@ -683,11 +804,7 @@ struct InitStatus {
 #[tauri::command]
 fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
     let status = state.init_status.load(Ordering::Relaxed);
-    let error = state
-        .init_error
-        .lock()
-        .map(|e| e.clone())
-        .unwrap_or_default();
+    let error = state.init_error.lock().map(|e| e.clone()).unwrap_or_default();
     let num_threads = state.num_threads.load(Ordering::Relaxed);
     InitStatus {
         status,
@@ -702,11 +819,7 @@ fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
 
 #[tauri::command]
 fn get_settings(state: tauri::State<'_, AppState>) -> Result<VadSettings, String> {
-    state
-        .settings
-        .lock()
-        .map(|s| s.clone())
-        .map_err(|e| e.to_string())
+    state.settings.lock().map(|s| s.clone()).map_err(|e| e.to_string())
 }
 
 fn validate_settings(s: &VadSettings) -> Result<(), String> {
@@ -729,10 +842,7 @@ fn validate_settings(s: &VadSettings) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn apply_settings(
-    new_settings: VadSettings,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn apply_settings(new_settings: VadSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change settings while recording".to_string());
     }
@@ -839,19 +949,14 @@ fn resource_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
-fn build_models(
-    settings: &VadSettings,
-) -> Result<(OfflineRecognizer, VoiceActivityDetector, u32), String> {
+fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActivityDetector, u32), String> {
     let dir = resource_dir();
     let model_dir = dir.join(MODEL_NAME);
     let silero_vad_path = dir.join("silero_vad.onnx");
 
     eprintln!("[build_models] MODEL_TYPE={MODEL_TYPE}, MODEL_NAME={MODEL_NAME}");
     eprintln!("[build_models] resource_dir: {dir:?}");
-    eprintln!(
-        "[build_models] model_dir: {model_dir:?}, exists={}",
-        model_dir.exists()
-    );
+    eprintln!("[build_models] model_dir: {model_dir:?}, exists={}", model_dir.exists());
     if model_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&model_dir) {
             for entry in entries.flatten() {
@@ -959,6 +1064,9 @@ fn build_app_state() -> AppState {
         segments: Arc::new(Mutex::new(Vec::new())),
         recorded_audio: Arc::new(Mutex::new(RollingAudioBuffer::new())),
         db: Arc::new(Mutex::new(None)),
+        db_writer: Arc::new(Mutex::new(None)),
+        current_session_id: Arc::new(Mutex::new(None)),
+        correction_engine: Arc::new(CorrectionEngine::new()),
         start_wall_clock: Arc::new(Mutex::new(None)),
         start_instant: Arc::new(Mutex::new(None)),
         init_status: Arc::new(AtomicU8::new(0)),
@@ -1027,14 +1135,34 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .setup({
             let db_state = Arc::clone(&state.db);
+            let db_writer_state = Arc::clone(&state.db_writer);
+            let correction_engine = Arc::clone(&state.correction_engine);
             move |app| {
                 match app.path().app_data_dir() {
                     Ok(app_dir) => {
                         let db_path = app_dir.join("speech_history.db");
                         match db::SpeechDatabase::init(&db_path) {
                             Ok(db) => {
+                                let _ = commands::correction::reload_correction_rules(&db, &correction_engine);
+                                let (tx, rx) = mpsc::sync_channel::<DbEvent>(DB_EVENT_QUEUE_CAPACITY);
+                                let db_for_worker = db.clone();
+                                std::thread::spawn(move || {
+                                    while let Ok(event) = rx.recv() {
+                                        match event {
+                                            DbEvent::InsertSegment { segment } => {
+                                                let _ = db_for_worker.insert_segment(segment);
+                                            }
+                                            DbEvent::CloseSession { session_id } => {
+                                                let _ = db_for_worker.close_session(&session_id);
+                                            }
+                                        }
+                                    }
+                                });
                                 if let Ok(mut guard) = db_state.lock() {
                                     *guard = Some(db);
+                                }
+                                if let Ok(mut guard) = db_writer_state.lock() {
+                                    *guard = Some(tx);
                                 }
                             }
                             Err(err) => {
@@ -1058,6 +1186,9 @@ pub fn run() {
             stop_recording,
             clear_results,
             get_recording_state,
+            list_sessions,
+            list_session_segments,
+            tail_session_segments,
             save_segment_as_wav,
             save_all_audio,
             get_recorded_audio_path,
@@ -1065,6 +1196,11 @@ pub fn run() {
             get_init_status,
             get_settings,
             apply_settings,
+            list_correction_rules,
+            create_correction_rule,
+            update_correction_rule,
+            delete_correction_rule,
+            reload_correction_rules,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
