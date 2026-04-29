@@ -1,0 +1,23 @@
+[config]
+skip_core_tasks = true
+default_to_workspace = false
+
+[tasks.prod]
+command = "cargo"
+args = ["build", "--workspace", "--release", "--features", "prod"]
+
+[tasks.default]
+alias = "prod"
+
+[tasks.check]
+description = "Run all checks: fmt, clippy, and tests"
+dependencies = ["_check_fmt", "_check_clippy"]
+
+
+[tasks._check_fmt]
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks._check_clippy]
+command = "cargo"
+args = ["clippy", "--workspace", "--", "-D", "warnings"]
