@@ -63,7 +63,9 @@
                 <th>Start</th>
                 <th>End</th>
                 <th>Duration</th>
-                <th>Text</th>
+                <th>Raw</th>
+                <th>Optimized</th>
+                <th>English</th>
                 <th></th>
               </tr>
             </thead>
@@ -95,6 +97,23 @@
             Recognizer Threads (1 &ndash; 16)
             <input id="set-num-threads" type="number" min="1" max="16" step="1" />
           </label>
+          <label>
+            LLM Provider URL
+            <input id="set-provider-url" type="text" />
+          </label>
+          <label>
+            LLM API Key
+            <input id="set-api-key" type="password" />
+          </label>
+          <label>
+            LLM Model
+            <select id="set-model"></select>
+          </label>
+          <label>
+            Prompt Template
+            <textarea id="set-prompt-template" rows="5"></textarea>
+          </label>
+          <button id="refresh-models-btn" type="button">刷新模型列表</button>
           <div class="modal-actions">
             <button id="settings-apply">Apply</button>
             <button id="settings-cancel">Cancel</button>

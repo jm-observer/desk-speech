@@ -28,3 +28,4 @@ cpal = "0.16"
 
 # chrono: wall-clock timestamps for segment results.
 chrono = "0.4"
+async-openai = "0.36.1"

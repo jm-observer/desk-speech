@@ -118,6 +118,17 @@ impl SpeechDatabase {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::get_latest_rule_version(&conn)
     }
+
+    pub fn upsert_setting(&self, key: &str, value: &str) -> Result<()> {
+        let now = now_str();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        repository::upsert_setting(&conn, key, value, &now)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        repository::get_setting(&conn, key)
+    }
 }
 
 fn now_str() -> String {

@@ -372,7 +372,11 @@ th {
   margin-bottom: 0.8em;
 }
 
-.modal input[type="number"] {
+.modal input[type="number"],
+.modal input[type="text"],
+.modal input[type="password"],
+.modal select,
+.modal textarea {
   display: block;
   width: 100%;
   margin-top: 0.3em;
@@ -500,7 +504,11 @@ th {
     color: #cbd5e1;
   }
 
-  .modal input[type="number"] {
+  .modal input[type="number"],
+.modal input[type="text"],
+.modal input[type="password"],
+.modal select,
+.modal textarea {
     background-color: #2f2f2f;
     border-color: #555;
     color: #f6f6f6;

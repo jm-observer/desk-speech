@@ -5,6 +5,8 @@ mod commands {
 }
 mod correction;
 pub mod db;
+mod llm_client;
+mod llm_settings;
 mod model_registry;
 
 use audio_buffer::{RollingAudioBuffer, SAMPLE_RATE};
@@ -20,10 +22,13 @@ use std::time::{Duration, Instant};
 
 use crate::correction::CorrectionEngine;
 use crate::db::repository::{NewLlmResult, NewSegment};
+use crate::llm_client::{list_models as llm_list_models, model_cache_valid, postprocess_text, CachedModels};
+use crate::llm_settings::{validate_llm_settings, LlmSettings};
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use tauri::Manager;
+use log::error;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
@@ -35,6 +40,7 @@ enum DbEvent {
     InsertSegment { segment: NewSegment },
     MarkRunning { session_id: String, revision: i64 },
     MarkSkippedBefore { session_id: String, revision: i64 },
+    MarkSkipped { session_id: String, revision: i64 },
     MarkFailed { session_id: String, revision: i64 },
     SaveLlmResult {
         session_id: String,
@@ -134,7 +140,27 @@ struct AppState {
     next_realtime_segment_id: Arc<AtomicU64>,
     next_revision: Arc<AtomicU64>,
     settings: Arc<Mutex<VadSettings>>,
+    llm_settings: Arc<Mutex<LlmSettings>>,
+    llm_models_cache: Arc<Mutex<Option<CachedModels>>>,
     selected_device: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct CombinedSettings {
+    threshold: f32,
+    min_silence_duration: f32,
+    min_speech_duration: f32,
+    max_speech_duration: f32,
+    num_threads: i32,
+    provider_url: String,
+    api_key: String,
+    selected_model: String,
+    prompt_template: String,
+}
+
+#[derive(Serialize)]
+struct ModelListResponse {
+    models: Vec<String>,
 }
 
 struct RecordingAnchor {
@@ -148,6 +174,8 @@ struct RecordingRuntime<'a> {
     next_realtime_segment_id: &'a AtomicU64,
     next_revision: &'a AtomicU64,
     correction_engine: &'a CorrectionEngine,
+    app_state: &'a Arc<AppState>,
+    app_handle: &'a tauri::AppHandle,
     db_writer: Option<&'a SyncSender<DbEvent>>,
     session_id: &'a str,
     recorded_audio: &'a Arc<Mutex<RollingAudioBuffer>>,
@@ -258,6 +286,8 @@ fn recognize_segment(
     next_realtime_segment_id: &AtomicU64,
     next_revision: &AtomicU64,
     correction_engine: &CorrectionEngine,
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
     session_id: &str,
     db_writer: Option<&SyncSender<DbEvent>>,
     base_wall: &chrono::DateTime<Local>,
@@ -326,8 +356,10 @@ fn recognize_segment(
                     }
                 }
 
-                spawn_llm_postprocess_task(
+                spawn_llm_postprocess_task_v2(
                     writer.clone(),
+                    Arc::clone(state),
+                    app_handle.clone(),
                     session_id.to_string(),
                     revision,
                     text_corrected,
@@ -337,7 +369,14 @@ fn recognize_segment(
     }
 }
 
-fn spawn_llm_postprocess_task(writer: SyncSender<DbEvent>, session_id: String, revision: i64, text_corrected: String) {
+fn spawn_llm_postprocess_task_v2(
+    writer: SyncSender<DbEvent>,
+    state: Arc<AppState>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    revision: i64,
+    text_corrected: String,
+) {
     tauri::async_runtime::spawn(async move {
         let _ = writer.try_send(DbEvent::MarkSkippedBefore {
             session_id: session_id.clone(),
@@ -348,20 +387,48 @@ fn spawn_llm_postprocess_task(writer: SyncSender<DbEvent>, session_id: String, r
             revision,
         });
 
-        // Plan 1/2 骨架：当前用本地转换模拟后处理，后续 Plan 3 接入真实 LLM。
-        let optimized = text_corrected.clone();
-        let english = format!("[TODO-EN] {text_corrected}");
+        let settings = match state.llm_settings.lock() {
+            Ok(s) => s.clone(),
+            Err(err) => {
+                error!("llm settings lock failed: {}", err);
+                let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+                return;
+            }
+        };
+
+        if settings.api_key.trim().is_empty() || settings.selected_model.trim().is_empty() {
+            let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+            return;
+        }
+
+        let (optimized, english) = match postprocess_text(&settings, &text_corrected).await {
+            Ok(v) => v,
+            Err(err) => {
+                error!("llm postprocess failed: {}", err);
+                let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+                return;
+            }
+        };
+
+        let latest_revision = state.next_revision.load(Ordering::Relaxed) as i64 - 1;
+        if revision < latest_revision {
+            let _ = writer.try_send(DbEvent::MarkSkipped { session_id, revision });
+            return;
+        }
+
         let result = DbEvent::SaveLlmResult {
             session_id: session_id.clone(),
             revision,
             text_optimized: optimized,
-            text_english: english,
+            text_english: english.clone(),
         };
         if writer.try_send(result).is_err() {
-            let _ = writer.try_send(DbEvent::MarkFailed {
-                session_id,
-                revision,
-            });
+            let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+            return;
+        }
+
+        if let Err(err) = app_handle.clipboard().write_text(english) {
+            error!("copy english to clipboard failed: {}", err);
         }
     });
 }
@@ -422,7 +489,7 @@ fn get_selected_device(state: tauri::State<'_, AppState>) -> Result<Option<Strin
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.recording.swap(true, Ordering::SeqCst) {
         return Err("Already recording".to_string());
     }
@@ -471,6 +538,29 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let recognizer_arc = Arc::clone(&state.recognizer);
     let vad_arc = Arc::clone(&state.vad);
     let correction_engine = Arc::clone(&state.correction_engine);
+    let app_state = Arc::new(AppState {
+        recognizer: Arc::clone(&state.recognizer),
+        vad: Arc::clone(&state.vad),
+        recording: Arc::clone(&state.recording),
+        stop_signal: Arc::clone(&state.stop_signal),
+        segments: Arc::clone(&state.segments),
+        recorded_audio: Arc::clone(&state.recorded_audio),
+        db: Arc::clone(&state.db),
+        db_writer: Arc::clone(&state.db_writer),
+        current_session_id: Arc::clone(&state.current_session_id),
+        correction_engine: Arc::clone(&state.correction_engine),
+        start_wall_clock: Arc::clone(&state.start_wall_clock),
+        start_instant: Arc::clone(&state.start_instant),
+        init_status: Arc::clone(&state.init_status),
+        init_error: Arc::clone(&state.init_error),
+        num_threads: Arc::clone(&state.num_threads),
+        next_realtime_segment_id: Arc::clone(&state.next_realtime_segment_id),
+        next_revision: Arc::clone(&state.next_revision),
+        settings: Arc::clone(&state.settings),
+        llm_settings: Arc::clone(&state.llm_settings),
+        llm_models_cache: Arc::clone(&state.llm_models_cache),
+        selected_device: Arc::clone(&state.selected_device),
+    });
     let db_writer = state.db_writer.lock().map_err(|e| e.to_string())?.as_ref().cloned();
     let current_session_id = Arc::clone(&state.current_session_id);
     let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
@@ -491,6 +581,8 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
                 next_realtime_segment_id: &next_realtime_segment_id,
                 next_revision: &next_revision,
                 correction_engine: &correction_engine,
+                app_state: &app_state,
+                app_handle: &app,
                 db_writer: db_writer.as_ref(),
                 session_id: &session_id,
                 recorded_audio: &recorded_audio,
@@ -598,6 +690,8 @@ fn run_recording(
                             runtime.next_realtime_segment_id,
                             runtime.next_revision,
                             runtime.correction_engine,
+                            runtime.app_state,
+                            runtime.app_handle,
                             runtime.session_id,
                             runtime.db_writer,
                             &runtime.anchor.base_wall,
@@ -634,6 +728,8 @@ fn run_recording(
             runtime.next_realtime_segment_id,
             runtime.next_revision,
             runtime.correction_engine,
+            runtime.app_state,
+            runtime.app_handle,
             runtime.session_id,
             runtime.db_writer,
             &runtime.anchor.base_wall,
@@ -921,8 +1017,20 @@ fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn get_settings(state: tauri::State<'_, AppState>) -> Result<VadSettings, String> {
-    state.settings.lock().map(|s| s.clone()).map_err(|e| e.to_string())
+fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, String> {
+    let vad = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    let llm = state.llm_settings.lock().map_err(|e| e.to_string())?.clone();
+    Ok(CombinedSettings {
+        threshold: vad.threshold,
+        min_silence_duration: vad.min_silence_duration,
+        min_speech_duration: vad.min_speech_duration,
+        max_speech_duration: vad.max_speech_duration,
+        num_threads: vad.num_threads,
+        provider_url: llm.provider_url,
+        api_key: llm.api_key,
+        selected_model: llm.selected_model,
+        prompt_template: llm.prompt_template,
+    })
 }
 
 fn validate_settings(s: &VadSettings) -> Result<(), String> {
@@ -945,7 +1053,7 @@ fn validate_settings(s: &VadSettings) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn apply_settings(new_settings: VadSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change settings while recording".to_string());
     }
@@ -954,17 +1062,48 @@ fn apply_settings(new_settings: VadSettings, state: tauri::State<'_, AppState>) 
         return Err("Models are still loading, please wait".to_string());
     }
 
-    validate_settings(&new_settings)?;
+    let new_vad_settings = VadSettings {
+        threshold: new_settings.threshold,
+        min_silence_duration: new_settings.min_silence_duration,
+        min_speech_duration: new_settings.min_speech_duration,
+        max_speech_duration: new_settings.max_speech_duration,
+        num_threads: new_settings.num_threads,
+    };
+    let new_llm_settings = LlmSettings {
+        provider_url: new_settings.provider_url,
+        api_key: new_settings.api_key,
+        selected_model: new_settings.selected_model,
+        prompt_template: new_settings.prompt_template,
+    };
+
+    validate_settings(&new_vad_settings)?;
+    validate_llm_settings(&new_llm_settings)?;
 
     {
-        let current = state.settings.lock().map_err(|e| e.to_string())?;
-        if *current == new_settings {
+        let current_vad = state.settings.lock().map_err(|e| e.to_string())?;
+        let current_llm = state.llm_settings.lock().map_err(|e| e.to_string())?;
+        if *current_vad == new_vad_settings && *current_llm == new_llm_settings {
             return Ok(());
         }
     }
 
     state.init_status.store(0, Ordering::Relaxed);
-    *state.settings.lock().map_err(|e| e.to_string())? = new_settings.clone();
+    *state.settings.lock().map_err(|e| e.to_string())? = new_vad_settings.clone();
+    *state.llm_settings.lock().map_err(|e| e.to_string())? = new_llm_settings.clone();
+    *state.llm_models_cache.lock().map_err(|e| e.to_string())? = None;
+
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let db = db.as_ref().ok_or("Database not initialized")?;
+        db.upsert_setting("llm.provider_url", &new_llm_settings.provider_url)
+            .map_err(|e| e.to_string())?;
+        db.upsert_setting("llm.api_key", &new_llm_settings.api_key)
+            .map_err(|e| e.to_string())?;
+        db.upsert_setting("llm.selected_model", &new_llm_settings.selected_model)
+            .map_err(|e| e.to_string())?;
+        db.upsert_setting("llm.prompt_template", &new_llm_settings.prompt_template)
+            .map_err(|e| e.to_string())?;
+    }
 
     let recognizer_arc = Arc::clone(&state.recognizer);
     let vad_arc = Arc::clone(&state.vad);
@@ -974,7 +1113,7 @@ fn apply_settings(new_settings: VadSettings, state: tauri::State<'_, AppState>) 
 
     std::thread::spawn(move || {
         eprintln!("[apply_settings] rebuilding models...");
-        match build_models(&new_settings) {
+        match build_models(&new_vad_settings) {
             Ok((rec, vad, threads)) => {
                 eprintln!("[apply_settings] models rebuilt, num_threads={threads}");
                 let r_ok = recognizer_arc
@@ -1011,6 +1150,27 @@ fn apply_settings(new_settings: VadSettings, state: tauri::State<'_, AppState>) 
     });
 
     Ok(())
+}
+
+#[tauri::command]
+async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result<ModelListResponse, String> {
+    let settings = state.llm_settings.lock().map_err(|e| e.to_string())?.clone();
+    validate_llm_settings(&settings)?;
+
+    if let Some(cache) = state.llm_models_cache.lock().map_err(|e| e.to_string())?.as_ref() {
+        if model_cache_valid(cache) {
+            return Ok(ModelListResponse {
+                models: cache.models.clone(),
+            });
+        }
+    }
+
+    let fetched = llm_list_models(&settings).await?;
+    *state.llm_models_cache.lock().map_err(|e| e.to_string())? = Some(CachedModels {
+        fetched_at: Instant::now(),
+        models: fetched.clone(),
+    });
+    Ok(ModelListResponse { models: fetched })
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1338,8 @@ fn build_app_state() -> AppState {
         next_realtime_segment_id: Arc::new(AtomicU64::new(1)),
         next_revision: Arc::new(AtomicU64::new(1)),
         settings: Arc::new(Mutex::new(VadSettings::default())),
+        llm_settings: Arc::new(Mutex::new(LlmSettings::default())),
+        llm_models_cache: Arc::new(Mutex::new(None)),
         selected_device: Arc::new(Mutex::new(None)),
     }
 }
@@ -1250,6 +1412,26 @@ pub fn run() {
                         match db::SpeechDatabase::init(&db_path) {
                             Ok(db) => {
                                 let _ = commands::correction::reload_correction_rules(&db, &correction_engine);
+                                if let Ok(Some(v)) = db.get_setting("llm.provider_url") {
+                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                        s.provider_url = v;
+                                    }
+                                }
+                                if let Ok(Some(v)) = db.get_setting("llm.api_key") {
+                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                        s.api_key = v;
+                                    }
+                                }
+                                if let Ok(Some(v)) = db.get_setting("llm.selected_model") {
+                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                        s.selected_model = v;
+                                    }
+                                }
+                                if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
+                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                        s.prompt_template = v;
+                                    }
+                                }
                                 let (tx, rx) = mpsc::sync_channel::<DbEvent>(DB_EVENT_QUEUE_CAPACITY);
                                 let db_for_worker = db.clone();
                                 std::thread::spawn(move || {
@@ -1263,6 +1445,9 @@ pub fn run() {
                                             }
                                             DbEvent::MarkSkippedBefore { session_id, revision } => {
                                                 let _ = db_for_worker.mark_old_revisions_skipped(&session_id, revision);
+                                            }
+                                            DbEvent::MarkSkipped { session_id, revision } => {
+                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "skipped");
                                             }
                                             DbEvent::MarkFailed { session_id, revision } => {
                                                 let _ = db_for_worker.update_opt_status(&session_id, revision, "failed");
@@ -1326,6 +1511,7 @@ pub fn run() {
             get_init_status,
             get_settings,
             apply_settings,
+            list_llm_models,
             list_correction_rules,
             create_correction_rule,
             update_correction_rule,
