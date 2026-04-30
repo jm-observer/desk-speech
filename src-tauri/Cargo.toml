@@ -25,7 +25,8 @@ uuid = { version = "1", features = ["v4"] }
 
 # cpal: cross-platform audio I/O — works on Linux (ALSA/PulseAudio), macOS (CoreAudio), Windows (WASAPI).
 cpal = "0.16"
-
+log = "0.4.29"
 # chrono: wall-clock timestamps for segment results.
 chrono = "0.4"
-async-openai = "0.36.1"
+async-openai = { version = "0.36.1", features = ["chat-completion", "model"] }
+serde_json = "1.0.149"

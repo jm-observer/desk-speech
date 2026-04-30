@@ -27,8 +27,8 @@ use crate::llm_settings::{validate_llm_settings, LlmSettings};
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
-use tauri::Manager;
 use log::error;
+use tauri::Manager;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
@@ -37,18 +37,34 @@ const MERGE_MAX_GAP_SEC: f32 = 5.6;
 
 #[derive(Clone)]
 enum DbEvent {
-    InsertSegment { segment: NewSegment },
-    MarkRunning { session_id: String, revision: i64 },
-    MarkSkippedBefore { session_id: String, revision: i64 },
-    MarkSkipped { session_id: String, revision: i64 },
-    MarkFailed { session_id: String, revision: i64 },
+    InsertSegment {
+        segment: NewSegment,
+    },
+    MarkRunning {
+        session_id: String,
+        revision: i64,
+    },
+    MarkSkippedBefore {
+        session_id: String,
+        revision: i64,
+    },
+    MarkSkipped {
+        session_id: String,
+        revision: i64,
+    },
+    MarkFailed {
+        session_id: String,
+        revision: i64,
+    },
     SaveLlmResult {
         session_id: String,
         revision: i64,
         text_optimized: String,
         text_english: String,
     },
-    CloseSession { session_id: String },
+    CloseSession {
+        session_id: String,
+    },
 }
 
 fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResult) -> bool {
@@ -58,7 +74,7 @@ fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResu
 
     let gap_sec = incoming.start - last.end;
     let merged_duration = incoming.end - last.start;
-    if gap_sec < 0.0 || gap_sec > MERGE_MAX_GAP_SEC || merged_duration > MERGE_MAX_DURATION_SEC {
+    if !(0.0..=MERGE_MAX_GAP_SEC).contains(&gap_sec) || merged_duration > MERGE_MAX_DURATION_SEC {
         return false;
     }
 
@@ -183,6 +199,19 @@ struct RecordingRuntime<'a> {
     selected_device: Option<&'a str>,
 }
 
+struct RecognizeContext<'a> {
+    segments: &'a Arc<Mutex<Vec<SegmentResult>>>,
+    next_realtime_segment_id: &'a AtomicU64,
+    next_revision: &'a AtomicU64,
+    correction_engine: &'a CorrectionEngine,
+    state: &'a Arc<AppState>,
+    app_handle: &'a tauri::AppHandle,
+    session_id: &'a str,
+    db_writer: Option<&'a SyncSender<DbEvent>>,
+    base_wall: &'a chrono::DateTime<Local>,
+    audio_offset_samples: u64,
+}
+
 // ---------------------------------------------------------------------------
 // cpal microphone capture
 // ---------------------------------------------------------------------------
@@ -279,20 +308,7 @@ fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Resu
 // Recognize a single VAD speech segment
 // ---------------------------------------------------------------------------
 
-fn recognize_segment(
-    recognizer: &OfflineRecognizer,
-    segment: &sherpa_onnx::SpeechSegment,
-    segments: &Arc<Mutex<Vec<SegmentResult>>>,
-    next_realtime_segment_id: &AtomicU64,
-    next_revision: &AtomicU64,
-    correction_engine: &CorrectionEngine,
-    state: &Arc<AppState>,
-    app_handle: &tauri::AppHandle,
-    session_id: &str,
-    db_writer: Option<&SyncSender<DbEvent>>,
-    base_wall: &chrono::DateTime<Local>,
-    audio_offset_samples: u64,
-) {
+fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::SpeechSegment, ctx: &RecognizeContext<'_>) {
     let samples = segment.samples();
     let duration = samples.len() as f32 / SAMPLE_RATE as f32;
     if duration < 0.1 {
@@ -300,7 +316,7 @@ fn recognize_segment(
     }
 
     let vad_start = segment.start() as f32 / SAMPLE_RATE as f32;
-    let offset_secs = audio_offset_samples as f32 / SAMPLE_RATE as f32;
+    let offset_secs = ctx.audio_offset_samples as f32 / SAMPLE_RATE as f32;
     let rel_start = offset_secs + vad_start;
     let rel_end = rel_start + duration;
 
@@ -315,15 +331,15 @@ fn recognize_segment(
                 .chars()
                 .all(|c| c.is_ascii_punctuation() || c.is_ascii_whitespace())
         {
-            let text_corrected = correction_engine.apply(&text_raw);
-            let revision = next_revision.fetch_add(1, Ordering::Relaxed) as i64;
-            let wall_start = *base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
-            let wall_end = *base_wall + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
+            let text_corrected = ctx.correction_engine.apply(&text_raw);
+            let revision = ctx.next_revision.fetch_add(1, Ordering::Relaxed) as i64;
+            let wall_start = *ctx.base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
+            let wall_end = *ctx.base_wall + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
 
             let wall_start_fmt = wall_start.format("%Y-%m-%d %H:%M:%S").to_string();
             let wall_end_fmt = wall_end.format("%Y-%m-%d %H:%M:%S").to_string();
             let new_segment = SegmentResult {
-                segment_id: next_realtime_segment_id.fetch_add(1, Ordering::Relaxed),
+                segment_id: ctx.next_realtime_segment_id.fetch_add(1, Ordering::Relaxed),
                 update_type: SegmentUpdateType::Append,
                 start: rel_start,
                 end: rel_end,
@@ -332,16 +348,16 @@ fn recognize_segment(
                 text: text_corrected.clone(),
             };
 
-            if let Ok(mut segs) = segments.lock() {
+            if let Ok(mut segs) = ctx.segments.lock() {
                 if !merge_segment_in_place(&mut segs, &new_segment) {
                     segs.push(new_segment);
                 }
             }
 
-            if let Some(writer) = db_writer {
+            if let Some(writer) = ctx.db_writer {
                 let event = DbEvent::InsertSegment {
                     segment: NewSegment {
-                        session_id: session_id.to_string(),
+                        session_id: ctx.session_id.to_string(),
                         revision,
                         start_sec: rel_start,
                         end_sec: rel_end,
@@ -358,9 +374,9 @@ fn recognize_segment(
 
                 spawn_llm_postprocess_task_v2(
                     writer.clone(),
-                    Arc::clone(state),
-                    app_handle.clone(),
-                    session_id.to_string(),
+                    Arc::clone(ctx.state),
+                    ctx.app_handle.clone(),
+                    ctx.session_id.to_string(),
                     revision,
                     text_corrected,
                 );
@@ -683,20 +699,19 @@ fn run_recording(
                     vad_buf.drain(..window_size);
 
                     while let Some(segment) = vad.front() {
-                        recognize_segment(
-                            &recognizer,
-                            &segment,
-                            runtime.segments,
-                            runtime.next_realtime_segment_id,
-                            runtime.next_revision,
-                            runtime.correction_engine,
-                            runtime.app_state,
-                            runtime.app_handle,
-                            runtime.session_id,
-                            runtime.db_writer,
-                            &runtime.anchor.base_wall,
-                            runtime.anchor.audio_offset,
-                        );
+                        let recognize_ctx = RecognizeContext {
+                            segments: runtime.segments,
+                            next_realtime_segment_id: runtime.next_realtime_segment_id,
+                            next_revision: runtime.next_revision,
+                            correction_engine: runtime.correction_engine,
+                            state: runtime.app_state,
+                            app_handle: runtime.app_handle,
+                            session_id: runtime.session_id,
+                            db_writer: runtime.db_writer,
+                            base_wall: &runtime.anchor.base_wall,
+                            audio_offset_samples: runtime.anchor.audio_offset,
+                        };
+                        recognize_segment(&recognizer, &segment, &recognize_ctx);
                         vad.pop();
                     }
                 }
@@ -721,20 +736,19 @@ fn run_recording(
     // Flush VAD unconditionally — it may have buffered speech internally
     vad.flush();
     while let Some(segment) = vad.front() {
-        recognize_segment(
-            &recognizer,
-            &segment,
-            runtime.segments,
-            runtime.next_realtime_segment_id,
-            runtime.next_revision,
-            runtime.correction_engine,
-            runtime.app_state,
-            runtime.app_handle,
-            runtime.session_id,
-            runtime.db_writer,
-            &runtime.anchor.base_wall,
-            runtime.anchor.audio_offset,
-        );
+        let recognize_ctx = RecognizeContext {
+            segments: runtime.segments,
+            next_realtime_segment_id: runtime.next_realtime_segment_id,
+            next_revision: runtime.next_revision,
+            correction_engine: runtime.correction_engine,
+            state: runtime.app_state,
+            app_handle: runtime.app_handle,
+            session_id: runtime.session_id,
+            db_writer: runtime.db_writer,
+            base_wall: &runtime.anchor.base_wall,
+            audio_offset_samples: runtime.anchor.audio_offset,
+        };
+        recognize_segment(&recognizer, &segment, &recognize_ctx);
         vad.pop();
     }
 
@@ -1405,6 +1419,7 @@ pub fn run() {
             let db_state = Arc::clone(&state.db);
             let db_writer_state = Arc::clone(&state.db_writer);
             let correction_engine = Arc::clone(&state.correction_engine);
+            let llm_settings_state = Arc::clone(&state.llm_settings);
             move |app| {
                 match app.path().app_data_dir() {
                     Ok(app_dir) => {
@@ -1413,22 +1428,22 @@ pub fn run() {
                             Ok(db) => {
                                 let _ = commands::correction::reload_correction_rules(&db, &correction_engine);
                                 if let Ok(Some(v)) = db.get_setting("llm.provider_url") {
-                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
                                         s.provider_url = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.api_key") {
-                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
                                         s.api_key = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.selected_model") {
-                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
                                         s.selected_model = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
-                                    if let Ok(mut s) = state.llm_settings.lock() {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
                                         s.prompt_template = v;
                                     }
                                 }
@@ -1441,16 +1456,19 @@ pub fn run() {
                                                 let _ = db_for_worker.insert_segment(segment);
                                             }
                                             DbEvent::MarkRunning { session_id, revision } => {
-                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "running");
+                                                let _ =
+                                                    db_for_worker.update_opt_status(&session_id, revision, "running");
                                             }
                                             DbEvent::MarkSkippedBefore { session_id, revision } => {
                                                 let _ = db_for_worker.mark_old_revisions_skipped(&session_id, revision);
                                             }
                                             DbEvent::MarkSkipped { session_id, revision } => {
-                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "skipped");
+                                                let _ =
+                                                    db_for_worker.update_opt_status(&session_id, revision, "skipped");
                                             }
                                             DbEvent::MarkFailed { session_id, revision } => {
-                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "failed");
+                                                let _ =
+                                                    db_for_worker.update_opt_status(&session_id, revision, "failed");
                                             }
                                             DbEvent::SaveLlmResult {
                                                 session_id,

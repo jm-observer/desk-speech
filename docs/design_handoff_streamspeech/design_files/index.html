@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>StreamSpeech · 离线语音识别</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-canvas: #f6f8f6;
+    --bg-app: #fbfcfb;
+    --bg-card: #ffffff;
+    --bg-soft: #f1f5f2;
+    --bg-softer: #f7f9f7;
+    --line: #e6ece7;
+    --line-strong: #d6ddd7;
+    --ink: #1d2622;
+    --ink-2: #4a5651;
+    --ink-3: #7a857f;
+    --ink-4: #a4ada8;
+    --primary: #1aa181;        /* mint/teal */
+    --primary-soft: #e6f6f0;
+    --primary-softer: #f1faf6;
+    --primary-deep: #138a6d;
+    --accent: #f6c46a;
+    --danger: #e0584a;
+    --danger-soft: #fbeae7;
+    --warning: #c98a2b;
+    --shadow-sm: 0 1px 2px rgba(20, 40, 32, 0.04), 0 1px 1px rgba(20, 40, 32, 0.03);
+    --shadow-md: 0 4px 14px rgba(20, 40, 32, 0.05), 0 1px 2px rgba(20, 40, 32, 0.04);
+    --shadow-lg: 0 18px 50px rgba(20, 40, 32, 0.10), 0 4px 14px rgba(20, 40, 32, 0.05);
+    --radius-sm: 8px;
+    --radius: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 20px;
+    --gap: 12px;
+    --font-sans: "Noto Sans SC", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: "Geist", "Noto Sans SC", -apple-system, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    color: var(--ink);
+    background: var(--bg-canvas);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "ss01", "cv11";
+    overflow: hidden;
+  }
+  #root { height: 100vh; }
+
+  button { font: inherit; color: inherit; }
+  input, select, textarea { font: inherit; color: inherit; }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(30, 50, 40, 0.12); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(30, 50, 40, 0.22); border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  @keyframes pulseDot {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.6); opacity: 0; }
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="src/icons.jsx"></script>
+<script type="text/babel" src="src/primitives.jsx"></script>
+<script type="text/babel" src="src/data.jsx"></script>
+<script type="text/babel" src="src/Waveform.jsx"></script>
+<script type="text/babel" src="src/SegmentList.jsx"></script>
+<script type="text/babel" src="src/AudioPlayer.jsx"></script>
+<script type="text/babel" src="src/ControlPanel.jsx"></script>
+<script type="text/babel" src="src/SettingsModal.jsx"></script>
+<script type="text/babel" src="src/RulesModal.jsx"></script>
+<script type="text/babel" src="src/Toast.jsx"></script>
+<script type="text/babel" src="src/App.jsx"></script>
+</body>
+</html>

@@ -1,7 +1,7 @@
-#[path = "../src/db/mod.rs"]
-mod db;
 #[path = "../src/correction.rs"]
 mod correction;
+#[path = "../src/db/mod.rs"]
+mod db;
 
 use correction::CorrectionEngine;
 use db::repository::CorrectionRule;
@@ -36,9 +36,7 @@ fn ignores_disabled_rules_after_reload() {
     engine.reload(vec![mk_rule(1, "foo", "bar", true, 1)]).unwrap();
     assert_eq!(engine.apply("foo"), "bar");
 
-    engine
-        .reload(vec![mk_rule(1, "foo", "bar", false, 1)])
-        .unwrap();
+    engine.reload(vec![mk_rule(1, "foo", "bar", false, 1)]).unwrap();
     assert_eq!(engine.apply("foo"), "foo");
 }
 

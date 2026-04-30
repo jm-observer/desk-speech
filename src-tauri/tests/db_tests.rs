@@ -19,12 +19,12 @@ fn initializes_and_migrates_schema() {
 
     db.insert_segment(NewSegment {
         session_id: session_id.clone(),
+        revision: 1,
         start_sec: 0.0,
         end_sec: 1.0,
         wall_start: "2026-04-29 10:00:00".to_string(),
         wall_end: "2026-04-29 10:00:01".to_string(),
         text_raw: "hello".to_string(),
-        text_corrected: "hello".to_string(),
     })
     .unwrap();
 
@@ -45,12 +45,12 @@ fn supports_rule_version_and_tail_query() {
     for i in 0..3 {
         db.insert_segment(NewSegment {
             session_id: session_id.clone(),
+            revision: i as i64 + 1,
             start_sec: i as f32,
             end_sec: i as f32 + 0.5,
             wall_start: format!("2026-04-29 10:00:0{i}"),
             wall_end: format!("2026-04-29 10:00:0{}", i + 1),
             text_raw: format!("raw-{i}"),
-            text_corrected: format!("ok-{i}"),
         })
         .unwrap();
     }

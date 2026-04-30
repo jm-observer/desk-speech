@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
 use async_openai::config::OpenAIConfig;
-use async_openai::types::{
+use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
-    CreateChatCompletionRequestArgs,
+    CreateChatCompletionRequestArgs, ResponseFormat,
 };
 use async_openai::Client;
 use serde::Deserialize;
@@ -50,7 +50,7 @@ pub async fn postprocess_text(settings: &LlmSettings, input_text: &str) -> Resul
     let request = CreateChatCompletionRequestArgs::default()
         .model(settings.selected_model.clone())
         .messages(vec![system_message, user_message])
-        .response_format(async_openai::types::ResponseFormat::JsonObject)
+        .response_format(ResponseFormat::JsonObject)
         .build()
         .map_err(|e| e.to_string())?;
 
