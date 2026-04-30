@@ -7,20 +7,33 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS segments (
+CREATE TABLE IF NOT EXISTS asr_raw_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
     start_sec REAL NOT NULL,
     end_sec REAL NOT NULL,
     wall_start TEXT NOT NULL,
     wall_end TEXT NOT NULL,
     text_raw TEXT NOT NULL,
-    text_corrected TEXT NOT NULL,
+    opt_status TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    FOREIGN KEY(session_id) REFERENCES sessions(id)
+    FOREIGN KEY(session_id) REFERENCES sessions(id),
+    UNIQUE(session_id, revision)
 );
 
-CREATE INDEX IF NOT EXISTS idx_segments_session_time ON segments(session_id, start_sec);
+CREATE INDEX IF NOT EXISTS idx_asr_raw_records_session_time ON asr_raw_records(session_id, start_sec);
+
+CREATE TABLE IF NOT EXISTS asr_llm_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    text_optimized TEXT NOT NULL,
+    text_english TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id),
+    UNIQUE(session_id, revision)
+);
 
 CREATE TABLE IF NOT EXISTS correction_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

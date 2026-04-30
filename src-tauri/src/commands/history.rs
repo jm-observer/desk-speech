@@ -16,12 +16,15 @@ pub struct DbSessionDto {
 pub struct DbSegmentDto {
     pub id: i64,
     pub session_id: String,
+    pub revision: i64,
     pub start_sec: f32,
     pub end_sec: f32,
     pub wall_start: String,
     pub wall_end: String,
     pub text_raw: String,
-    pub text_corrected: String,
+    pub opt_status: String,
+    pub text_optimized: Option<String>,
+    pub text_english: Option<String>,
     pub created_at: String,
 }
 
@@ -80,12 +83,15 @@ fn to_segment_dto(row: SegmentRow) -> DbSegmentDto {
     DbSegmentDto {
         id: row.id,
         session_id: row.session_id,
+        revision: row.revision,
         start_sec: row.start_sec,
         end_sec: row.end_sec,
         wall_start: row.wall_start,
         wall_end: row.wall_end,
         text_raw: row.text_raw,
-        text_corrected: row.text_corrected,
+        opt_status: row.opt_status,
+        text_optimized: row.text_optimized,
+        text_english: row.text_english,
         created_at: row.created_at,
     }
 }

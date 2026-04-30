@@ -4,12 +4,20 @@ use rusqlite::{params, Connection};
 #[derive(Clone, Debug)]
 pub struct NewSegment {
     pub session_id: String,
+    pub revision: i64,
     pub start_sec: f32,
     pub end_sec: f32,
     pub wall_start: String,
     pub wall_end: String,
     pub text_raw: String,
-    pub text_corrected: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewLlmResult {
+    pub session_id: String,
+    pub revision: i64,
+    pub text_optimized: String,
+    pub text_english: String,
 }
 
 #[derive(Clone, Debug)]
@@ -34,12 +42,15 @@ pub struct CorrectionRule {
 pub struct SegmentRow {
     pub id: i64,
     pub session_id: String,
+    pub revision: i64,
     pub start_sec: f32,
     pub end_sec: f32,
     pub wall_start: String,
     pub wall_end: String,
     pub text_raw: String,
-    pub text_corrected: String,
+    pub opt_status: String,
+    pub text_optimized: Option<String>,
+    pub text_english: Option<String>,
     pub created_at: String,
 }
 
@@ -84,16 +95,16 @@ pub fn session_exists(conn: &Connection, session_id: &str) -> Result<bool> {
 
 pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Result<()> {
     conn.execute(
-        "INSERT INTO segments(session_id, start_sec, end_sec, wall_start, wall_end, text_raw, text_corrected, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO asr_raw_records(session_id, revision, start_sec, end_sec, wall_start, wall_end, text_raw, opt_status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
         params![
             segment.session_id,
+            segment.revision,
             segment.start_sec,
             segment.end_sec,
             segment.wall_start,
             segment.wall_end,
             segment.text_raw,
-            segment.text_corrected,
             now,
         ],
     )
@@ -101,13 +112,55 @@ pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
     Ok(())
 }
 
+pub fn update_opt_status(conn: &Connection, session_id: &str, revision: i64, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE asr_raw_records SET opt_status = ?1 WHERE session_id = ?2 AND revision = ?3",
+        params![status, session_id, revision],
+    )
+    .with_context(|| format!("failed to update opt_status for {session_id}/{revision}"))?;
+    Ok(())
+}
+
+pub fn mark_old_revisions_skipped(conn: &Connection, session_id: &str, latest_revision: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE asr_raw_records
+         SET opt_status = 'skipped'
+         WHERE session_id = ?1 AND revision < ?2 AND opt_status IN ('pending', 'running')",
+        params![session_id, latest_revision],
+    )
+    .with_context(|| format!("failed to mark skipped revisions for {session_id}"))?;
+    Ok(())
+}
+
+pub fn upsert_llm_result(conn: &Connection, result: &NewLlmResult, now: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO asr_llm_results(session_id, revision, text_optimized, text_english, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(session_id, revision) DO UPDATE SET
+            text_optimized = excluded.text_optimized,
+            text_english = excluded.text_english,
+            created_at = excluded.created_at",
+        params![
+            result.session_id,
+            result.revision,
+            result.text_optimized,
+            result.text_english,
+            now
+        ],
+    )
+    .context("failed to upsert llm result")?;
+    Ok(())
+}
+
 pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<SegmentRow>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, start_sec, end_sec, wall_start, wall_end, text_raw, text_corrected, created_at
-             FROM segments
+            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw, r.opt_status,
+                    l.text_optimized, l.text_english, r.created_at
+             FROM asr_raw_records r
+             LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE session_id = ?1
-             ORDER BY id DESC
+             ORDER BY r.id DESC
              LIMIT 1",
         )
         .context("failed to prepare get_last_segment statement")?;
@@ -119,35 +172,20 @@ pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<Se
         Ok(Some(SegmentRow {
             id: row.get(0)?,
             session_id: row.get(1)?,
-            start_sec: row.get(2)?,
-            end_sec: row.get(3)?,
-            wall_start: row.get(4)?,
-            wall_end: row.get(5)?,
-            text_raw: row.get(6)?,
-            text_corrected: row.get(7)?,
-            created_at: row.get(8)?,
+            revision: row.get(2)?,
+            start_sec: row.get(3)?,
+            end_sec: row.get(4)?,
+            wall_start: row.get(5)?,
+            wall_end: row.get(6)?,
+            text_raw: row.get(7)?,
+            opt_status: row.get(8)?,
+            text_optimized: row.get(9)?,
+            text_english: row.get(10)?,
+            created_at: row.get(11)?,
         }))
     } else {
         Ok(None)
     }
-}
-
-pub fn update_segment_merge(
-    conn: &Connection,
-    id: i64,
-    end_sec: f32,
-    wall_end: &str,
-    text_raw: &str,
-    text_corrected: &str,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE segments
-         SET end_sec = ?1, wall_end = ?2, text_raw = ?3, text_corrected = ?4
-         WHERE id = ?5",
-        params![end_sec, wall_end, text_raw, text_corrected, id],
-    )
-    .with_context(|| format!("failed to update merged segment {id}"))?;
-    Ok(())
 }
 
 pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
@@ -158,10 +196,12 @@ pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: 
     let offset = page as u64 * page_size as u64;
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, start_sec, end_sec, wall_start, wall_end, text_raw, text_corrected, created_at
-             FROM segments
-             WHERE session_id = ?1
-             ORDER BY start_sec ASC
+            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw, r.opt_status,
+                    l.text_optimized, l.text_english, r.created_at
+             FROM asr_raw_records r
+             LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
+             WHERE r.session_id = ?1
+             ORDER BY r.start_sec ASC
              LIMIT ?2 OFFSET ?3",
         )
         .context("failed to prepare list_segments statement")?;
@@ -171,13 +211,16 @@ pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: 
             Ok(SegmentRow {
                 id: row.get(0)?,
                 session_id: row.get(1)?,
-                start_sec: row.get(2)?,
-                end_sec: row.get(3)?,
-                wall_start: row.get(4)?,
-                wall_end: row.get(5)?,
-                text_raw: row.get(6)?,
-                text_corrected: row.get(7)?,
-                created_at: row.get(8)?,
+                revision: row.get(2)?,
+                start_sec: row.get(3)?,
+                end_sec: row.get(4)?,
+                wall_start: row.get(5)?,
+                wall_end: row.get(6)?,
+                text_raw: row.get(7)?,
+                opt_status: row.get(8)?,
+                text_optimized: row.get(9)?,
+                text_english: row.get(10)?,
+                created_at: row.get(11)?,
             })
         })
         .context("failed to query list_segments")?;
@@ -228,10 +271,12 @@ pub fn tail_segments(conn: &Connection, session_id: &str, after_id: i64, limit: 
     }
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, start_sec, end_sec, wall_start, wall_end, text_raw, text_corrected, created_at
-             FROM segments
-             WHERE session_id = ?1 AND id > ?2
-             ORDER BY id ASC
+            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw, r.opt_status,
+                    l.text_optimized, l.text_english, r.created_at
+             FROM asr_raw_records r
+             LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
+             WHERE r.session_id = ?1 AND r.id > ?2
+             ORDER BY r.id ASC
              LIMIT ?3",
         )
         .context("failed to prepare tail_segments statement")?;
@@ -240,13 +285,16 @@ pub fn tail_segments(conn: &Connection, session_id: &str, after_id: i64, limit: 
             Ok(SegmentRow {
                 id: row.get(0)?,
                 session_id: row.get(1)?,
-                start_sec: row.get(2)?,
-                end_sec: row.get(3)?,
-                wall_start: row.get(4)?,
-                wall_end: row.get(5)?,
-                text_raw: row.get(6)?,
-                text_corrected: row.get(7)?,
-                created_at: row.get(8)?,
+                revision: row.get(2)?,
+                start_sec: row.get(3)?,
+                end_sec: row.get(4)?,
+                wall_start: row.get(5)?,
+                wall_end: row.get(6)?,
+                text_raw: row.get(7)?,
+                opt_status: row.get(8)?,
+                text_optimized: row.get(9)?,
+                text_english: row.get(10)?,
+                created_at: row.get(11)?,
             })
         })
         .context("failed to query tail_segments")?;

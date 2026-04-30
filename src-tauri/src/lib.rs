@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::correction::CorrectionEngine;
-use crate::db::repository::NewSegment;
+use crate::db::repository::{NewLlmResult, NewSegment};
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
@@ -33,6 +33,15 @@ const MERGE_MAX_GAP_SEC: f32 = 5.6;
 #[derive(Clone)]
 enum DbEvent {
     InsertSegment { segment: NewSegment },
+    MarkRunning { session_id: String, revision: i64 },
+    MarkSkippedBefore { session_id: String, revision: i64 },
+    MarkFailed { session_id: String, revision: i64 },
+    SaveLlmResult {
+        session_id: String,
+        revision: i64,
+        text_optimized: String,
+        text_english: String,
+    },
     CloseSession { session_id: String },
 }
 
@@ -123,6 +132,7 @@ struct AppState {
     init_error: Arc<Mutex<String>>,
     num_threads: Arc<AtomicU32>,
     next_realtime_segment_id: Arc<AtomicU64>,
+    next_revision: Arc<AtomicU64>,
     settings: Arc<Mutex<VadSettings>>,
     selected_device: Arc<Mutex<Option<String>>>,
 }
@@ -136,6 +146,7 @@ struct RecordingRuntime<'a> {
     stop_signal: &'a AtomicBool,
     segments: &'a Arc<Mutex<Vec<SegmentResult>>>,
     next_realtime_segment_id: &'a AtomicU64,
+    next_revision: &'a AtomicU64,
     correction_engine: &'a CorrectionEngine,
     db_writer: Option<&'a SyncSender<DbEvent>>,
     session_id: &'a str,
@@ -245,6 +256,7 @@ fn recognize_segment(
     segment: &sherpa_onnx::SpeechSegment,
     segments: &Arc<Mutex<Vec<SegmentResult>>>,
     next_realtime_segment_id: &AtomicU64,
+    next_revision: &AtomicU64,
     correction_engine: &CorrectionEngine,
     session_id: &str,
     db_writer: Option<&SyncSender<DbEvent>>,
@@ -274,6 +286,7 @@ fn recognize_segment(
                 .all(|c| c.is_ascii_punctuation() || c.is_ascii_whitespace())
         {
             let text_corrected = correction_engine.apply(&text_raw);
+            let revision = next_revision.fetch_add(1, Ordering::Relaxed) as i64;
             let wall_start = *base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
             let wall_end = *base_wall + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
 
@@ -299,12 +312,12 @@ fn recognize_segment(
                 let event = DbEvent::InsertSegment {
                     segment: NewSegment {
                         session_id: session_id.to_string(),
+                        revision,
                         start_sec: rel_start,
                         end_sec: rel_end,
                         wall_start: wall_start_fmt,
                         wall_end: wall_end_fmt,
                         text_raw,
-                        text_corrected,
                     },
                 };
                 if let Err(err) = writer.try_send(event) {
@@ -312,9 +325,45 @@ fn recognize_segment(
                         eprintln!("[db-worker] queue full, dropping segment event");
                     }
                 }
+
+                spawn_llm_postprocess_task(
+                    writer.clone(),
+                    session_id.to_string(),
+                    revision,
+                    text_corrected,
+                );
             }
         }
     }
+}
+
+fn spawn_llm_postprocess_task(writer: SyncSender<DbEvent>, session_id: String, revision: i64, text_corrected: String) {
+    tauri::async_runtime::spawn(async move {
+        let _ = writer.try_send(DbEvent::MarkSkippedBefore {
+            session_id: session_id.clone(),
+            revision,
+        });
+        let _ = writer.try_send(DbEvent::MarkRunning {
+            session_id: session_id.clone(),
+            revision,
+        });
+
+        // Plan 1/2 骨架：当前用本地转换模拟后处理，后续 Plan 3 接入真实 LLM。
+        let optimized = text_corrected.clone();
+        let english = format!("[TODO-EN] {text_corrected}");
+        let result = DbEvent::SaveLlmResult {
+            session_id: session_id.clone(),
+            revision,
+            text_optimized: optimized,
+            text_english: english,
+        };
+        if writer.try_send(result).is_err() {
+            let _ = writer.try_send(DbEvent::MarkFailed {
+                session_id,
+                revision,
+            });
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +474,7 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let db_writer = state.db_writer.lock().map_err(|e| e.to_string())?.as_ref().cloned();
     let current_session_id = Arc::clone(&state.current_session_id);
     let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
+    let next_revision = Arc::clone(&state.next_revision);
     let anchor = RecordingAnchor {
         base_wall: now,
         audio_offset,
@@ -439,6 +489,7 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
                 stop_signal: &stop_signal,
                 segments: &segments,
                 next_realtime_segment_id: &next_realtime_segment_id,
+                next_revision: &next_revision,
                 correction_engine: &correction_engine,
                 db_writer: db_writer.as_ref(),
                 session_id: &session_id,
@@ -545,6 +596,7 @@ fn run_recording(
                             &segment,
                             runtime.segments,
                             runtime.next_realtime_segment_id,
+                            runtime.next_revision,
                             runtime.correction_engine,
                             runtime.session_id,
                             runtime.db_writer,
@@ -580,6 +632,7 @@ fn run_recording(
             &segment,
             runtime.segments,
             runtime.next_realtime_segment_id,
+            runtime.next_revision,
             runtime.correction_engine,
             runtime.session_id,
             runtime.db_writer,
@@ -1123,6 +1176,7 @@ fn build_app_state() -> AppState {
         init_error: Arc::new(Mutex::new(String::new())),
         num_threads: Arc::new(AtomicU32::new(0)),
         next_realtime_segment_id: Arc::new(AtomicU64::new(1)),
+        next_revision: Arc::new(AtomicU64::new(1)),
         settings: Arc::new(Mutex::new(VadSettings::default())),
         selected_device: Arc::new(Mutex::new(None)),
     }
@@ -1202,11 +1256,30 @@ pub fn run() {
                                     while let Ok(event) = rx.recv() {
                                         match event {
                                             DbEvent::InsertSegment { segment } => {
-                                                let _ = db_for_worker.upsert_merged_segment(
-                                                    segment,
-                                                    MERGE_MAX_DURATION_SEC,
-                                                    MERGE_MAX_GAP_SEC,
-                                                );
+                                                let _ = db_for_worker.insert_segment(segment);
+                                            }
+                                            DbEvent::MarkRunning { session_id, revision } => {
+                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "running");
+                                            }
+                                            DbEvent::MarkSkippedBefore { session_id, revision } => {
+                                                let _ = db_for_worker.mark_old_revisions_skipped(&session_id, revision);
+                                            }
+                                            DbEvent::MarkFailed { session_id, revision } => {
+                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "failed");
+                                            }
+                                            DbEvent::SaveLlmResult {
+                                                session_id,
+                                                revision,
+                                                text_optimized,
+                                                text_english,
+                                            } => {
+                                                let _ = db_for_worker.upsert_llm_result(NewLlmResult {
+                                                    session_id: session_id.clone(),
+                                                    revision,
+                                                    text_optimized,
+                                                    text_english,
+                                                });
+                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "done");
                                             }
                                             DbEvent::CloseSession { session_id } => {
                                                 let _ = db_for_worker.close_session(&session_id);
