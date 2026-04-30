@@ -4,7 +4,7 @@
   "version": "1.13.0",
   "identifier": "com.k2fsa.sherpa.onnx.asr.microphone",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../frontend-new/dist"
   },
   "app": {
     "withGlobalTauri": true,
