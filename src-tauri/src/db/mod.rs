@@ -210,4 +210,75 @@ mod tests {
         assert!(err.to_string().contains("page_size"));
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn latest_only_marks_old_revisions_skipped_and_keeps_latest_running() {
+        let path = temp_db_path("latest-only");
+        let db = SpeechDatabase::init(&path).unwrap();
+        let session_id = db.create_session().unwrap();
+
+        for revision in 1..=3 {
+            db.insert_segment(NewSegment {
+                session_id: session_id.clone(),
+                revision,
+                start_sec: revision as f32,
+                end_sec: revision as f32 + 0.5,
+                wall_start: "2026-01-01 00:00:00".to_string(),
+                wall_end: "2026-01-01 00:00:01".to_string(),
+                text_raw: format!("segment-{revision}"),
+            })
+            .unwrap();
+        }
+
+        db.update_opt_status(&session_id, 1, "running").unwrap();
+        db.update_opt_status(&session_id, 2, "running").unwrap();
+        db.mark_old_revisions_skipped(&session_id, 3).unwrap();
+
+        let segments = db.list_segments(&session_id, 0, 10).unwrap();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].revision, 1);
+        assert_eq!(segments[0].opt_status, "skipped");
+        assert_eq!(segments[1].revision, 2);
+        assert_eq!(segments[1].opt_status, "skipped");
+        assert_eq!(segments[2].revision, 3);
+        assert_eq!(segments[2].opt_status, "pending");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn llm_result_roundtrip_for_three_line_display() {
+        let path = temp_db_path("llm-result");
+        let db = SpeechDatabase::init(&path).unwrap();
+        let session_id = db.create_session().unwrap();
+
+        db.insert_segment(NewSegment {
+            session_id: session_id.clone(),
+            revision: 1,
+            start_sec: 0.0,
+            end_sec: 0.8,
+            wall_start: "2026-01-01 00:00:00".to_string(),
+            wall_end: "2026-01-01 00:00:01".to_string(),
+            text_raw: "原始文本".to_string(),
+        })
+        .unwrap();
+
+        db.upsert_llm_result(NewLlmResult {
+            session_id: session_id.clone(),
+            revision: 1,
+            text_optimized: "优化文本".to_string(),
+            text_english: "optimized english".to_string(),
+        })
+        .unwrap();
+        db.update_opt_status(&session_id, 1, "done").unwrap();
+
+        let segments = db.list_segments(&session_id, 0, 10).unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text_raw, "原始文本");
+        assert_eq!(segments[0].text_optimized.as_deref(), Some("优化文本"));
+        assert_eq!(segments[0].text_english.as_deref(), Some("optimized english"));
+        assert_eq!(segments[0].opt_status, "done");
+
+        let _ = std::fs::remove_file(path);
+    }
 }
