@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sherpa_onnx::{LinearResampler, OfflineRecognizer, SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,11 +27,31 @@ use tauri::Manager;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
+const MERGE_MAX_DURATION_SEC: f32 = 30.0;
+const MERGE_MAX_GAP_SEC: f32 = 5.6;
 
 #[derive(Clone)]
 enum DbEvent {
     InsertSegment { segment: NewSegment },
     CloseSession { session_id: String },
+}
+
+fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResult) -> bool {
+    let Some(last) = segments.last_mut() else {
+        return false;
+    };
+
+    let gap_sec = incoming.start - last.end;
+    let merged_duration = incoming.end - last.start;
+    if gap_sec < 0.0 || gap_sec > MERGE_MAX_GAP_SEC || merged_duration > MERGE_MAX_DURATION_SEC {
+        return false;
+    }
+
+    last.end = incoming.end;
+    last.wall_end = incoming.wall_end.clone();
+    last.text = format!("{} {}", last.text, incoming.text).trim().to_string();
+    last.update_type = SegmentUpdateType::Replace;
+    true
 }
 
 /// Which ASR model to bundle. Build scripts patch these via sed.
@@ -60,7 +80,16 @@ impl Default for VadSettings {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
+enum SegmentUpdateType {
+    Append,
+    Replace,
+}
+
+#[derive(Serialize, Clone)]
 struct SegmentResult {
+    segment_id: u64,
+    update_type: SegmentUpdateType,
     start: f32,
     end: f32,
     wall_start: String,
@@ -93,6 +122,7 @@ struct AppState {
     init_status: Arc<AtomicU8>,
     init_error: Arc<Mutex<String>>,
     num_threads: Arc<AtomicU32>,
+    next_realtime_segment_id: Arc<AtomicU64>,
     settings: Arc<Mutex<VadSettings>>,
     selected_device: Arc<Mutex<Option<String>>>,
 }
@@ -105,6 +135,7 @@ struct RecordingAnchor {
 struct RecordingRuntime<'a> {
     stop_signal: &'a AtomicBool,
     segments: &'a Arc<Mutex<Vec<SegmentResult>>>,
+    next_realtime_segment_id: &'a AtomicU64,
     correction_engine: &'a CorrectionEngine,
     db_writer: Option<&'a SyncSender<DbEvent>>,
     session_id: &'a str,
@@ -213,6 +244,7 @@ fn recognize_segment(
     recognizer: &OfflineRecognizer,
     segment: &sherpa_onnx::SpeechSegment,
     segments: &Arc<Mutex<Vec<SegmentResult>>>,
+    next_realtime_segment_id: &AtomicU64,
     correction_engine: &CorrectionEngine,
     session_id: &str,
     db_writer: Option<&SyncSender<DbEvent>>,
@@ -245,14 +277,22 @@ fn recognize_segment(
             let wall_start = *base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
             let wall_end = *base_wall + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
 
+            let wall_start_fmt = wall_start.format("%Y-%m-%d %H:%M:%S").to_string();
+            let wall_end_fmt = wall_end.format("%Y-%m-%d %H:%M:%S").to_string();
+            let new_segment = SegmentResult {
+                segment_id: next_realtime_segment_id.fetch_add(1, Ordering::Relaxed),
+                update_type: SegmentUpdateType::Append,
+                start: rel_start,
+                end: rel_end,
+                wall_start: wall_start_fmt.clone(),
+                wall_end: wall_end_fmt.clone(),
+                text: text_corrected.clone(),
+            };
+
             if let Ok(mut segs) = segments.lock() {
-                segs.push(SegmentResult {
-                    start: rel_start,
-                    end: rel_end,
-                    wall_start: wall_start.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    wall_end: wall_end.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    text: text_corrected.clone(),
-                });
+                if !merge_segment_in_place(&mut segs, &new_segment) {
+                    segs.push(new_segment);
+                }
             }
 
             if let Some(writer) = db_writer {
@@ -261,8 +301,8 @@ fn recognize_segment(
                         session_id: session_id.to_string(),
                         start_sec: rel_start,
                         end_sec: rel_end,
-                        wall_start: wall_start.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        wall_end: wall_end.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        wall_start: wall_start_fmt,
+                        wall_end: wall_end_fmt,
                         text_raw,
                         text_corrected,
                     },
@@ -384,6 +424,7 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let correction_engine = Arc::clone(&state.correction_engine);
     let db_writer = state.db_writer.lock().map_err(|e| e.to_string())?.as_ref().cloned();
     let current_session_id = Arc::clone(&state.current_session_id);
+    let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
     let anchor = RecordingAnchor {
         base_wall: now,
         audio_offset,
@@ -397,6 +438,7 @@ fn start_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
             RecordingRuntime {
                 stop_signal: &stop_signal,
                 segments: &segments,
+                next_realtime_segment_id: &next_realtime_segment_id,
                 correction_engine: &correction_engine,
                 db_writer: db_writer.as_ref(),
                 session_id: &session_id,
@@ -502,6 +544,7 @@ fn run_recording(
                             &recognizer,
                             &segment,
                             runtime.segments,
+                            runtime.next_realtime_segment_id,
                             runtime.correction_engine,
                             runtime.session_id,
                             runtime.db_writer,
@@ -536,6 +579,7 @@ fn run_recording(
             &recognizer,
             &segment,
             runtime.segments,
+            runtime.next_realtime_segment_id,
             runtime.correction_engine,
             runtime.session_id,
             runtime.db_writer,
@@ -1078,6 +1122,7 @@ fn build_app_state() -> AppState {
         init_status: Arc::new(AtomicU8::new(0)),
         init_error: Arc::new(Mutex::new(String::new())),
         num_threads: Arc::new(AtomicU32::new(0)),
+        next_realtime_segment_id: Arc::new(AtomicU64::new(1)),
         settings: Arc::new(Mutex::new(VadSettings::default())),
         selected_device: Arc::new(Mutex::new(None)),
     }
@@ -1157,7 +1202,11 @@ pub fn run() {
                                     while let Ok(event) = rx.recv() {
                                         match event {
                                             DbEvent::InsertSegment { segment } => {
-                                                let _ = db_for_worker.insert_segment(segment);
+                                                let _ = db_for_worker.upsert_merged_segment(
+                                                    segment,
+                                                    MERGE_MAX_DURATION_SEC,
+                                                    MERGE_MAX_GAP_SEC,
+                                                );
                                             }
                                             DbEvent::CloseSession { session_id } => {
                                                 let _ = db_for_worker.close_session(&session_id);

@@ -50,6 +50,35 @@ impl SpeechDatabase {
         repository::insert_segment(&conn, &segment, &now)
     }
 
+    pub fn upsert_merged_segment(
+        &self,
+        segment: NewSegment,
+        merge_max_duration_sec: f32,
+        merge_max_gap_sec: f32,
+    ) -> Result<()> {
+        let now = now_str();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        if let Some(last) = repository::get_last_segment(&conn, &segment.session_id)? {
+            let gap_sec = segment.start_sec - last.end_sec;
+            let merged_duration = segment.end_sec - last.start_sec;
+            if gap_sec >= 0.0 && gap_sec <= merge_max_gap_sec && merged_duration <= merge_max_duration_sec {
+                let merged_raw = format!("{} {}", last.text_raw, segment.text_raw).trim().to_string();
+                let merged_corrected = format!("{} {}", last.text_corrected, segment.text_corrected)
+                    .trim()
+                    .to_string();
+                return repository::update_segment_merge(
+                    &conn,
+                    last.id,
+                    segment.end_sec,
+                    &segment.wall_end,
+                    &merged_raw,
+                    &merged_corrected,
+                );
+            }
+        }
+        repository::insert_segment(&conn, &segment, &now)
+    }
+
     pub fn list_segments(&self, session_id: &str, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         repository::list_segments(&conn, session_id, page, page_size)

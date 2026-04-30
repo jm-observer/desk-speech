@@ -52,6 +52,7 @@ let tailAfterId = 0;
 let correctionRules = [];
 let lastAutoCopySign = "";
 let lastAutoCopyAtMs = 0;
+let autoStarted = false;
 
 startBtn.disabled = true;
 statusEl.textContent = "Loading models...";
@@ -245,6 +246,7 @@ async function loadDevices() {
       correctionBtn.disabled = false;
       statusEl.textContent = "";
       statusEl.className = "status";
+      maybeAutoStartRecording();
     }
   } catch (err) {
     deviceSelect.innerHTML = "<option>Error loading devices</option>";
@@ -276,6 +278,7 @@ function pollInitStatus() {
         if (hasDevices) {
           statusEl.textContent = "";
           statusEl.className = "status";
+          maybeAutoStartRecording();
         }
       } else if (res.status === 2) {
         startBtn.disabled = true;
@@ -393,6 +396,16 @@ function findSegmentIndex(t) {
 }
 
 resultsBody.addEventListener("click", (e) => {
+  if (e.target.closest(".copy-seg-btn")) {
+    e.stopPropagation();
+    const btn = e.target.closest(".copy-seg-btn");
+    const idx = parseInt(btn.dataset.idx, 10);
+    if (idx >= 0 && idx < lastSegments.length) {
+      copySegmentText(idx);
+    }
+    return;
+  }
+
   if (e.target.closest(".save-seg-btn")) {
     e.stopPropagation();
     const btn = e.target.closest(".save-seg-btn");
@@ -421,6 +434,16 @@ resultsBody.addEventListener("click", (e) => {
     );
   }
 });
+
+async function copySegmentText(idx) {
+  const seg = lastSegments[idx];
+  try {
+    await invoke("copy_text_to_clipboard", { text: seg.text });
+    flashStatus("文本已复制");
+  } catch (err) {
+    flashStatus(`复制失败: ${err}`, true);
+  }
+}
 
 async function saveSegment(idx) {
   const seg = lastSegments[idx];
@@ -597,6 +620,8 @@ function applyLegacySegments(segments) {
   }
 
   const normalized = segments.map((seg) => ({
+    segment_id: seg.segment_id ?? null,
+    update_type: seg.update_type ?? "append",
     id: null,
     start: seg.start,
     end: seg.end,
@@ -607,6 +632,16 @@ function applyLegacySegments(segments) {
   }));
 
   for (const seg of normalized) {
+    if (seg.update_type === "replace" && seg.segment_id !== null) {
+      const idx = lastSegments.findIndex((oldSeg) => oldSeg.segment_id === seg.segment_id);
+      if (idx >= 0) {
+        lastSegments[idx] = { ...lastSegments[idx], ...seg };
+        renderSegments();
+        maybeAutoCopy(seg);
+        continue;
+      }
+    }
+
     if (lastSegments.some((oldSeg) => oldSeg.sign === seg.sign)) {
       continue;
     }
@@ -664,24 +699,32 @@ function applyDbSegments(dbSegments, fromTail) {
 }
 
 function appendSegment(seg) {
-  const idx = lastSegments.length;
-  const duration = (seg.end - seg.start).toFixed(2);
-  const tr = document.createElement("tr");
-  tr.dataset.idx = idx;
-  tr.innerHTML = `
-    <td>${escapeHtml(stripYear(seg.wall_start))}</td>
-    <td>${escapeHtml(stripYear(seg.wall_end))}</td>
-    <td>${duration}s</td>
-    <td>${escapeHtml(seg.text)}</td>
-    <td><button class="save-seg-btn" data-idx="${idx}" title="Save as WAV">&#128190;</button></td>
-  `;
-  resultsBody.appendChild(tr);
   lastSegments.push(seg);
+  renderSegments();
   resultsEl.style.display = "block";
   const lastRow = resultsBody.lastElementChild;
   if (lastRow) {
     lastRow.scrollIntoView({ behavior: "smooth", block: "end" });
   }
+}
+
+function renderSegments() {
+  resultsBody.innerHTML = "";
+  lastSegments.forEach((seg, idx) => {
+    const tr = document.createElement("tr");
+    tr.dataset.idx = idx;
+    tr.innerHTML = `
+      <td>${escapeHtml(stripYear(seg.wall_start))}</td>
+      <td>${escapeHtml(stripYear(seg.wall_end))}</td>
+      <td>${(seg.end - seg.start).toFixed(2)}s</td>
+      <td>${escapeHtml(seg.text)}</td>
+      <td class="seg-actions-cell">
+        <button class="copy-seg-btn" data-idx="${idx}" title="Copy text">复制</button>
+        <button class="save-seg-btn" data-idx="${idx}" title="Save as WAV">&#128190;</button>
+      </td>
+    `;
+    resultsBody.appendChild(tr);
+  });
 }
 
 async function maybeAutoCopy(seg) {
@@ -784,6 +827,14 @@ settingsApplyBtn.addEventListener("click", async () => {
     settingsApplyBtn.disabled = false;
   }
 });
+
+function maybeAutoStartRecording() {
+  if (autoStarted || recording || !modelsReady || !hasDevices) {
+    return;
+  }
+  autoStarted = true;
+  startBtn.click();
+}
 
 function escapeHtml(text) {
   const el = document.createElement("span");

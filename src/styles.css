@@ -251,6 +251,24 @@ tbody tr.active {
   background-color: #334155;
 }
 
+.seg-actions-cell {
+  display: flex;
+  gap: 0.35em;
+  align-items: center;
+}
+
+.copy-seg-btn {
+  padding: 0.2em 0.55em;
+  font-size: 0.78em;
+  background-color: #0f766e;
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.copy-seg-btn:hover {
+  background-color: #0d5f58;
+}
+
 .table-scroll {
   max-height: 50vh;
   overflow-y: auto;

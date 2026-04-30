@@ -101,6 +101,55 @@ pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
     Ok(())
 }
 
+pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<SegmentRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, start_sec, end_sec, wall_start, wall_end, text_raw, text_corrected, created_at
+             FROM segments
+             WHERE session_id = ?1
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .context("failed to prepare get_last_segment statement")?;
+
+    let mut rows = stmt
+        .query(params![session_id])
+        .context("failed to query last segment")?;
+    if let Some(row) = rows.next().context("failed to read last segment row")? {
+        Ok(Some(SegmentRow {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            start_sec: row.get(2)?,
+            end_sec: row.get(3)?,
+            wall_start: row.get(4)?,
+            wall_end: row.get(5)?,
+            text_raw: row.get(6)?,
+            text_corrected: row.get(7)?,
+            created_at: row.get(8)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn update_segment_merge(
+    conn: &Connection,
+    id: i64,
+    end_sec: f32,
+    wall_end: &str,
+    text_raw: &str,
+    text_corrected: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE segments
+         SET end_sec = ?1, wall_end = ?2, text_raw = ?3, text_corrected = ?4
+         WHERE id = ?5",
+        params![end_sec, wall_end, text_raw, text_corrected, id],
+    )
+    .with_context(|| format!("failed to update merged segment {id}"))?;
+    Ok(())
+}
+
 pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
     if page_size == 0 {
         return Err(anyhow!("page_size must be greater than 0"));
