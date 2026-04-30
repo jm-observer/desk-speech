@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-pub(crate) const MAX_AUDIO_WINDOW_SECS: usize = 600;
+pub(crate) const MAX_AUDIO_WINDOW_SECS: usize = 120;
 pub(crate) const SAMPLE_RATE: usize = 16000;
 pub(crate) const MAX_AUDIO_SAMPLES: usize = MAX_AUDIO_WINDOW_SECS * SAMPLE_RATE;
 

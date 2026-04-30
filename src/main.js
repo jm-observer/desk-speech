@@ -305,13 +305,13 @@ document.querySelectorAll("a[href]").forEach((a) => {
 
 copyTextBtn.addEventListener("click", async () => {
   const text = lastSegments.map((s) => s.text).join("\n");
-  await navigator.clipboard.writeText(text);
+  await invoke("copy_text_to_clipboard", { text });
   flashStatus("Text copied.");
 });
 
 copyTimedBtn.addEventListener("click", async () => {
   const lines = lastSegments.map((s) => `[${s.wall_start} --> ${s.wall_end}] ${s.text}`);
-  await navigator.clipboard.writeText(lines.join("\n"));
+  await invoke("copy_text_to_clipboard", { text: lines.join("\n") });
   flashStatus("Text with time copied.");
 });
 
@@ -698,7 +698,7 @@ async function maybeAutoCopy(seg) {
   }
 
   try {
-    await navigator.clipboard.writeText(seg.text);
+    await invoke("copy_text_to_clipboard", { text: seg.text });
     lastAutoCopySign = seg.sign;
     lastAutoCopyAtMs = now;
     const preview = seg.text.length > 24 ? `${seg.text.slice(0, 24)}...` : seg.text;

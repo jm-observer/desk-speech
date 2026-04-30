@@ -13,7 +13,7 @@
 
 ## 详细设计
 - 新增常量：
-  - `MAX_AUDIO_WINDOW_SECS: usize = 600`
+  - `MAX_AUDIO_WINDOW_SECS: usize = 120`
   - `SAMPLE_RATE: usize = 16000`
   - `MAX_AUDIO_SAMPLES = MAX_AUDIO_WINDOW_SECS * SAMPLE_RATE`
 - 新增结构 `RollingAudioBuffer`：

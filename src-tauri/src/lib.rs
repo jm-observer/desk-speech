@@ -24,6 +24,7 @@ use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use tauri::Manager;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
 
@@ -756,6 +757,11 @@ fn export_srt(path: String, state: tauri::State<'_, AppState>) -> Result<(), Str
     Ok(())
 }
 
+#[tauri::command]
+fn copy_text_to_clipboard(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
 /// Write mono f32 PCM samples as a 16-bit WAV file at 16 kHz.
 fn write_wav(path: &str, samples: &[f32]) -> Result<(), String> {
     let num_samples = samples.len() as u32;
@@ -1132,6 +1138,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
         .setup({
             let db_state = Arc::clone(&state.db);
@@ -1193,6 +1200,7 @@ pub fn run() {
             save_all_audio,
             get_recorded_audio_path,
             export_srt,
+            copy_text_to_clipboard,
             get_init_status,
             get_settings,
             apply_settings,
