@@ -6,6 +6,7 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs, ResponseFormat,
 };
 use async_openai::Client;
+use log::info;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -18,7 +19,7 @@ pub struct CachedModels {
     pub models: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct LlmPostprocessOutput {
     text_optimized: String,
     text_english: String,
@@ -63,9 +64,10 @@ pub async fn postprocess_text(settings: &LlmSettings, input_text: &str) -> Resul
 
     let json = extract_json(content)?;
     let parsed: LlmPostprocessOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
-    if parsed.text_optimized.trim().is_empty() || parsed.text_english.trim().is_empty() {
-        return Err("llm response contains empty fields".to_string());
-    }
+    info!("{parsed:?}");
+    // if parsed.text_optimized.trim().is_empty() || parsed.text_english.trim().is_empty() {
+    //     return Err("llm response contains empty fields".to_string());
+    // }
     Ok((parsed.text_optimized, parsed.text_english))
 }
 

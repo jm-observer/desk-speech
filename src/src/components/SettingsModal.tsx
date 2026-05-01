@@ -61,6 +61,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       onClose();
     } catch (err) {
       console.error('Apply settings failed', err);
+      // In Tauri v2, error might be a string or an object with message
+      const msg = typeof err === 'string' ? err : (err as any)?.message || JSON.stringify(err);
+      alert(`保存失败: ${msg}`);
     } finally {
       setSaving(false);
     }

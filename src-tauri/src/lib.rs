@@ -684,28 +684,32 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
     };
     let selected_device = state.selected_device.lock().map_err(|e| e.to_string())?.clone();
 
-    std::thread::spawn(move || {
-        let result = run_recording(
-            recognizer,
-            vad,
-            RecordingRuntime {
-                stop_signal: &stop_signal,
-                segments: &segments,
-                next_realtime_segment_id: &next_realtime_segment_id,
-                next_revision: &next_revision,
-                correction_engine: &correction_engine,
-                app_state: &app_state,
-                app_handle: &app,
-                db_writer: db_writer.as_ref(),
-                session_id: &session_id,
-                recorded_audio: &recorded_audio,
-                anchor: &anchor,
-                selected_device: selected_device.as_deref(),
-            },
-        );
+    let db_writer_for_run = db_writer.clone();
+    let session_id_for_run = session_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let join = tauri::async_runtime::spawn_blocking(move || {
+            run_recording(
+                recognizer,
+                vad,
+                RecordingRuntime {
+                    stop_signal: &stop_signal,
+                    segments: &segments,
+                    next_realtime_segment_id: &next_realtime_segment_id,
+                    next_revision: &next_revision,
+                    correction_engine: &correction_engine,
+                    app_state: &app_state,
+                    app_handle: &app,
+                    db_writer: db_writer_for_run.as_ref(),
+                    session_id: &session_id_for_run,
+                    recorded_audio: &recorded_audio,
+                    anchor: &anchor,
+                    selected_device: selected_device.as_deref(),
+                },
+            )
+        });
 
-        match result {
-            Ok((rec, v)) => {
+        match join.await {
+            Ok(Ok((rec, v))) => {
                 if let Ok(mut r) = recognizer_arc.lock() {
                     *r = Some(rec);
                 }
@@ -713,8 +717,11 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
                     *va = Some(v);
                 }
             }
-            Err(e) => {
-                error!("[recording thread] error: {e}");
+            Ok(Err(err)) => {
+                error!("[recording task] error: {err}");
+            }
+            Err(err) => {
+                error!("[recording task] join failed: {err}");
             }
         }
 
@@ -727,7 +734,7 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
         if let Ok(mut guard) = current_session_id.lock() {
             *guard = None;
         }
-        info!("[recording thread] stopped");
+        info!("[recording task] stopped");
     });
 
     Ok(())
@@ -1222,10 +1229,11 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
     let init_error = Arc::clone(&state.init_error);
     let init_num_threads = Arc::clone(&state.num_threads);
 
-    std::thread::spawn(move || {
+    tauri::async_runtime::spawn(async move {
         info!("[apply_settings] rebuilding models...");
-        match build_models(&new_vad_settings) {
-            Ok((rec, vad, threads)) => {
+        let join = tauri::async_runtime::spawn_blocking(move || build_models(&new_vad_settings));
+        match join.await {
+            Ok(Ok((rec, vad, threads))) => {
                 info!("[apply_settings] models rebuilt, num_threads={threads}");
                 let r_ok = recognizer_arc
                     .lock()
@@ -1250,10 +1258,17 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
                     init_status.store(2, Ordering::Relaxed);
                 }
             }
-            Err(e) => {
-                error!("[apply_settings] rebuild failed: {e}");
-                if let Ok(mut err) = init_error.lock() {
-                    *err = e;
+            Ok(Err(err)) => {
+                error!("[apply_settings] rebuild failed: {err}");
+                if let Ok(mut init_err) = init_error.lock() {
+                    *init_err = err;
+                }
+                init_status.store(2, Ordering::Relaxed);
+            }
+            Err(err) => {
+                error!("[apply_settings] join failed: {err}");
+                if let Ok(mut init_err) = init_error.lock() {
+                    *init_err = "Internal error: settings task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);
             }
@@ -1466,11 +1481,12 @@ pub fn run() {
     let init_num_threads = Arc::clone(&state.num_threads);
     let init_settings = Arc::clone(&state.settings);
 
-    std::thread::spawn(move || {
+    tauri::async_runtime::spawn(async move {
         info!("[init] starting model initialization...");
         let settings = init_settings.lock().map(|s| s.clone()).unwrap_or_default();
-        match build_models(&settings) {
-            Ok((rec, vad, threads)) => {
+        let join = tauri::async_runtime::spawn_blocking(move || build_models(&settings));
+        match join.await {
+            Ok(Ok((rec, vad, threads))) => {
                 info!("[init] models ready, num_threads={threads}");
                 let r_ok = init_recognizer
                     .lock()
@@ -1498,10 +1514,17 @@ pub fn run() {
                     init_status.store(2, Ordering::Relaxed);
                 }
             }
-            Err(e) => {
-                error!("[init] model initialization failed: {e}");
-                if let Ok(mut err) = init_error.lock() {
-                    *err = e;
+            Ok(Err(err)) => {
+                error!("[init] model initialization failed: {err}");
+                if let Ok(mut init_err) = init_error.lock() {
+                    *init_err = err;
+                }
+                init_status.store(2, Ordering::Relaxed);
+            }
+            Err(err) => {
+                error!("[init] join failed: {err}");
+                if let Ok(mut init_err) = init_error.lock() {
+                    *init_err = "Internal error: init task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);
             }
@@ -1546,69 +1569,85 @@ pub fn run() {
                                 }
                                 let (tx, rx) = mpsc::sync_channel::<DbEvent>(DB_EVENT_QUEUE_CAPACITY);
                                 let db_for_worker = db.clone();
-                                std::thread::spawn(move || {
-                                    while let Ok(event) = rx.recv() {
-                                        match event {
-                                            DbEvent::InsertSegment { segment } => {
-                                                debug!(
-                                                    "[db-worker] insert segment session_id={}, revision={}",
-                                                    segment.session_id, segment.revision
-                                                );
-                                                let _ = db_for_worker.insert_segment(segment);
-                                            }
-                                            DbEvent::MarkRunning { session_id, revision } => {
-                                                debug!(
-                                                    "[db-worker] mark running session_id={}, revision={}",
-                                                    session_id, revision
-                                                );
-                                                let _ =
-                                                    db_for_worker.update_opt_status(&session_id, revision, "running");
-                                            }
-                                            DbEvent::MarkSkippedBefore { session_id, revision } => {
-                                                debug!(
-                                                    "[db-worker] mark skipped before session_id={}, revision={}",
-                                                    session_id, revision
-                                                );
-                                                let _ = db_for_worker.mark_old_revisions_skipped(&session_id, revision);
-                                            }
-                                            DbEvent::MarkSkipped { session_id, revision } => {
-                                                debug!(
-                                                    "[db-worker] mark skipped session_id={}, revision={}",
-                                                    session_id, revision
-                                                );
-                                                let _ =
-                                                    db_for_worker.update_opt_status(&session_id, revision, "skipped");
-                                            }
-                                            DbEvent::MarkFailed { session_id, revision } => {
-                                                warn!(
-                                                    "[db-worker] mark failed session_id={}, revision={}",
-                                                    session_id, revision
-                                                );
-                                                let _ =
-                                                    db_for_worker.update_opt_status(&session_id, revision, "failed");
-                                            }
-                                            DbEvent::SaveLlmResult {
-                                                session_id,
-                                                revision,
-                                                text_optimized,
-                                                text_english,
-                                            } => {
-                                                let _ = db_for_worker.upsert_llm_result(NewLlmResult {
-                                                    session_id: session_id.clone(),
+                                tauri::async_runtime::spawn(async move {
+                                    let join = tauri::async_runtime::spawn_blocking(move || {
+                                        while let Ok(event) = rx.recv() {
+                                            match event {
+                                                DbEvent::InsertSegment { segment } => {
+                                                    debug!(
+                                                        "[db-worker] insert segment session_id={}, revision={}",
+                                                        segment.session_id, segment.revision
+                                                    );
+                                                    let _ = db_for_worker.insert_segment(segment);
+                                                }
+                                                DbEvent::MarkRunning { session_id, revision } => {
+                                                    debug!(
+                                                        "[db-worker] mark running session_id={}, revision={}",
+                                                        session_id, revision
+                                                    );
+                                                    let _ = db_for_worker.update_opt_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "running",
+                                                    );
+                                                }
+                                                DbEvent::MarkSkippedBefore { session_id, revision } => {
+                                                    debug!(
+                                                        "[db-worker] mark skipped before session_id={}, revision={}",
+                                                        session_id, revision
+                                                    );
+                                                    let _ =
+                                                        db_for_worker.mark_old_revisions_skipped(&session_id, revision);
+                                                }
+                                                DbEvent::MarkSkipped { session_id, revision } => {
+                                                    debug!(
+                                                        "[db-worker] mark skipped session_id={}, revision={}",
+                                                        session_id, revision
+                                                    );
+                                                    let _ = db_for_worker.update_opt_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "skipped",
+                                                    );
+                                                }
+                                                DbEvent::MarkFailed { session_id, revision } => {
+                                                    warn!(
+                                                        "[db-worker] mark failed session_id={}, revision={}",
+                                                        session_id, revision
+                                                    );
+                                                    let _ = db_for_worker.update_opt_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "failed",
+                                                    );
+                                                }
+                                                DbEvent::SaveLlmResult {
+                                                    session_id,
                                                     revision,
                                                     text_optimized,
                                                     text_english,
-                                                });
-                                                debug!(
-                                                    "[db-worker] save llm result session_id={}, revision={}",
-                                                    session_id, revision
-                                                );
-                                                let _ = db_for_worker.update_opt_status(&session_id, revision, "done");
-                                            }
-                                            DbEvent::CloseSession { session_id } => {
-                                                let _ = db_for_worker.close_session(&session_id);
+                                                } => {
+                                                    let _ = db_for_worker.upsert_llm_result(NewLlmResult {
+                                                        session_id: session_id.clone(),
+                                                        revision,
+                                                        text_optimized,
+                                                        text_english,
+                                                    });
+                                                    debug!(
+                                                        "[db-worker] save llm result session_id={}, revision={}",
+                                                        session_id, revision
+                                                    );
+                                                    let _ =
+                                                        db_for_worker.update_opt_status(&session_id, revision, "done");
+                                                }
+                                                DbEvent::CloseSession { session_id } => {
+                                                    let _ = db_for_worker.close_session(&session_id);
+                                                }
                                             }
                                         }
+                                    });
+                                    if let Err(err) = join.await {
+                                        error!("[db-worker] join failed: {err}");
                                     }
                                 });
                                 if let Ok(mut guard) = db_state.lock() {
