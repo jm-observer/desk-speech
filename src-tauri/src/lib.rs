@@ -27,7 +27,7 @@ use crate::llm_settings::{validate_llm_settings, LlmSettings};
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
-use log::error;
+use log::{debug, error, info, warn};
 use tauri::Manager;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -227,12 +227,12 @@ fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Resu
         return Err("Device reports 0 channels".to_string());
     }
 
-    eprintln!(
+    info!(
         "[mic] format: {:?}, channels: {}, sample_rate: {}",
         sample_format, channels, config.sample_rate.0
     );
 
-    let err_fn = |err| eprintln!("[mic] stream error: {:?}", err);
+    let err_fn = |err| info!("[mic] stream error: {:?}", err);
 
     let stream = match sample_format {
         SampleFormat::F32 => device
@@ -368,7 +368,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 };
                 if let Err(err) = writer.try_send(event) {
                     if matches!(err, TrySendError::Full(_)) {
-                        eprintln!("[db-worker] queue full, dropping segment event");
+                        warn!("[db-worker] queue full, dropping segment event");
                     }
                 }
 
@@ -539,7 +539,7 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
     *state.start_wall_clock.lock().map_err(|e| e.to_string())? = Some(now);
     *state.start_instant.lock().map_err(|e| e.to_string())? = Some(Instant::now());
 
-    eprintln!("[start_recording] starting at {now}");
+    info!("[start_recording] starting at {now}");
 
     let session_id = {
         let db_guard = state.db.lock().map_err(|e| e.to_string())?;
@@ -617,7 +617,7 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
                 }
             }
             Err(e) => {
-                eprintln!("[recording thread] error: {e}");
+                error!("[recording thread] error: {e}");
             }
         }
 
@@ -630,7 +630,7 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
         if let Ok(mut guard) = current_session_id.lock() {
             *guard = None;
         }
-        eprintln!("[recording thread] stopped");
+        info!("[recording thread] stopped");
     });
 
     Ok(())
@@ -651,7 +651,7 @@ fn run_recording(
         host.default_input_device().ok_or("No default input device")?
     };
 
-    eprintln!("[recording] device: {:?}", device.name().unwrap_or_default());
+    info!("[recording] device: {:?}", device.name().unwrap_or_default());
 
     let supported = device
         .default_input_config()
@@ -718,7 +718,7 @@ fn run_recording(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                eprintln!("[recording] audio channel disconnected");
+                info!("[recording] audio channel disconnected");
                 break;
             }
         }
@@ -753,14 +753,14 @@ fn run_recording(
     }
 
     let seg_count = runtime.segments.lock().map(|s| s.len()).unwrap_or(0);
-    eprintln!("[recording] flushed, total segments: {seg_count}");
+    info!("[recording] flushed, total segments: {seg_count}");
 
     Ok((recognizer, vad))
 }
 
 #[tauri::command]
 fn stop_recording(state: tauri::State<'_, AppState>) {
-    eprintln!("[stop_recording] signalling stop");
+    info!("[stop_recording] signalling stop");
     state.stop_signal.store(true, Ordering::Relaxed);
 }
 
@@ -773,7 +773,7 @@ fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
     state.recorded_audio.lock().map_err(|e| e.to_string())?.clear();
     *state.start_wall_clock.lock().map_err(|e| e.to_string())? = None;
     *state.start_instant.lock().map_err(|e| e.to_string())? = None;
-    eprintln!("[clear_results] cleared all segments and audio");
+    info!("[clear_results] cleared all segments and audio");
     Ok(())
 }
 
@@ -928,7 +928,7 @@ fn get_recorded_audio_path(state: tauri::State<'_, AppState>) -> Result<String, 
     let tmp_str = tmp.to_str().ok_or("Invalid temp path")?.to_string();
     let samples = audio.snapshot_all();
     write_wav(&tmp_str, &samples)?;
-    eprintln!("[get_recorded_audio_path] wrote {tmp_str} ({} samples)", samples.len());
+    info!("[get_recorded_audio_path] wrote {tmp_str} ({} samples)", samples.len());
     Ok(tmp_str)
 }
 
@@ -1126,10 +1126,10 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
     let init_num_threads = Arc::clone(&state.num_threads);
 
     std::thread::spawn(move || {
-        eprintln!("[apply_settings] rebuilding models...");
+        info!("[apply_settings] rebuilding models...");
         match build_models(&new_vad_settings) {
             Ok((rec, vad, threads)) => {
-                eprintln!("[apply_settings] models rebuilt, num_threads={threads}");
+                info!("[apply_settings] models rebuilt, num_threads={threads}");
                 let r_ok = recognizer_arc
                     .lock()
                     .map(|mut r| {
@@ -1146,7 +1146,7 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
                     init_num_threads.store(threads, Ordering::Relaxed);
                     init_status.store(1, Ordering::Relaxed);
                 } else {
-                    eprintln!("[apply_settings] mutex poisoned, marking as error");
+                    error!("[apply_settings] mutex poisoned, marking as error");
                     if let Ok(mut err) = init_error.lock() {
                         *err = "Internal error: mutex poisoned".to_string();
                     }
@@ -1154,7 +1154,7 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
                 }
             }
             Err(e) => {
-                eprintln!("[apply_settings] rebuild failed: {e}");
+                error!("[apply_settings] rebuild failed: {e}");
                 if let Ok(mut err) = init_error.lock() {
                     *err = e;
                 }
@@ -1193,19 +1193,19 @@ async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result<ModelListR
 
 fn resource_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
-        eprintln!("[resource_dir] current_exe: {exe:?}");
+        debug!("[resource_dir] current_exe: {exe:?}");
 
         for ancestor in exe.ancestors() {
             if ancestor.extension().is_some_and(|ext| ext == "app") {
                 let resources = ancestor.join("Contents").join("Resources");
-                eprintln!("[resource_dir] found .app bundle: {ancestor:?}");
+                debug!("[resource_dir] found .app bundle: {ancestor:?}");
                 if resources.exists() {
                     let assets = resources.join("assets");
                     if assets.exists() {
-                        eprintln!("[resource_dir] using assets inside Resources: {assets:?}");
+                        debug!("[resource_dir] using assets inside Resources: {assets:?}");
                         return assets;
                     }
-                    eprintln!("[resource_dir] using Resources directly: {resources:?}");
+                    debug!("[resource_dir] using Resources directly: {resources:?}");
                     return resources;
                 }
                 break;
@@ -1215,14 +1215,14 @@ fn resource_dir() -> PathBuf {
         if let Some(exe_dir) = exe.parent() {
             let assets_dir = exe_dir.join("assets");
             if assets_dir.exists() {
-                eprintln!("[resource_dir] using assets dir: {assets_dir:?}");
+                debug!("[resource_dir] using assets dir: {assets_dir:?}");
                 return assets_dir;
             }
-            eprintln!("[resource_dir] using exe dir: {exe_dir:?}");
+            debug!("[resource_dir] using exe dir: {exe_dir:?}");
             return exe_dir.to_path_buf();
         }
     }
-    eprintln!("[resource_dir] fallback to current directory");
+    warn!("[resource_dir] fallback to current directory");
     PathBuf::from(".")
 }
 
@@ -1231,27 +1231,27 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
     let model_dir = dir.join(MODEL_NAME);
     let silero_vad_path = dir.join("silero_vad.onnx");
 
-    eprintln!("[build_models] MODEL_TYPE={MODEL_TYPE}, MODEL_NAME={MODEL_NAME}");
-    eprintln!("[build_models] resource_dir: {dir:?}");
-    eprintln!("[build_models] model_dir: {model_dir:?}, exists={}", model_dir.exists());
+    debug!("[build_models] MODEL_TYPE={MODEL_TYPE}, MODEL_NAME={MODEL_NAME}");
+    debug!("[build_models] resource_dir: {dir:?}");
+    debug!("[build_models] model_dir: {model_dir:?}, exists={}", model_dir.exists());
     if model_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&model_dir) {
             for entry in entries.flatten() {
-                eprintln!("[build_models]   model_dir entry: {:?}", entry.path());
+                debug!("[build_models]   model_dir entry: {:?}", entry.path());
             }
         }
     } else {
-        eprintln!("[build_models] ERROR: model_dir does not exist!");
-        eprintln!("[build_models] dir contents:");
+        error!("[build_models] model_dir does not exist");
+        debug!("[build_models] dir contents:");
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                eprintln!("[build_models]   {:?}", entry.path());
+                debug!("[build_models]   {:?}", entry.path());
             }
         } else {
-            eprintln!("[build_models]   (cannot read dir)");
+            warn!("[build_models] cannot read dir");
         }
     }
-    eprintln!(
+    info!(
         "[build_models] silero_vad: {silero_vad_path:?}, exists={}",
         silero_vad_path.exists()
     );
@@ -1263,19 +1263,19 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
         )
     })?;
 
-    eprintln!(
+    info!(
         "[build_models] got ASR config, num_threads={}",
         asr_config.model_config.num_threads
     );
 
     let hr_lexicon = dir.join("lexicon.txt");
     if hr_lexicon.exists() {
-        eprintln!("[build_models] using homophone replacer lexicon: {hr_lexicon:?}");
+        debug!("[build_models] using homophone replacer lexicon: {hr_lexicon:?}");
         asr_config.hr.lexicon = hr_lexicon.to_str().map(|s| s.to_string());
     }
     let hr_rule_fst = dir.join("replace.fst");
     if hr_rule_fst.exists() {
-        eprintln!("[build_models] using homophone replacer rule_fst: {hr_rule_fst:?}");
+        debug!("[build_models] using homophone replacer rule_fst: {hr_rule_fst:?}");
         asr_config.hr.rule_fsts = hr_rule_fst.to_str().map(|s| s.to_string());
     }
 
@@ -1301,7 +1301,7 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
         ..Default::default()
     };
 
-    eprintln!("[build_models] creating recognizer...");
+    info!("[build_models] creating recognizer...");
     let recognizer = OfflineRecognizer::create(&asr_config).ok_or_else(|| {
         format!(
             "Failed to create recognizer. MODEL_TYPE={MODEL_TYPE}, model_dir={model_dir:?}, \
@@ -1314,16 +1314,16 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
                 .unwrap_or_default()
         )
     })?;
-    eprintln!("[build_models] recognizer created");
+    info!("[build_models] recognizer created");
 
-    eprintln!("[build_models] creating VAD...");
+    info!("[build_models] creating VAD...");
     let vad = VoiceActivityDetector::create(&vad_config, 120.0).ok_or_else(|| {
         format!(
             "Failed to create VAD. silero_vad={silero_vad_path:?}, exists={}",
             silero_vad_path.exists()
         )
     })?;
-    eprintln!("[build_models] VAD created");
+    info!("[build_models] VAD created");
 
     Ok((recognizer, vad, num_threads))
 }
@@ -1370,11 +1370,11 @@ pub fn run() {
     let init_settings = Arc::clone(&state.settings);
 
     std::thread::spawn(move || {
-        eprintln!("[init] starting model initialization...");
+        info!("[init] starting model initialization...");
         let settings = init_settings.lock().map(|s| s.clone()).unwrap_or_default();
         match build_models(&settings) {
             Ok((rec, vad, threads)) => {
-                eprintln!("[init] models ready, num_threads={threads}");
+                info!("[init] models ready, num_threads={threads}");
                 let r_ok = init_recognizer
                     .lock()
                     .map(|mut r| {
@@ -1394,7 +1394,7 @@ pub fn run() {
                     }
                     init_status.store(1, Ordering::Relaxed);
                 } else {
-                    eprintln!("[init] mutex poisoned, marking as error");
+                    error!("[init] mutex poisoned, marking as error");
                     if let Ok(mut err) = init_error.lock() {
                         *err = "Internal error: mutex poisoned".to_string();
                     }
@@ -1402,7 +1402,7 @@ pub fn run() {
                 }
             }
             Err(e) => {
-                eprintln!("[init] model initialization failed: {e}");
+                error!("[init] model initialization failed: {e}");
                 if let Ok(mut err) = init_error.lock() {
                     *err = e;
                 }
@@ -1498,12 +1498,12 @@ pub fn run() {
                                 }
                             }
                             Err(err) => {
-                                eprintln!("[db] init failed at {}: {err}", db_path.display());
+                                error!("[db] init failed at {}: {err}", db_path.display());
                             }
                         }
                     }
                     Err(err) => {
-                        eprintln!("[db] cannot resolve app_data_dir: {err}");
+                        error!("[db] cannot resolve app_data_dir: {err}");
                     }
                 }
                 Ok(())

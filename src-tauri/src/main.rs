@@ -1,4 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use custom_utils::logger;
+use log::LevelFilter::Info;
+
 fn main() {
-    non_streaming_speech_recognition_from_microphone_lib::run()
+    let _logger_handle = logger::logger_feature("app", "debug", Info, false).build();
+    non_streaming_speech_recognition_from_microphone_lib::run();
 }
