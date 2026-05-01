@@ -44,7 +44,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   disabled,
 }) => {
   return (
-    <aside className="w-80 h-full flex flex-col bg-[var(--bg-app)] border-r border-[var(--line)] p-6.5 pt-6 gap-5.5">
+    <aside className="w-80 h-full flex flex-col bg-[var(--bg-app)] border-r border-[var(--line)] px-8 py-6 gap-5">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
@@ -100,13 +100,13 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
       <div className="flex-1" />
 
       <div className="pt-4 border-t border-[var(--line)] grid grid-cols-2 gap-2">
-        <Button variant="soft" className="w-full h-8.5 rounded-lg text-xs" onClick={onClear} disabled={status === 'recording' || disabled}>
+        <Button variant="soft" size="sm" className="w-full h-9 rounded-lg text-xs" onClick={onClear} disabled={status === 'recording' || disabled}>
           清空结果
         </Button>
-        <Button variant="soft" className="w-full h-8.5 rounded-lg text-xs" onClick={onShowRules} disabled={disabled}>
+        <Button variant="soft" size="sm" className="w-full h-9 rounded-lg text-xs" onClick={onShowRules} disabled={disabled}>
           词修正
         </Button>
-        <Button variant="soft" className="col-span-2 w-full h-8.5 rounded-lg text-xs" onClick={onShowSettings} disabled={status === 'recording' || disabled}>
+        <Button variant="soft" size="sm" className="col-span-2 w-full h-9 rounded-lg text-xs" onClick={onShowSettings} disabled={status === 'recording' || disabled}>
           识别参数设置
         </Button>
       </div>

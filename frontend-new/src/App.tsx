@@ -9,6 +9,7 @@ import { useAppStore } from './store/useAppStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { Icon } from './components/ui/Icon';
 import { Button } from './components/ui/Button';
+import { RecordCard } from './components/RecordCard';
 import { SettingsModal } from './components/SettingsModal';
 import { CorrectionModal } from './components/CorrectionModal';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -32,6 +33,8 @@ function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
+  const copiedRawKeysRef = useRef<Set<string>>(new Set());
+  const copiedOptimizedKeysRef = useRef<Set<string>>(new Set());
 
   // Recording Logic
   const stopPolling = useCallback(() => {
@@ -100,6 +103,8 @@ function App() {
       store.setSegments([]);
       store.setElapsedTime(0);
       store.setAudioUrl(null);
+      copiedRawKeysRef.current.clear();
+      copiedOptimizedKeysRef.current.clear();
       startPolling();
     } catch (err) {
       console.error("Start failed", err);
@@ -133,6 +138,8 @@ function App() {
     await TauriAPI.clearResults();
     store.setSegments([]);
     store.setAudioUrl(null);
+    copiedRawKeysRef.current.clear();
+    copiedOptimizedKeysRef.current.clear();
   };
 
   const handleDeviceChange = async (device: string) => {
@@ -186,6 +193,28 @@ function App() {
 
   const isSimpleMode = store.uiMode === 'simple';
   const showActions = store.segments.length > 0;
+  
+  useEffect(() => {
+    if (!store.autoCopy) {
+      return;
+    }
+
+    for (const seg of store.segments) {
+      const key = seg.id !== null ? String(seg.id) : `${seg.wall_start}-${seg.wall_end}-${seg.start}-${seg.end}`;
+      const rawText = seg.text_raw.trim();
+      if (rawText && !copiedRawKeysRef.current.has(key)) {
+        copiedRawKeysRef.current.add(key);
+        TauriAPI.copyToClipboard(rawText).catch((err) => console.error('Auto copy raw text failed', err));
+      }
+
+      const optimizedText = (seg.text_optimized || '').trim();
+      const shouldCopyOptimized = optimizedText && optimizedText !== rawText && seg.opt_status === 'done';
+      if (shouldCopyOptimized && !copiedOptimizedKeysRef.current.has(key)) {
+        copiedOptimizedKeysRef.current.add(key);
+        TauriAPI.copyToClipboard(optimizedText).catch((err) => console.error('Auto copy optimized text failed', err));
+      }
+    }
+  }, [store.autoCopy, store.segments]);
 
   useEffect(() => {
     const applyWindowMode = async () => {
@@ -207,6 +236,33 @@ function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--bg-canvas)]">
+      {isSimpleMode && (
+        <main className="w-full h-full p-3 flex items-center justify-center">
+          <section className="w-full h-full rounded-[16px] border border-[var(--line)] bg-[var(--bg-app)] shadow-[var(--shadow-sm)] p-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-[7px] bg-gradient-to-br from-[var(--primary)] to-[var(--primary-deep)] text-white flex items-center justify-center">
+                  <Icon name="logo" size={14} stroke={2} />
+                </div>
+                <span className="text-[12px] font-semibold text-[var(--ink)]">简洁模式</span>
+              </div>
+              <Button variant="ghost" size="icon" className="w-7 h-7" onClick={() => store.setUiMode('detailed')}>
+                <Icon name="search" size={14} className="text-[var(--ink-3)]" />
+              </Button>
+            </div>
+
+            <RecordCard
+              status={store.status}
+              elapsedTime={store.elapsedTime}
+              onStart={startRecording}
+              onStop={stopRecording}
+              disabled={store.devices.length === 0 || isBusy}
+            />
+          </section>
+        </main>
+      )}
+
+      {!isSimpleMode && (
       <ControlPanel
         status={store.status}
         elapsedTime={store.elapsedTime}
@@ -225,6 +281,7 @@ function App() {
         onToggleMode={() => store.setUiMode(store.uiMode === 'detailed' ? 'simple' : 'detailed')}
         disabled={isBusy}
       />
+      )}
 
       {!isSimpleMode && (
         <main className="flex-1 flex flex-col min-w-0">

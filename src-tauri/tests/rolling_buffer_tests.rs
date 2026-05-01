@@ -4,7 +4,7 @@ mod audio_buffer;
 use audio_buffer::{RollingAudioBuffer, MAX_AUDIO_SAMPLES, SAMPLE_RATE};
 
 #[test]
-fn keeps_600s_window_limit() {
+fn keeps_window_limit() {
     let mut buf = RollingAudioBuffer::new();
     buf.push_samples(&vec![0.1; MAX_AUDIO_SAMPLES]);
     assert_eq!(buf.len(), MAX_AUDIO_SAMPLES);
@@ -16,19 +16,21 @@ fn keeps_600s_window_limit() {
 }
 
 #[test]
-fn rolling_boundary_600_601_seconds() {
+fn rolling_boundary_window_plus_one_second() {
     let mut buf = RollingAudioBuffer::new();
-    buf.push_samples(&vec![1.0; SAMPLE_RATE * 601]);
+    let window_secs = MAX_AUDIO_SAMPLES / SAMPLE_RATE;
+    buf.push_samples(&vec![1.0; SAMPLE_RATE * (window_secs + 1)]);
 
     assert_eq!(buf.len(), MAX_AUDIO_SAMPLES);
     assert_eq!(buf.global_start_sample(), SAMPLE_RATE as u64);
-    assert_eq!(buf.global_end_sample(), (SAMPLE_RATE * 601) as u64);
+    assert_eq!(buf.global_end_sample(), (SAMPLE_RATE * (window_secs + 1)) as u64);
 }
 
 #[test]
 fn snapshot_range_rejects_out_of_window_request() {
     let mut buf = RollingAudioBuffer::new();
-    buf.push_samples(&vec![1.0; SAMPLE_RATE * 601]);
+    let window_secs = MAX_AUDIO_SAMPLES / SAMPLE_RATE;
+    buf.push_samples(&vec![1.0; SAMPLE_RATE * (window_secs + 1)]);
 
     assert!(buf.snapshot_range(0, 100).is_none());
 
