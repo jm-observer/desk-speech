@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 #[derive(Clone, Debug)]
 pub struct NewSegment {
     pub session_id: String,
+    pub segment_id: u64,
     pub revision: i64,
     pub start_sec: f32,
     pub end_sec: f32,
@@ -106,12 +107,22 @@ pub fn session_exists(conn: &Connection, session_id: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Result<()> {
+pub fn upsert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Result<()> {
+    let sql = "INSERT INTO asr_raw_records(session_id, segment_id, revision, start_sec, end_sec, wall_start, wall_end, text_raw, opt_status, optimize_status, translate_status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 'pending', 'blocked', ?9)
+         ON CONFLICT(session_id, segment_id) DO UPDATE SET
+            revision = excluded.revision,
+            start_sec = excluded.start_sec,
+            end_sec = excluded.end_sec,
+            wall_start = excluded.wall_start,
+            wall_end = excluded.wall_end,
+            text_raw = excluded.text_raw,
+            created_at = excluded.created_at";
     conn.execute(
-        "INSERT INTO asr_raw_records(session_id, revision, start_sec, end_sec, wall_start, wall_end, text_raw, opt_status, optimize_status, translate_status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 'pending', 'blocked', ?8)",
+        sql,
         params![
             segment.session_id,
+            segment.segment_id,
             segment.revision,
             segment.start_sec,
             segment.end_sec,
@@ -121,7 +132,12 @@ pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
             now,
         ],
     )
-    .context("failed to insert segment")?;
+    .with_context(|| {
+        format!(
+            "failed to upsert segment session_id={}, segment_id={}, revision={}",
+            segment.session_id, segment.segment_id, segment.revision
+        )
+    })?;
     Ok(())
 }
 

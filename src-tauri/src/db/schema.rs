@@ -10,6 +10,24 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(sql_0002)
             .context("failed to run sqlite migration 0002_split_optimize_translate.sql")?;
     }
+    if !column_exists(conn, "asr_raw_records", "segment_id")? {
+        let sql_0003 = include_str!("../../migrations/0003_add_segment_id.sql");
+        conn.execute_batch(sql_0003)
+            .context("failed to run sqlite migration 0003_add_segment_id.sql")?;
+    }
+    // Backfill legacy rows that were introduced with default segment_id=0.
+    // Using row id makes (session_id, segment_id) unique and unblocks unique index creation.
+    conn.execute_batch(
+        "UPDATE asr_raw_records
+         SET segment_id = id
+         WHERE segment_id = 0;",
+    )
+    .context("failed to backfill legacy segment_id before creating unique index")?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_asr_raw_records_session_seg
+         ON asr_raw_records(session_id, segment_id);",
+    )
+    .context("failed to ensure sqlite unique index idx_asr_raw_records_session_seg (check duplicated (session_id,segment_id))")?;
     Ok(())
 }
 

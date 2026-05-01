@@ -4,30 +4,18 @@ import type { Segment } from './api/tauri-client';
 import type { RawSegment } from './api/tauri-client';
 import { ControlPanel } from './components/ControlPanel';
 import { SegmentCard } from './components/SegmentCard';
-import { AudioPlayer } from './components/AudioPlayer';
 import { useAppStore } from './store/useAppStore';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { Icon } from './components/ui/Icon';
-import { Button } from './components/ui/Button';
 import { RecordCard } from './components/RecordCard';
 import { SettingsModal } from './components/SettingsModal';
 import { CorrectionModal } from './components/CorrectionModal';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 
-const DEFAULT_SRT_PATH = 'D:\\temp\\streamspeech.srt';
-const DEFAULT_AUDIO_PATH = 'D:\\temp\\streamspeech.wav';
 const SIMPLE_WINDOW_SIZE = { width: 560, height: 280 };
 const DETAILED_WINDOW_MIN_SIZE = { width: 900, height: 600 };
 const DETAILED_WINDOW_SIZE = { width: 1280, height: 820 };
 
-
-function formatStamp(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  const centi = Math.floor((seconds * 100) % 100);
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(centi).padStart(2, '0')}`;
-}
 
 async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
   if (event.button !== 0) {
@@ -52,31 +40,34 @@ async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
 function App() {
   const store = useAppStore();
   const pollTimer = useRef<number | null>(null);
-  const [activeSegmentId, setActiveSegmentId] = useState<number | null>(null);
-  const [seekTo, setSeekTo] = useState<number | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
-  const [copiedState, setCopiedState] = useState<'zh' | 'en' | null>(null);
-  const copyFeedbackTimerRef = useRef<number | null>(null);
 
   const mergeSegmentsByRevision = useCallback((incoming: Segment[]) => {
     store.setSegments((prev) => {
       if (prev.length === 0) {
         return incoming;
       }
-      const merged = new Map<number, Segment>();
-      prev.forEach((seg, index) => {
-        const key = seg.revision ?? -(index + 1);
+      // Use segment ID as the primary key, fallback to start time.
+      // This ensures that when a segment is updated (revision changes), we update the same record
+      // instead of adding a new one.
+      const merged = new Map<string, Segment>();
+      
+      prev.forEach((seg) => {
+        const key = seg.id !== null ? `id-${seg.id}` : `start-${seg.start.toFixed(3)}`;
         merged.set(key, seg);
       });
-      incoming.forEach((seg, index) => {
-        const key = seg.revision ?? -(index + 1);
+      
+      incoming.forEach((seg) => {
+        const key = seg.id !== null ? `id-${seg.id}` : `start-${seg.start.toFixed(3)}`;
         const current = merged.get(key);
+        // Update if not exists or if incoming has a newer revision
         if (!current || (seg.revision ?? 0) >= (current.revision ?? 0)) {
           merged.set(key, seg);
         }
       });
+      
       return Array.from(merged.values()).sort((a, b) => a.start - b.start);
     });
   }, [store]);
@@ -130,13 +121,6 @@ function App() {
 
         stopPolling();
         store.setStatus('finished');
-
-        try {
-          const path = await TauriAPI.getRecordedAudioPath();
-          store.setAudioUrl(convertFileSrc(path));
-        } catch (err) {
-          console.error("Load audio failed", err);
-        }
       } catch (err) {
         console.error("Poll failed", err);
         stopPolling();
@@ -154,8 +138,6 @@ function App() {
       store.setStatus('recording');
       store.setSegments([]);
       store.setElapsedTime(0);
-      store.setAudioUrl(null);
-      setCopiedState(null);
       startPolling();
     } catch (err) {
       console.error("Start failed", err);
@@ -177,26 +159,9 @@ function App() {
       setIsBusy(false);
     }
   };
-  const handleSeek = (time: number) => {
-    setSeekTo(time);
-  };
 
-  const setCopyFeedback = (target: 'zh' | 'en') => {
-    setCopiedState(target);
-    if (copyFeedbackTimerRef.current !== null) {
-      window.clearTimeout(copyFeedbackTimerRef.current);
-    }
-    copyFeedbackTimerRef.current = window.setTimeout(() => {
-      setCopiedState(null);
-      copyFeedbackTimerRef.current = null;
-    }, 1200);
-  };
-
-  const handleCopy = async (text: string, target?: 'zh' | 'en') => {
+  const handleCopy = async (text: string) => {
     await TauriAPI.copyToClipboard(text);
-    if (target) {
-      setCopyFeedback(target);
-    }
   };
 
   const handleSegmentCopy = (text: string, source: 'english' | 'optimized' | 'raw') => {
@@ -213,8 +178,6 @@ function App() {
   const handleClear = async () => {
     await TauriAPI.clearResults();
     store.setSegments([]);
-    store.setAudioUrl(null);
-    setCopiedState(null);
   };
 
   const handleDeviceChange = async (device: string) => {
@@ -227,65 +190,8 @@ function App() {
     }
   };
 
-  const handleCopyZh = () => {
-    const text = store.segments
-      .map((seg) => seg.text_english || seg.text_optimized || seg.text_raw)
-      .filter(Boolean)
-      .join('\n');
-    if (text) {
-      handleCopy(text, 'zh').catch((err) => console.error('Copy zh failed', err));
-    }
-  };
-
-  const handleCopyEn = () => {
-    const text = store.segments.map((seg) => seg.text_english || '').filter(Boolean).join('\n');
-    if (text) {
-      handleCopy(text, 'en').catch((err) => console.error('Copy en failed', err));
-    }
-  };
-
-  const handleCopyWithTimestamp = () => {
-    const text = store.segments
-      .map((seg) => `[${formatStamp(seg.start)} -> ${formatStamp(seg.end)}] ${seg.text_optimized || seg.text_raw}`)
-      .join('\n');
-    if (text) {
-      handleCopy(text).catch((err) => console.error('Copy timestamp text failed', err));
-    }
-  };
-
-  const handleExportSrt = async () => {
-    const path = window.prompt('请输入 SRT 导出路径', DEFAULT_SRT_PATH);
-    if (!path) return;
-    try {
-      await TauriAPI.exportSrt(path);
-    } catch (err) {
-      console.error("Export SRT failed", err);
-      store.setStatus('error');
-    }
-  };
-
-  const handleSaveAudio = async () => {
-    const path = window.prompt('请输入音频导出路径', DEFAULT_AUDIO_PATH);
-    if (!path) return;
-    try {
-      await TauriAPI.saveAllAudio(path);
-    } catch (err) {
-      console.error("Save audio failed", err);
-      store.setStatus('error');
-    }
-  };
-
   const isSimpleMode = store.uiMode === 'simple';
-  const showActions = store.segments.length > 0;
   const displaySegments = store.segments.slice().reverse();
-  
-  useEffect(() => {
-    return () => {
-      if (copyFeedbackTimerRef.current !== null) {
-        window.clearTimeout(copyFeedbackTimerRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     const applyWindowMode = async () => {
@@ -344,7 +250,7 @@ function App() {
       )}
 
       {!isSimpleMode && (
-        <div className="flex min-w-0 flex-1 h-full">
+        <div className="shrink-0 h-full">
           <ControlPanel
             status={store.status}
             elapsedTime={store.elapsedTime}
@@ -366,22 +272,8 @@ function App() {
 
       {!isSimpleMode && (
         <main className="flex-1 flex flex-col min-w-0">
-          <div className="h-[62px] px-6 border-b border-[var(--line)] flex items-center gap-2">
-            <Button variant={copiedState === 'zh' ? 'soft' : 'outline'} size="sm" disabled={!showActions} onClick={handleCopyZh}>
-              {copiedState === 'zh' ? '中文已复制' : '复制中文'}
-            </Button>
-            <Button variant={copiedState === 'en' ? 'soft' : 'outline'} size="sm" disabled={!showActions} onClick={handleCopyEn}>
-              {copiedState === 'en' ? '英文已复制' : '复制英文'}
-            </Button>
-            <Button variant="outline" size="sm" disabled={!showActions} onClick={handleCopyWithTimestamp}>含时间戳</Button>
-            <Button variant="outline" size="sm" disabled={!showActions} onClick={handleExportSrt}>导出 SRT</Button>
-            <Button variant="outline" size="sm" disabled={!showActions} onClick={handleSaveAudio}>保存音频</Button>
-            {!showActions && (
-              <span className="ml-auto text-[12px] text-[var(--ink-4)]">开始录音后将启用导出</span>
-            )}
-          </div>
-          <div className="flex-1 overflow-y-auto p-6 px-10">
-            <div className="max-w-3xl mx-auto flex flex-col gap-4">
+          <div className="flex-1 overflow-y-auto p-4 px-6">
+            <div className="max-w-none mx-0 flex flex-col gap-3">
               {store.segments.length === 0 && store.status === 'idle' && (
                 <div className="flex flex-col items-center justify-center py-40 gap-4 opacity-30">
                   <Icon name="mic" size={48} stroke={1.2} />
@@ -393,19 +285,12 @@ function App() {
                 <SegmentCard
                   key={idx}
                   segment={seg}
-                  isActive={activeSegmentId !== null && seg.id === activeSegmentId}
                   showEnglish={store.showEnglish}
-                  onSeek={handleSeek}
                   onCopy={handleSegmentCopy}
                 />
               ))}
             </div>
           </div>
-
-          <AudioPlayer url={store.audioUrl} seekTo={seekTo} onTimeUpdate={(t) => {
-            const active = store.segments.find(s => t >= s.start && t <= s.end);
-            setActiveSegmentId(active?.id ?? null);
-          }} />
         </main>
       )}
       <SettingsModal open={showSettingsModal} onClose={() => setShowSettingsModal(false)} />

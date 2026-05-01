@@ -12,7 +12,6 @@ export const useAppStore = () => {
   const [elapsedTime, setElapsedTime] = useState(0);
   const [showEnglish, setShowEnglish] = useState(true);
   const [uiMode, setUiMode] = useState<'detailed' | 'simple'>('detailed');
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
@@ -118,7 +117,6 @@ export const useAppStore = () => {
     selectedDevice, setSelectedDevice,
     elapsedTime, setElapsedTime,
     showEnglish, setShowEnglish,
-    uiMode, setUiMode,
-    audioUrl, setAudioUrl
+    uiMode, setUiMode
   };
 };

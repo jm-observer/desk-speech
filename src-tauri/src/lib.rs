@@ -414,11 +414,17 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 translate_status: "blocked".to_string(),
             };
 
-            if let Ok(mut segs) = ctx.segments.lock() {
-                if !merge_segment_in_place(&mut segs, &new_segment) {
+            let db_segment_id = if let Ok(mut segs) = ctx.segments.lock() {
+                if merge_segment_in_place(&mut segs, &new_segment) {
+                    segs.last().map(|s| s.segment_id).unwrap_or(new_segment.segment_id)
+                } else {
+                    let id = new_segment.segment_id;
                     segs.push(new_segment);
+                    id
                 }
-            }
+            } else {
+                new_segment.segment_id
+            };
 
             let llm_input_text = ctx
                 .segments
@@ -432,6 +438,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 let event = DbEvent::InsertSegment {
                     segment: NewSegment {
                         session_id: ctx.session_id.to_string(),
+                        segment_id: db_segment_id,
                         revision,
                         start_sec: rel_start,
                         end_sec: rel_end,
@@ -443,9 +450,47 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 if let Err(err) = writer.try_send(event) {
                     if matches!(err, TrySendError::Full(_)) {
                         warn!("[db-worker] queue full, dropping segment event");
+                    } else {
+                        warn!(
+                            "[db-worker] failed to enqueue segment session_id={}, segment_id={}, revision={}, err={}",
+                            ctx.session_id, db_segment_id, revision, err
+                        );
+                    }
+                } else {
+                    debug!(
+                        "[db-worker] enqueued segment session_id={}, segment_id={}, revision={}",
+                        ctx.session_id, db_segment_id, revision
+                    );
+                }
+            } else {
+                warn!("[db-worker] writer not ready, fallback to direct upsert");
+                if let Ok(db_guard) = ctx.state.db.lock() {
+                    if let Some(db) = db_guard.as_ref() {
+                        let result = db.upsert_segment(NewSegment {
+                            session_id: ctx.session_id.to_string(),
+                            segment_id: db_segment_id,
+                            revision,
+                            start_sec: rel_start,
+                            end_sec: rel_end,
+                            wall_start: wall_start_fmt.clone(),
+                            wall_end: wall_end_fmt.clone(),
+                            text_raw: text_raw.clone(),
+                        });
+                        match result {
+                            Ok(()) => info!(
+                                "[db-direct] upsert ok session_id={}, segment_id={}, revision={}",
+                                ctx.session_id, db_segment_id, revision
+                            ),
+                            Err(err) => error!(
+                                "[db-direct] upsert failed session_id={}, segment_id={}, revision={}, err={}",
+                                ctx.session_id, db_segment_id, revision, err
+                            ),
+                        }
                     }
                 }
+            }
 
+            if let Some(writer) = ctx.db_writer {
                 spawn_llm_postprocess_task_v2(
                     writer.clone(),
                     Arc::clone(ctx.state),
@@ -818,6 +863,11 @@ fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> 
         selected_device: Arc::clone(&state.selected_device),
     });
     let db_writer = state.db_writer.lock().map_err(|e| e.to_string())?.as_ref().cloned();
+    info!(
+        "[start_recording] created session_id={}, db_writer_ready={}",
+        session_id,
+        db_writer.is_some()
+    );
     let current_session_id = Arc::clone(&state.current_session_id);
     let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
     let next_revision = Arc::clone(&state.next_revision);
@@ -1765,10 +1815,20 @@ pub fn run() {
                                             match event {
                                                 DbEvent::InsertSegment { segment } => {
                                                     debug!(
-                                                        "[db-worker] insert segment session_id={}, revision={}",
-                                                        segment.session_id, segment.revision
+                                                        "[db-worker] upsert segment session_id={}, segment_id={}, revision={}",
+                                                        segment.session_id, segment.segment_id, segment.revision
                                                     );
-                                                    let _ = db_for_worker.insert_segment(segment);
+                                                    if let Err(err) = db_for_worker.upsert_segment(segment.clone()) {
+                                                        error!(
+                                                            "[db-worker] upsert failed session_id={}, segment_id={}, revision={}, err={}",
+                                                            segment.session_id, segment.segment_id, segment.revision, err
+                                                        );
+                                                    } else {
+                                                        debug!(
+                                                            "[db-worker] upsert ok session_id={}, segment_id={}, revision={}",
+                                                            segment.session_id, segment.segment_id, segment.revision
+                                                        );
+                                                    }
                                                 }
                                                 DbEvent::MarkOptimizeRunning { session_id, revision } => {
                                                     debug!(

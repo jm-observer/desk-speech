@@ -6,17 +6,13 @@ import { Icon } from './ui/Icon';
 
 interface SegmentCardProps {
   segment: Segment;
-  isActive?: boolean;
   showEnglish?: boolean;
-  onSeek: (time: number) => void;
   onCopy: (text: string, source: 'english' | 'optimized' | 'raw') => void;
 }
 
 export const SegmentCard: React.FC<SegmentCardProps> = ({
   segment,
-  isActive,
   showEnglish,
-  onSeek,
   onCopy,
 }) => {
   const optimizeRunning = segment.optimize_status === 'running' || segment.optimize_status === 'pending';
@@ -33,16 +29,12 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   return (
     <div className={cn(
       "group relative flex flex-col p-4 px-4.5 gap-2.5 bg-[var(--bg-card)] border border-[var(--line)] rounded-[16px] shadow-[var(--shadow-sm)] transition-all animate-fade-up",
-      "hover:shadow-[var(--shadow-md)] hover:border-[var(--line-strong)]",
-      isActive && "border-[var(--primary)] shadow-[0_0_0_3px_var(--primary-soft)]"
+      "hover:shadow-[var(--shadow-md)] hover:border-[var(--line-strong)]"
     )}>
       <div className="flex items-center gap-3">
-        <button 
-          onClick={() => onSeek(segment.start)}
-          className="px-2 py-0.5 rounded-md bg-[var(--bg-soft)] font-mono text-[11px] text-[var(--ink-2)] hover:bg-[var(--primary-soft)] hover:text-[var(--primary-deep)] transition-colors"
-        >
+        <span className="px-2 py-0.5 rounded-md bg-[var(--bg-soft)] font-mono text-[11px] text-[var(--ink-2)]">
           {stripYear(segment.wall_start)} → {stripYear(segment.wall_end)}
-        </button>
+        </span>
         <span className="text-[11px] text-[var(--ink-4)]">{duration.toFixed(1)}s</span>
         
         <div className="flex-1" />

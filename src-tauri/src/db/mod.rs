@@ -46,10 +46,10 @@ impl SpeechDatabase {
         repository::close_session(&conn, session_id, &now)
     }
 
-    pub fn insert_segment(&self, segment: NewSegment) -> Result<()> {
+    pub fn upsert_segment(&self, segment: NewSegment) -> Result<()> {
         let now = now_str();
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        repository::insert_segment(&conn, &segment, &now)
+        repository::upsert_segment(&conn, &segment, &now)
     }
 
     pub fn mark_old_revisions_skipped(&self, session_id: &str, latest_revision: i64) -> Result<()> {
@@ -174,8 +174,9 @@ mod tests {
         let db = SpeechDatabase::init(&path).unwrap();
         let session_id = db.create_session().unwrap();
 
-        db.insert_segment(NewSegment {
+        db.upsert_segment(NewSegment {
             session_id: session_id.clone(),
+            segment_id: 1,
             revision: 1,
             start_sec: 0.0,
             end_sec: 1.0,
@@ -231,8 +232,9 @@ mod tests {
         let session_id = db.create_session().unwrap();
 
         for revision in 1..=3 {
-            db.insert_segment(NewSegment {
+            db.upsert_segment(NewSegment {
                 session_id: session_id.clone(),
+                segment_id: revision as u64,
                 revision,
                 start_sec: revision as f32,
                 end_sec: revision as f32 + 0.5,
@@ -265,8 +267,9 @@ mod tests {
         let db = SpeechDatabase::init(&path).unwrap();
         let session_id = db.create_session().unwrap();
 
-        db.insert_segment(NewSegment {
+        db.upsert_segment(NewSegment {
             session_id: session_id.clone(),
+            segment_id: 1,
             revision: 1,
             start_sec: 0.0,
             end_sec: 0.8,

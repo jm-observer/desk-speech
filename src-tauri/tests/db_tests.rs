@@ -17,8 +17,9 @@ fn initializes_and_migrates_schema() {
     let db = SpeechDatabase::init(&path).unwrap();
     let session_id = db.create_session().unwrap();
 
-    db.insert_segment(NewSegment {
+    db.upsert_segment(NewSegment {
         session_id: session_id.clone(),
+        segment_id: 1,
         revision: 1,
         start_sec: 0.0,
         end_sec: 1.0,
@@ -43,8 +44,9 @@ fn supports_rule_version_and_tail_query() {
     let session_id = db.create_session().unwrap();
 
     for i in 0..3 {
-        db.insert_segment(NewSegment {
+        db.upsert_segment(NewSegment {
             session_id: session_id.clone(),
+            segment_id: i as u64 + 1,
             revision: i as i64 + 1,
             start_sec: i as f32,
             end_sec: i as f32 + 0.5,
@@ -80,8 +82,9 @@ fn split_stage_status_and_latest_only_constraints_hold() {
     let db = SpeechDatabase::init(&path).unwrap();
     let session_id = db.create_session().unwrap();
 
-    db.insert_segment(NewSegment {
+    db.upsert_segment(NewSegment {
         session_id: session_id.clone(),
+        segment_id: 1,
         revision: 1,
         start_sec: 0.0,
         end_sec: 0.5,
@@ -90,8 +93,9 @@ fn split_stage_status_and_latest_only_constraints_hold() {
         text_raw: "raw-1".to_string(),
     })
     .unwrap();
-    db.insert_segment(NewSegment {
+    db.upsert_segment(NewSegment {
         session_id: session_id.clone(),
+        segment_id: 2,
         revision: 2,
         start_sec: 0.6,
         end_sec: 1.0,
