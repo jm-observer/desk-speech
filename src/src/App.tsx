@@ -57,8 +57,8 @@ function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
-  const copiedRawKeysRef = useRef<Set<string>>(new Set());
-  const copiedOptimizedKeysRef = useRef<Set<string>>(new Set());
+  const [copiedState, setCopiedState] = useState<'zh' | 'en' | null>(null);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
 
   // Recording Logic
   const stopPolling = useCallback(() => {
@@ -127,8 +127,7 @@ function App() {
       store.setSegments([]);
       store.setElapsedTime(0);
       store.setAudioUrl(null);
-      copiedRawKeysRef.current.clear();
-      copiedOptimizedKeysRef.current.clear();
+      setCopiedState(null);
       startPolling();
     } catch (err) {
       console.error("Start failed", err);
@@ -154,16 +153,29 @@ function App() {
     setSeekTo(time);
   };
 
-  const handleCopy = (text: string) => {
-    TauriAPI.copyToClipboard(text);
+  const setCopyFeedback = (target: 'zh' | 'en') => {
+    setCopiedState(target);
+    if (copyFeedbackTimerRef.current !== null) {
+      window.clearTimeout(copyFeedbackTimerRef.current);
+    }
+    copyFeedbackTimerRef.current = window.setTimeout(() => {
+      setCopiedState(null);
+      copyFeedbackTimerRef.current = null;
+    }, 1200);
+  };
+
+  const handleCopy = async (text: string, target?: 'zh' | 'en') => {
+    await TauriAPI.copyToClipboard(text);
+    if (target) {
+      setCopyFeedback(target);
+    }
   };
 
   const handleClear = async () => {
     await TauriAPI.clearResults();
     store.setSegments([]);
     store.setAudioUrl(null);
-    copiedRawKeysRef.current.clear();
-    copiedOptimizedKeysRef.current.clear();
+    setCopiedState(null);
   };
 
   const handleDeviceChange = async (device: string) => {
@@ -178,19 +190,25 @@ function App() {
 
   const handleCopyZh = () => {
     const text = store.segments.map((seg) => seg.text_optimized || seg.text_raw).filter(Boolean).join('\n');
-    if (text) handleCopy(text);
+    if (text) {
+      handleCopy(text, 'zh').catch((err) => console.error('Copy zh failed', err));
+    }
   };
 
   const handleCopyEn = () => {
     const text = store.segments.map((seg) => seg.text_english || '').filter(Boolean).join('\n');
-    if (text) handleCopy(text);
+    if (text) {
+      handleCopy(text, 'en').catch((err) => console.error('Copy en failed', err));
+    }
   };
 
   const handleCopyWithTimestamp = () => {
     const text = store.segments
       .map((seg) => `[${formatStamp(seg.start)} -> ${formatStamp(seg.end)}] ${seg.text_optimized || seg.text_raw}`)
       .join('\n');
-    if (text) handleCopy(text);
+    if (text) {
+      handleCopy(text).catch((err) => console.error('Copy timestamp text failed', err));
+    }
   };
 
   const handleExportSrt = async () => {
@@ -220,28 +238,12 @@ function App() {
   const displaySegments = store.segments.slice().reverse();
   
   useEffect(() => {
-    if (!store.autoCopy) {
-      return;
-    }
-
-    for (const seg of store.segments) {
-      const key = seg.id !== null ? String(seg.id) : `${seg.wall_start}-${seg.wall_end}-${seg.start}-${seg.end}`;
-      const rawText = seg.text_raw.trim();
-      const optimizedText = (seg.text_optimized || '').trim();
-      const shouldCopyOptimized = optimizedText && seg.opt_status === 'done';
-      if (shouldCopyOptimized && !copiedOptimizedKeysRef.current.has(key)) {
-        copiedOptimizedKeysRef.current.add(key);
-        TauriAPI.copyToClipboard(optimizedText).catch((err) => console.error('Auto copy optimized text failed', err));
-        continue;
+    return () => {
+      if (copyFeedbackTimerRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
       }
-
-      // Fallback to raw text only when optimized text is not ready.
-      if (!shouldCopyOptimized && rawText && !copiedRawKeysRef.current.has(key)) {
-        copiedRawKeysRef.current.add(key);
-        TauriAPI.copyToClipboard(rawText).catch((err) => console.error('Auto copy raw text failed', err));
-      }
-    }
-  }, [store.autoCopy, store.segments]);
+    };
+  }, []);
 
   useEffect(() => {
     const applyWindowMode = async () => {
@@ -307,8 +309,6 @@ function App() {
             devices={store.devices}
             selectedDevice={store.selectedDevice}
             onDeviceChange={handleDeviceChange}
-            autoCopy={store.autoCopy}
-            onAutoCopyChange={store.setAutoCopy}
             showEnglish={store.showEnglish}
             onShowEnglishChange={store.setShowEnglish}
             onStart={startRecording}
@@ -325,8 +325,12 @@ function App() {
       {!isSimpleMode && (
         <main className="flex-1 flex flex-col min-w-0">
           <div className="h-[62px] px-6 border-b border-[var(--line)] flex items-center gap-2">
-            <Button variant="outline" size="sm" disabled={!showActions} onClick={handleCopyZh}>复制中文</Button>
-            <Button variant="outline" size="sm" disabled={!showActions} onClick={handleCopyEn}>复制英文</Button>
+            <Button variant={copiedState === 'zh' ? 'soft' : 'outline'} size="sm" disabled={!showActions} onClick={handleCopyZh}>
+              {copiedState === 'zh' ? '中文已复制' : '复制中文'}
+            </Button>
+            <Button variant={copiedState === 'en' ? 'soft' : 'outline'} size="sm" disabled={!showActions} onClick={handleCopyEn}>
+              {copiedState === 'en' ? '英文已复制' : '复制英文'}
+            </Button>
             <Button variant="outline" size="sm" disabled={!showActions} onClick={handleCopyWithTimestamp}>含时间戳</Button>
             <Button variant="outline" size="sm" disabled={!showActions} onClick={handleExportSrt}>导出 SRT</Button>
             <Button variant="outline" size="sm" disabled={!showActions} onClick={handleSaveAudio}>保存音频</Button>
@@ -350,7 +354,9 @@ function App() {
                   isActive={activeSegmentId !== null && seg.id === activeSegmentId}
                   showEnglish={store.showEnglish}
                   onSeek={handleSeek}
-                  onCopy={handleCopy}
+                  onCopy={(text) => {
+                    handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
+                  }}
                 />
               ))}
             </div>

@@ -50,6 +50,7 @@ export interface AppSettings {
   api_key: string;
   selected_model: string;
   prompt_template: string;
+  auto_copy_mode: 'off' | 'english' | 'optimized_zh';
 }
 
 export interface LlmModelList {

@@ -1,11 +1,22 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoCopyMode {
+    Off,
+    #[default]
+    English,
+    OptimizedZh,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct LlmSettings {
     pub provider_url: String,
     pub api_key: String,
     pub selected_model: String,
     pub prompt_template: String,
+    #[serde(default)]
+    pub auto_copy_mode: AutoCopyMode,
 }
 
 impl Default for LlmSettings {
@@ -16,6 +27,7 @@ impl Default for LlmSettings {
             selected_model: String::new(),
             prompt_template: "你是一个中英双语转写后处理助手。\n输入是语音识别文本，请返回 JSON：{\"text_optimized\":\"...\",\"text_english\":\"...\"}。"
                 .to_string(),
+            auto_copy_mode: AutoCopyMode::default(),
         }
     }
 }

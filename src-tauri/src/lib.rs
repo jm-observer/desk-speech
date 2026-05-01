@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::correction::CorrectionEngine;
 use crate::db::repository::{NewLlmResult, NewSegment};
 use crate::llm_client::{list_models as llm_list_models, model_cache_valid, postprocess_text, CachedModels};
-use crate::llm_settings::{validate_llm_settings, LlmSettings};
+use crate::llm_settings::{validate_llm_settings, AutoCopyMode, LlmSettings};
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
@@ -201,6 +201,7 @@ struct CombinedSettings {
     api_key: String,
     selected_model: String,
     prompt_template: String,
+    auto_copy_mode: AutoCopyMode,
 }
 
 #[derive(Serialize)]
@@ -451,7 +452,7 @@ fn spawn_llm_postprocess_task_v2(
             revision,
         });
 
-        let mut settings = match state.llm_settings.lock() {
+        let settings = match state.llm_settings.lock() {
             Ok(s) => s.clone(),
             Err(err) => {
                 error!("llm settings lock failed: {}", err);
@@ -469,7 +470,19 @@ fn spawn_llm_postprocess_task_v2(
                             "[llm] selected_model is empty, fallback to first model={}, session_id={}, revision={}",
                             first, session_id, revision
                         );
-                        settings.selected_model = first;
+                        let mut fallback_settings = settings.clone();
+                        fallback_settings.selected_model = first;
+                        perform_postprocess_and_copy(
+                            &writer,
+                            &state,
+                            &app_handle,
+                            &session_id,
+                            revision,
+                            &llm_input_text,
+                            fallback_settings,
+                        )
+                        .await;
+                        return;
                     } else {
                         warn!(
                             "[llm] skip due to empty model list, session_id={}, revision={}",
@@ -492,58 +505,101 @@ fn spawn_llm_postprocess_task_v2(
             }
         }
 
-        let (optimized, english) = match postprocess_text(&settings, &llm_input_text).await {
-            Ok(v) => v,
-            Err(err) => {
-                error!("llm postprocess failed: {}", err);
-                update_segment_llm_state(&state.segments, revision, "failed", None, None);
-                let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
-                return;
-            }
-        };
-
-        let latest_revision = state.next_revision.load(Ordering::Relaxed) as i64 - 1;
-        if revision < latest_revision {
-            info!(
-                "[llm] revision skipped as stale, session_id={}, revision={}, latest_revision={}",
-                session_id, revision, latest_revision
-            );
-            update_segment_llm_state(&state.segments, revision, "skipped", None, None);
-            let _ = writer.try_send(DbEvent::MarkSkipped { session_id, revision });
-            return;
-        }
-
-        let optimized_for_memory = optimized.clone();
-        let result = DbEvent::SaveLlmResult {
-            session_id: session_id.clone(),
+        perform_postprocess_and_copy(
+            &writer,
+            &state,
+            &app_handle,
+            &session_id,
             revision,
-            text_optimized: optimized,
-            text_english: english.clone(),
-        };
-        if writer.try_send(result).is_err() {
-            update_segment_llm_state(&state.segments, revision, "failed", None, None);
-            let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
-            return;
-        }
-        info!(
-            "[llm] postprocess done, session_id={}, revision={}, optimized_len={}, english_len={}",
-            session_id,
-            revision,
-            optimized_for_memory.len(),
-            english
-        );
-        update_segment_llm_state(
-            &state.segments,
-            revision,
-            "done",
-            Some(optimized_for_memory),
-            Some(english.clone()),
-        );
-
-        if let Err(err) = app_handle.clipboard().write_text(english) {
-            error!("copy english to clipboard failed: {}", err);
-        }
+            &llm_input_text,
+            settings,
+        )
+        .await;
     });
+}
+
+async fn perform_postprocess_and_copy(
+    writer: &SyncSender<DbEvent>,
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    session_id: &str,
+    revision: i64,
+    llm_input_text: &str,
+    settings: LlmSettings,
+) {
+    let (optimized, english) = match postprocess_text(&settings, llm_input_text).await {
+        Ok(v) => v,
+        Err(err) => {
+            error!("llm postprocess failed: {}", err);
+            update_segment_llm_state(&state.segments, revision, "failed", None, None);
+            let _ = writer.try_send(DbEvent::MarkFailed {
+                session_id: session_id.to_string(),
+                revision,
+            });
+            return;
+        }
+    };
+
+    let latest_revision = state.next_revision.load(Ordering::Relaxed) as i64 - 1;
+    if revision < latest_revision {
+        info!(
+            "[llm] revision skipped as stale, session_id={}, revision={}, latest_revision={}",
+            session_id, revision, latest_revision
+        );
+        update_segment_llm_state(&state.segments, revision, "skipped", None, None);
+        let _ = writer.try_send(DbEvent::MarkSkipped {
+            session_id: session_id.to_string(),
+            revision,
+        });
+        return;
+    }
+
+    let optimized_for_memory = optimized.clone();
+    let result = DbEvent::SaveLlmResult {
+        session_id: session_id.to_string(),
+        revision,
+        text_optimized: optimized,
+        text_english: english.clone(),
+    };
+    if writer.try_send(result).is_err() {
+        update_segment_llm_state(&state.segments, revision, "failed", None, None);
+        let _ = writer.try_send(DbEvent::MarkFailed {
+            session_id: session_id.to_string(),
+            revision,
+        });
+        return;
+    }
+    info!(
+        "[llm] postprocess done, session_id={}, revision={}, optimized_len={}, english_len={}",
+        session_id,
+        revision,
+        optimized_for_memory.len(),
+        english.len()
+    );
+    update_segment_llm_state(
+        &state.segments,
+        revision,
+        "done",
+        Some(optimized_for_memory.clone()),
+        Some(english.clone()),
+    );
+
+    let copy_text = match settings.auto_copy_mode {
+        AutoCopyMode::Off => None,
+        AutoCopyMode::English => Some((english, "英文")),
+        AutoCopyMode::OptimizedZh => Some((optimized_for_memory, "优化中文")),
+    };
+
+    if let Some((text, mode_name)) = copy_text {
+        if let Err(err) = app_handle.clipboard().write_text(text) {
+            error!("copy {mode_name} to clipboard failed: {}", err);
+        } else {
+            info!(
+                "[llm] auto copy done, session_id={}, revision={}, mode={}",
+                session_id, revision, mode_name
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1204,7 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, S
         api_key: llm.api_key,
         selected_model: llm.selected_model,
         prompt_template: llm.prompt_template,
+        auto_copy_mode: llm.auto_copy_mode,
     })
 }
 
@@ -1192,6 +1249,7 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
         api_key: new_settings.api_key,
         selected_model: new_settings.selected_model,
         prompt_template: new_settings.prompt_template,
+        auto_copy_mode: new_settings.auto_copy_mode,
     };
 
     validate_settings(&new_vad_settings)?;
@@ -1221,6 +1279,15 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
             .map_err(|e| e.to_string())?;
         db.upsert_setting("llm.prompt_template", &new_llm_settings.prompt_template)
             .map_err(|e| e.to_string())?;
+        db.upsert_setting(
+            "llm.auto_copy_mode",
+            match new_llm_settings.auto_copy_mode {
+                AutoCopyMode::Off => "off",
+                AutoCopyMode::English => "english",
+                AutoCopyMode::OptimizedZh => "optimized_zh",
+            },
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     let recognizer_arc = Arc::clone(&state.recognizer);
@@ -1565,6 +1632,23 @@ pub fn run() {
                                 if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
                                     if let Ok(mut s) = llm_settings_state.lock() {
                                         s.prompt_template = v;
+                                    }
+                                }
+                                if let Ok(Some(v)) = db.get_setting("llm.auto_copy_mode") {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                        s.auto_copy_mode = match v.as_str() {
+                                            "off" => AutoCopyMode::Off,
+                                            "optimized_zh" => AutoCopyMode::OptimizedZh,
+                                            _ => AutoCopyMode::English,
+                                        };
+                                    }
+                                } else if let Ok(Some(v)) = db.get_setting("llm.auto_copy") {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                        s.auto_copy_mode = if v == "false" || v == "0" {
+                                            AutoCopyMode::Off
+                                        } else {
+                                            AutoCopyMode::English
+                                        };
                                     }
                                 }
                                 let (tx, rx) = mpsc::sync_channel::<DbEvent>(DB_EVENT_QUEUE_CAPACITY);

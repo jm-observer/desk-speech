@@ -12,8 +12,6 @@ interface ControlPanelProps {
   devices: { label: string; value: string }[];
   selectedDevice: string;
   onDeviceChange: (val: string) => void;
-  autoCopy: boolean;
-  onAutoCopyChange: (val: boolean) => void;
   showEnglish: boolean;
   onShowEnglishChange: (val: boolean) => void;
   onStart: () => void;
@@ -31,8 +29,6 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   devices,
   selectedDevice,
   onDeviceChange,
-  autoCopy,
-  onAutoCopyChange,
   showEnglish,
   onShowEnglishChange,
   onStart,
@@ -81,13 +77,6 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
       />
 
       <div className="flex flex-col gap-4 mt-1">
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col">
-            <span className="text-[13px] font-medium text-[var(--ink-2)]">自动复制到剪贴板</span>
-            <span className="text-[11px] text-[var(--ink-4)]">新分段识别完成后自动写入</span>
-          </div>
-          <Switch checked={autoCopy} onCheckedChange={onAutoCopyChange} />
-        </div>
         <div className="flex items-center justify-between">
           <div className="flex flex-col">
             <span className="text-[13px] font-medium text-[var(--ink-2)]">显示英文翻译</span>

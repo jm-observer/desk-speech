@@ -10,7 +10,6 @@ export const useAppStore = () => {
   const [devices, setDevices] = useState<{ label: string; value: string }[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>('');
   const [elapsedTime, setElapsedTime] = useState(0);
-  const [autoCopy, setAutoCopy] = useState(true);
   const [showEnglish, setShowEnglish] = useState(true);
   const [uiMode, setUiMode] = useState<'detailed' | 'simple'>('detailed');
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -110,7 +109,6 @@ export const useAppStore = () => {
     devices, setDevices,
     selectedDevice, setSelectedDevice,
     elapsedTime, setElapsedTime,
-    autoCopy, setAutoCopy,
     showEnglish, setShowEnglish,
     uiMode, setUiMode,
     audioUrl, setAudioUrl

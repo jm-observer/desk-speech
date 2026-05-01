@@ -120,6 +120,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
         {tab === 'llm' && (
           <div className="grid grid-cols-2 gap-3">
+            <label className="text-[12px] text-[var(--ink-3)] col-span-2">自动复制策略</label>
+            <select className="border rounded px-3 py-2 col-span-2" value={settings.auto_copy_mode} onChange={(e) => patch('auto_copy_mode', e.target.value as AppSettings['auto_copy_mode'])}>
+              <option value="off">关闭</option>
+              <option value="english">自动复制英文（后端流式）</option>
+              <option value="optimized_zh">自动复制中文（后端流式）</option>
+            </select>
             <input className="border rounded px-3 py-2 col-span-2" value={settings.provider_url} onChange={(e) => patch('provider_url', e.target.value)} placeholder="Provider URL" />
             <input className="border rounded px-3 py-2 col-span-2" value={settings.api_key} onChange={(e) => patch('api_key', e.target.value)} placeholder="API Key" />
             <select className="border rounded px-3 py-2 col-span-2" value={settings.selected_model} onChange={(e) => patch('selected_model', e.target.value)}>

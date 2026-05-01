@@ -281,4 +281,20 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn auto_copy_mode_setting_roundtrip_and_legacy_bool_value() {
+        let path = temp_db_path("auto-copy-mode");
+        let db = SpeechDatabase::init(&path).unwrap();
+
+        db.upsert_setting("llm.auto_copy_mode", "optimized_zh").unwrap();
+        let mode = db.get_setting("llm.auto_copy_mode").unwrap();
+        assert_eq!(mode.as_deref(), Some("optimized_zh"));
+
+        db.upsert_setting("llm.auto_copy", "false").unwrap();
+        let legacy = db.get_setting("llm.auto_copy").unwrap();
+        assert_eq!(legacy.as_deref(), Some("false"));
+
+        let _ = std::fs::remove_file(path);
+    }
 }
