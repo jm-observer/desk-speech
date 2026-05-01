@@ -112,12 +112,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
         {tab === 'asr' && (
           <div className="grid grid-cols-2 gap-3">
             <input className="border rounded px-3 py-2" value={settings.num_threads} onChange={(e) => patch('num_threads', parseInt(e.target.value, 10) || 1)} placeholder="线程数" />
-            <input className="border rounded px-3 py-2" value={settings.provider_url} onChange={(e) => patch('provider_url', e.target.value)} placeholder="Provider URL" />
           </div>
         )}
 
         {tab === 'llm' && (
           <div className="grid grid-cols-2 gap-3">
+            <input className="border rounded px-3 py-2 col-span-2" value={settings.provider_url} onChange={(e) => patch('provider_url', e.target.value)} placeholder="Provider URL" />
             <input className="border rounded px-3 py-2 col-span-2" value={settings.api_key} onChange={(e) => patch('api_key', e.target.value)} placeholder="API Key" />
             <select className="border rounded px-3 py-2 col-span-2" value={settings.selected_model} onChange={(e) => patch('selected_model', e.target.value)}>
               {models.map((m) => <option key={m} value={m}>{m}</option>)}

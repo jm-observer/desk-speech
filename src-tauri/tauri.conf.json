@@ -4,14 +4,18 @@
   "version": "1.13.0",
   "identifier": "com.k2fsa.sherpa.onnx.asr.microphone",
   "build": {
-    "frontendDist": "../frontend-new/dist"
+    "beforeDevCommand": "npm run dev --prefix src",
+    "beforeBuildCommand": "npm run build --prefix src",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../src/dist"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "sherpa-onnx Speech Recognition from microphone",
-        "decorations": false,
+        "title": "StreamSpeech",
+        "decorations": true,
+        "transparent": false,
         "width": 900,
         "height": 700
       }

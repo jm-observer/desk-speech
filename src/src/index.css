@@ -122,3 +122,28 @@ input, select, textarea {
   background-size: 200% 100%;
   animation: shimmer 1.6s linear infinite;
 }
+
+/* Drag Region Support */
+.drag-region {
+  cursor: grab;
+}
+
+.drag-region:active {
+  cursor: grabbing;
+}
+
+.no-drag,
+button,
+input,
+select,
+textarea,
+[role="button"] {
+  cursor: default;
+  /* Reset to default or pointer depending on element */
+}
+
+button,
+[role="button"],
+a {
+  cursor: pointer;
+}

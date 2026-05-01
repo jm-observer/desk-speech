@@ -5,3 +5,4 @@
 /src-tauri/gen/
 assets
 .idea
+src-tauri/target

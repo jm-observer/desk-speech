@@ -79,8 +79,13 @@ fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResu
     }
 
     last.end = incoming.end;
+    last.revision = incoming.revision;
     last.wall_end = incoming.wall_end.clone();
     last.text = format!("{} {}", last.text, incoming.text).trim().to_string();
+    // Merged transcript invalidates previous LLM output.
+    last.text_optimized = None;
+    last.text_english = None;
+    last.opt_status = "pending".to_string();
     last.update_type = SegmentUpdateType::Replace;
     true
 }
@@ -120,12 +125,36 @@ enum SegmentUpdateType {
 #[derive(Serialize, Clone)]
 struct SegmentResult {
     segment_id: u64,
+    revision: i64,
     update_type: SegmentUpdateType,
     start: f32,
     end: f32,
     wall_start: String,
     wall_end: String,
     text: String,
+    text_optimized: Option<String>,
+    text_english: Option<String>,
+    opt_status: String,
+}
+
+fn update_segment_llm_state(
+    segments: &Arc<Mutex<Vec<SegmentResult>>>,
+    revision: i64,
+    status: &str,
+    optimized: Option<String>,
+    english: Option<String>,
+) {
+    if let Ok(mut segs) = segments.lock() {
+        if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
+            seg.opt_status = status.to_string();
+            if let Some(text) = optimized {
+                seg.text_optimized = Some(text);
+            }
+            if let Some(text) = english {
+                seg.text_english = Some(text);
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -340,12 +369,16 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
             let wall_end_fmt = wall_end.format("%Y-%m-%d %H:%M:%S").to_string();
             let new_segment = SegmentResult {
                 segment_id: ctx.next_realtime_segment_id.fetch_add(1, Ordering::Relaxed),
+                revision,
                 update_type: SegmentUpdateType::Append,
                 start: rel_start,
                 end: rel_end,
                 wall_start: wall_start_fmt.clone(),
                 wall_end: wall_end_fmt.clone(),
                 text: text_corrected.clone(),
+                text_optimized: None,
+                text_english: None,
+                opt_status: "pending".to_string(),
             };
 
             if let Ok(mut segs) = ctx.segments.lock() {
@@ -394,6 +427,7 @@ fn spawn_llm_postprocess_task_v2(
     text_corrected: String,
 ) {
     tauri::async_runtime::spawn(async move {
+        update_segment_llm_state(&state.segments, revision, "running", None, None);
         let _ = writer.try_send(DbEvent::MarkSkippedBefore {
             session_id: session_id.clone(),
             revision,
@@ -407,12 +441,14 @@ fn spawn_llm_postprocess_task_v2(
             Ok(s) => s.clone(),
             Err(err) => {
                 error!("llm settings lock failed: {}", err);
+                update_segment_llm_state(&state.segments, revision, "failed", None, None);
                 let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
                 return;
             }
         };
 
         if settings.api_key.trim().is_empty() || settings.selected_model.trim().is_empty() {
+            update_segment_llm_state(&state.segments, revision, "failed", None, None);
             let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
             return;
         }
@@ -421,6 +457,7 @@ fn spawn_llm_postprocess_task_v2(
             Ok(v) => v,
             Err(err) => {
                 error!("llm postprocess failed: {}", err);
+                update_segment_llm_state(&state.segments, revision, "failed", None, None);
                 let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
                 return;
             }
@@ -428,10 +465,12 @@ fn spawn_llm_postprocess_task_v2(
 
         let latest_revision = state.next_revision.load(Ordering::Relaxed) as i64 - 1;
         if revision < latest_revision {
+            update_segment_llm_state(&state.segments, revision, "skipped", None, None);
             let _ = writer.try_send(DbEvent::MarkSkipped { session_id, revision });
             return;
         }
 
+        let optimized_for_memory = optimized.clone();
         let result = DbEvent::SaveLlmResult {
             session_id: session_id.clone(),
             revision,
@@ -439,9 +478,17 @@ fn spawn_llm_postprocess_task_v2(
             text_english: english.clone(),
         };
         if writer.try_send(result).is_err() {
+            update_segment_llm_state(&state.segments, revision, "failed", None, None);
             let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
             return;
         }
+        update_segment_llm_state(
+            &state.segments,
+            revision,
+            "done",
+            Some(optimized_for_memory),
+            Some(english.clone()),
+        );
 
         if let Err(err) = app_handle.clipboard().write_text(english) {
             error!("copy english to clipboard failed: {}", err);
