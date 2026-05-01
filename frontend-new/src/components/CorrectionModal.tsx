@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { TauriAPI } from '../api/tauri-client';
 import type { CorrectionRule } from '../api/tauri-client';
 import { Button } from './ui/Button';
@@ -74,9 +75,9 @@ export const CorrectionModal: React.FC<CorrectionModalProps> = ({ open, onClose 
     onClose();
   };
 
-  return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-40 flex items-center justify-center p-4" onClick={close}>
-      <div className="w-full max-w-3xl bg-[var(--bg-card)] rounded-[20px] shadow-[var(--shadow-lg)] p-5" onClick={(e) => e.stopPropagation()}>
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-[9999] flex items-center justify-center p-4" onClick={close}>
+      <div className="w-full max-w-3xl bg-[var(--bg-card)] rounded-[20px] shadow-[var(--shadow-lg)] p-5 relative" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-[15px] font-semibold mb-4">词修正</h3>
         <div className="space-y-2 max-h-[320px] overflow-auto">
           {rules.map((rule) => {
@@ -125,6 +126,7 @@ export const CorrectionModal: React.FC<CorrectionModalProps> = ({ open, onClose 
           <Button onClick={close}>关闭</Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

@@ -17,12 +17,60 @@ import { LogicalSize } from '@tauri-apps/api/dpi';
 
 const DEFAULT_SRT_PATH = 'D:\\temp\\streamspeech.srt';
 const DEFAULT_AUDIO_PATH = 'D:\\temp\\streamspeech.wav';
+const SIMPLE_WINDOW_SIZE = { width: 560, height: 280 };
+const DETAILED_WINDOW_MIN_SIZE = { width: 900, height: 600 };
+const DETAILED_WINDOW_SIZE = { width: 1280, height: 820 };
+
+function WindowActions({ compact = false }: { compact?: boolean }) {
+  const handleMinimize = async () => {
+    try {
+      await getCurrentWindow().minimize();
+    } catch (err) {
+      console.error('Minimize window failed', err);
+    }
+  };
+
+  const handleClose = async () => {
+    try {
+      await getCurrentWindow().close();
+    } catch (err) {
+      console.error('Close window failed', err);
+    }
+  };
+
+  const buttonClassName = compact
+    ? 'w-7 h-7 rounded-full hover:bg-black/5 text-[var(--ink-3)]'
+    : 'w-8 h-8 rounded-full hover:bg-black/5 text-[var(--ink-3)]';
+
+  return (
+    <div className="flex items-center gap-1" data-tauri-drag-region="false">
+      <Button variant="ghost" size="icon" className={buttonClassName} onClick={handleMinimize}>
+        <span className="block w-3 h-px bg-current rounded-full" />
+      </Button>
+      <Button variant="ghost" size="icon" className={buttonClassName} onClick={handleClose}>
+        <Icon name="close" size={compact ? 13 : 14} className="text-current" />
+      </Button>
+    </div>
+  );
+}
 
 function formatStamp(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   const centi = Math.floor((seconds * 100) % 100);
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(centi).padStart(2, '0')}`;
+}
+
+async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
+  if (event.button !== 0) {
+    return;
+  }
+
+  try {
+    await getCurrentWindow().startDragging();
+  } catch (err) {
+    console.error('Start dragging window failed', err);
+  }
 }
 
 function App() {
@@ -221,11 +269,19 @@ function App() {
       try {
         const win = getCurrentWindow();
         if (isSimpleMode) {
+          await win.setMinSize(null);
           await win.setAlwaysOnTop(true);
-          await win.setSize(new LogicalSize(352, 220));
+          await win.setSize(new LogicalSize(SIMPLE_WINDOW_SIZE.width, SIMPLE_WINDOW_SIZE.height));
+
+          window.setTimeout(() => {
+            win.setSize(new LogicalSize(SIMPLE_WINDOW_SIZE.width, SIMPLE_WINDOW_SIZE.height)).catch((err) => {
+              console.error('Re-apply simple window size failed', err);
+            });
+          }, 50);
         } else {
           await win.setAlwaysOnTop(false);
-          await win.setSize(new LogicalSize(1280, 820));
+          await win.setMinSize(new LogicalSize(DETAILED_WINDOW_MIN_SIZE.width, DETAILED_WINDOW_MIN_SIZE.height));
+          await win.setSize(new LogicalSize(DETAILED_WINDOW_SIZE.width, DETAILED_WINDOW_SIZE.height));
         }
       } catch (err) {
         console.error("Apply window mode failed", err);
@@ -235,20 +291,23 @@ function App() {
   }, [isSimpleMode]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[var(--bg-canvas)]">
+    <div className="flex h-screen overflow-hidden bg-[var(--bg-canvas)] rounded-[18px] border border-[var(--line)]">
       {isSimpleMode && (
-        <main className="w-full h-full p-3 flex items-center justify-center">
-          <section className="w-full h-full rounded-[16px] border border-[var(--line)] bg-[var(--bg-app)] shadow-[var(--shadow-sm)] p-3 flex flex-col gap-2">
-            <div className="flex items-center justify-between">
+        <main className="w-full h-full p-2.5 flex items-center justify-center bg-transparent">
+          <section className="w-[520px] max-w-full h-auto rounded-[18px] border border-[var(--line)] bg-[var(--bg-app)] shadow-[0_18px_48px_rgba(15,23,42,0.16)] px-3 py-2.5 flex flex-col gap-2">
+            <div className="flex items-center justify-between min-h-8 cursor-move select-none" onMouseDown={handleWindowDragStart}>
               <div className="flex items-center gap-2">
                 <div className="w-6 h-6 rounded-[7px] bg-gradient-to-br from-[var(--primary)] to-[var(--primary-deep)] text-white flex items-center justify-center">
                   <Icon name="logo" size={14} stroke={2} />
                 </div>
                 <span className="text-[12px] font-semibold text-[var(--ink)]">简洁模式</span>
               </div>
-              <Button variant="ghost" size="icon" className="w-7 h-7" onClick={() => store.setUiMode('detailed')}>
-                <Icon name="search" size={14} className="text-[var(--ink-3)]" />
-              </Button>
+              <div className="flex items-center gap-1" data-tauri-drag-region="false">
+                <Button variant="ghost" size="icon" className="w-7 h-7 rounded-full" onClick={() => store.setUiMode('detailed')}>
+                  <Icon name="search" size={14} className="text-[var(--ink-3)]" />
+                </Button>
+                <WindowActions compact />
+              </div>
             </div>
 
             <RecordCard
@@ -263,28 +322,35 @@ function App() {
       )}
 
       {!isSimpleMode && (
-      <ControlPanel
-        status={store.status}
-        elapsedTime={store.elapsedTime}
-        devices={store.devices}
-        selectedDevice={store.selectedDevice}
-        onDeviceChange={handleDeviceChange}
-        autoCopy={store.autoCopy}
-        onAutoCopyChange={store.setAutoCopy}
-        showEnglish={store.showEnglish}
-        onShowEnglishChange={store.setShowEnglish}
-        onStart={startRecording}
-        onStop={stopRecording}
-        onClear={handleClear}
-        onShowSettings={() => setShowSettingsModal(true)}
-        onShowRules={() => setShowCorrectionModal(true)}
-        onToggleMode={() => store.setUiMode(store.uiMode === 'detailed' ? 'simple' : 'detailed')}
-        disabled={isBusy}
-      />
+        <>
+          <div className="absolute top-0 left-0 right-0 h-10 px-3 flex items-center justify-end bg-[var(--bg-app)]/90 backdrop-blur-sm z-20 border-b border-[var(--line)] cursor-move select-none" onMouseDown={handleWindowDragStart}>
+            <WindowActions />
+          </div>
+          <div className="pt-10 flex min-w-0 flex-1">
+            <ControlPanel
+              status={store.status}
+              elapsedTime={store.elapsedTime}
+              devices={store.devices}
+              selectedDevice={store.selectedDevice}
+              onDeviceChange={handleDeviceChange}
+              autoCopy={store.autoCopy}
+              onAutoCopyChange={store.setAutoCopy}
+              showEnglish={store.showEnglish}
+              onShowEnglishChange={store.setShowEnglish}
+              onStart={startRecording}
+              onStop={stopRecording}
+              onClear={handleClear}
+              onShowSettings={() => setShowSettingsModal(true)}
+              onShowRules={() => setShowCorrectionModal(true)}
+              onToggleMode={() => store.setUiMode(store.uiMode === 'detailed' ? 'simple' : 'detailed')}
+              disabled={isBusy}
+            />
+          </div>
+        </>
       )}
 
       {!isSimpleMode && (
-        <main className="flex-1 flex flex-col min-w-0">
+        <main className="flex-1 flex flex-col min-w-0 pt-10">
           <div className="h-[62px] px-6 border-b border-[var(--line)] flex items-center gap-2">
             <Button variant="outline" size="sm" disabled={!showActions} onClick={handleCopyZh}>复制中文</Button>
             <Button variant="outline" size="sm" disabled={!showActions} onClick={handleCopyEn}>复制英文</Button>

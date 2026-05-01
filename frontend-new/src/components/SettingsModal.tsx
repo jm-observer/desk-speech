@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { TauriAPI } from '../api/tauri-client';
 import type { AppSettings } from '../api/tauri-client';
 import { Button } from './ui/Button';
@@ -24,9 +25,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       setLoading(true);
       setLoadError(null);
       try {
-        const [s, m] = await Promise.all([TauriAPI.getSettings(), TauriAPI.listLlmModels()]);
-        setSettings(s);
-        setModels(m.models);
+        const [s, m] = await Promise.allSettled([TauriAPI.getSettings(), TauriAPI.listLlmModels()]);
+        if (s.status === 'fulfilled') {
+          setSettings(s.value);
+        } else {
+          throw new Error('配置加载失败');
+        }
+        if (m.status === 'fulfilled') {
+          setModels(m.value.models);
+        } else {
+          console.warn('Load llm models failed', m.reason);
+          setModels([]);
+        }
       } catch (err) {
         console.error('Load settings failed', err);
         setLoadError('配置加载失败，请重试');
@@ -65,9 +75,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
     </button>
   );
 
-  return (
-    <div className="fixed inset-0 bg-black/30 backdrop-blur-[2px] z-40 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="w-full max-w-4xl bg-[var(--bg-card)] rounded-[20px] shadow-[var(--shadow-lg)] p-5" onClick={(e) => e.stopPropagation()}>
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-[9999] flex items-center justify-center p-4" onClick={onClose}>
+      <div className="w-full max-w-4xl bg-[var(--bg-card)] rounded-[20px] shadow-[var(--shadow-lg)] p-5 relative" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-[15px] font-semibold mb-4">识别参数设置</h3>
 
         {loading && (
@@ -129,6 +139,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

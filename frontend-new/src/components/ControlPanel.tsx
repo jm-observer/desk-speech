@@ -44,7 +44,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   disabled,
 }) => {
   return (
-    <aside className="w-80 h-full flex flex-col bg-[var(--bg-app)] border-r border-[var(--line)] px-8 py-6 gap-5">
+    <aside className="w-80 shrink-0 h-[calc(100%-24px)] my-3 mx-3 flex flex-col bg-[var(--bg-app)] border border-[var(--line)] rounded-[16px] px-6 py-4 gap-4 overflow-y-auto">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
