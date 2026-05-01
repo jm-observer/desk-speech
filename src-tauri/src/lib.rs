@@ -21,8 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::correction::CorrectionEngine;
-use crate::db::repository::{NewLlmResult, NewSegment};
-use crate::llm_client::{list_models as llm_list_models, model_cache_valid, postprocess_text, CachedModels};
+use crate::db::repository::{NewSegment, OptimizeResultUpsert, TranslateResultUpsert};
+use crate::llm_client::{
+    list_models as llm_list_models, model_cache_valid, optimize_text, translate_text, CachedModels,
+};
 use crate::llm_settings::{validate_llm_settings, AutoCopyMode, LlmSettings};
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -40,7 +42,23 @@ enum DbEvent {
     InsertSegment {
         segment: NewSegment,
     },
-    MarkRunning {
+    MarkOptimizeRunning {
+        session_id: String,
+        revision: i64,
+    },
+    MarkOptimizeSuccess {
+        session_id: String,
+        revision: i64,
+    },
+    MarkTranslatePending {
+        session_id: String,
+        revision: i64,
+    },
+    MarkTranslateRunning {
+        session_id: String,
+        revision: i64,
+    },
+    MarkTranslateFailed {
         session_id: String,
         revision: i64,
     },
@@ -52,14 +70,18 @@ enum DbEvent {
         session_id: String,
         revision: i64,
     },
-    MarkFailed {
+    MarkOptimizeFailed {
         session_id: String,
         revision: i64,
     },
-    SaveLlmResult {
+    SaveOptimizeResult {
         session_id: String,
         revision: i64,
         text_optimized: String,
+    },
+    SaveTranslateResult {
+        session_id: String,
+        revision: i64,
         text_english: String,
     },
     CloseSession {
@@ -85,7 +107,8 @@ fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResu
     // Merged transcript invalidates previous LLM output.
     last.text_optimized = None;
     last.text_english = None;
-    last.opt_status = "pending".to_string();
+    last.optimize_status = "pending".to_string();
+    last.translate_status = "blocked".to_string();
     last.update_type = SegmentUpdateType::Replace;
     true
 }
@@ -134,19 +157,26 @@ struct SegmentResult {
     text: String,
     text_optimized: Option<String>,
     text_english: Option<String>,
-    opt_status: String,
+    optimize_status: String,
+    translate_status: String,
 }
 
 fn update_segment_llm_state(
     segments: &Arc<Mutex<Vec<SegmentResult>>>,
     revision: i64,
-    status: &str,
+    optimize_status: Option<&str>,
+    translate_status: Option<&str>,
     optimized: Option<String>,
     english: Option<String>,
 ) {
     if let Ok(mut segs) = segments.lock() {
         if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
-            seg.opt_status = status.to_string();
+            if let Some(status) = optimize_status {
+                seg.optimize_status = status.to_string();
+            }
+            if let Some(status) = translate_status {
+                seg.translate_status = status.to_string();
+            }
             if let Some(text) = optimized {
                 seg.text_optimized = Some(text);
             }
@@ -200,7 +230,8 @@ struct CombinedSettings {
     provider_url: String,
     api_key: String,
     selected_model: String,
-    prompt_template: String,
+    optimize_prompt_template: String,
+    translate_prompt_template: String,
     auto_copy_mode: AutoCopyMode,
 }
 
@@ -379,7 +410,8 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 text: text_corrected.clone(),
                 text_optimized: None,
                 text_english: None,
-                opt_status: "pending".to_string(),
+                optimize_status: "pending".to_string(),
+                translate_status: "blocked".to_string(),
             };
 
             if let Ok(mut segs) = ctx.segments.lock() {
@@ -442,12 +474,12 @@ fn spawn_llm_postprocess_task_v2(
             revision,
             llm_input_text.len()
         );
-        update_segment_llm_state(&state.segments, revision, "running", None, None);
+        update_segment_llm_state(&state.segments, revision, Some("running"), None, None, None);
         let _ = writer.try_send(DbEvent::MarkSkippedBefore {
             session_id: session_id.clone(),
             revision,
         });
-        let _ = writer.try_send(DbEvent::MarkRunning {
+        let _ = writer.try_send(DbEvent::MarkOptimizeRunning {
             session_id: session_id.clone(),
             revision,
         });
@@ -456,8 +488,8 @@ fn spawn_llm_postprocess_task_v2(
             Ok(s) => s.clone(),
             Err(err) => {
                 error!("llm settings lock failed: {}", err);
-                update_segment_llm_state(&state.segments, revision, "failed", None, None);
-                let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+                update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+                let _ = writer.try_send(DbEvent::MarkOptimizeFailed { session_id, revision });
                 return;
             }
         };
@@ -488,8 +520,8 @@ fn spawn_llm_postprocess_task_v2(
                             "[llm] skip due to empty model list, session_id={}, revision={}",
                             session_id, revision
                         );
-                        update_segment_llm_state(&state.segments, revision, "failed", None, None);
-                        let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+                        update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+                        let _ = writer.try_send(DbEvent::MarkOptimizeFailed { session_id, revision });
                         return;
                     }
                 }
@@ -498,8 +530,8 @@ fn spawn_llm_postprocess_task_v2(
                         "[llm] skip due to empty model and list_models failed, session_id={}, revision={}, err={}",
                         session_id, revision, err
                     );
-                    update_segment_llm_state(&state.segments, revision, "failed", None, None);
-                    let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+                    update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+                    let _ = writer.try_send(DbEvent::MarkOptimizeFailed { session_id, revision });
                     return;
                 }
             }
@@ -527,12 +559,12 @@ async fn perform_postprocess_and_copy(
     llm_input_text: &str,
     settings: LlmSettings,
 ) {
-    let (optimized, english) = match postprocess_text(&settings, llm_input_text).await {
+    let optimized = match optimize_text(&settings, llm_input_text).await {
         Ok(v) => v,
         Err(err) => {
             error!("llm postprocess failed: {}", err);
-            update_segment_llm_state(&state.segments, revision, "failed", None, None);
-            let _ = writer.try_send(DbEvent::MarkFailed {
+            update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+            let _ = writer.try_send(DbEvent::MarkOptimizeFailed {
                 session_id: session_id.to_string(),
                 revision,
             });
@@ -546,7 +578,7 @@ async fn perform_postprocess_and_copy(
             "[llm] revision skipped as stale, session_id={}, revision={}, latest_revision={}",
             session_id, revision, latest_revision
         );
-        update_segment_llm_state(&state.segments, revision, "skipped", None, None);
+        update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
         let _ = writer.try_send(DbEvent::MarkSkipped {
             session_id: session_id.to_string(),
             revision,
@@ -555,32 +587,87 @@ async fn perform_postprocess_and_copy(
     }
 
     let optimized_for_memory = optimized.clone();
-    let result = DbEvent::SaveLlmResult {
+    let result = DbEvent::SaveOptimizeResult {
         session_id: session_id.to_string(),
         revision,
         text_optimized: optimized,
-        text_english: english.clone(),
     };
     if writer.try_send(result).is_err() {
-        update_segment_llm_state(&state.segments, revision, "failed", None, None);
-        let _ = writer.try_send(DbEvent::MarkFailed {
+        update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+        let _ = writer.try_send(DbEvent::MarkOptimizeFailed {
             session_id: session_id.to_string(),
             revision,
         });
         return;
     }
     info!(
-        "[llm] postprocess done, session_id={}, revision={}, optimized_len={}, english_len={}",
+        "[llm] optimize done, session_id={}, revision={}, optimized_len={}",
         session_id,
         revision,
-        optimized_for_memory.len(),
+        optimized_for_memory.len()
+    );
+    let _ = writer.try_send(DbEvent::MarkOptimizeSuccess {
+        session_id: session_id.to_string(),
+        revision,
+    });
+    let _ = writer.try_send(DbEvent::MarkTranslatePending {
+        session_id: session_id.to_string(),
+        revision,
+    });
+    update_segment_llm_state(
+        &state.segments,
+        revision,
+        Some("success"),
+        Some("pending"),
+        Some(optimized_for_memory.clone()),
+        None,
+    );
+
+    let _ = writer.try_send(DbEvent::MarkTranslateRunning {
+        session_id: session_id.to_string(),
+        revision,
+    });
+    update_segment_llm_state(&state.segments, revision, None, Some("running"), None, None);
+
+    let english = match translate_text(&settings, &optimized_for_memory).await {
+        Ok(v) => v,
+        Err(err) => {
+            error!("llm translate failed: {}", err);
+            let _ = writer.try_send(DbEvent::MarkTranslateFailed {
+                session_id: session_id.to_string(),
+                revision,
+            });
+            update_segment_llm_state(&state.segments, revision, None, Some("failed"), None, None);
+            return;
+        }
+    };
+
+    let result = DbEvent::SaveTranslateResult {
+        session_id: session_id.to_string(),
+        revision,
+        text_english: english.clone(),
+    };
+    if writer.try_send(result).is_err() {
+        let _ = writer.try_send(DbEvent::MarkTranslateFailed {
+            session_id: session_id.to_string(),
+            revision,
+        });
+        update_segment_llm_state(&state.segments, revision, None, Some("failed"), None, None);
+        return;
+    }
+
+    info!(
+        "[llm] translate done, session_id={}, revision={}, english_len={}",
+        session_id,
+        revision,
         english.len()
     );
     update_segment_llm_state(
         &state.segments,
         revision,
-        "done",
-        Some(optimized_for_memory.clone()),
+        None,
+        Some("success"),
+        None,
         Some(english.clone()),
     );
 
@@ -1203,7 +1290,8 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, S
         provider_url: llm.provider_url,
         api_key: llm.api_key,
         selected_model: llm.selected_model,
-        prompt_template: llm.prompt_template,
+        optimize_prompt_template: llm.optimize_prompt_template,
+        translate_prompt_template: llm.translate_prompt_template,
         auto_copy_mode: llm.auto_copy_mode,
     })
 }
@@ -1248,7 +1336,8 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
         provider_url: new_settings.provider_url,
         api_key: new_settings.api_key,
         selected_model: new_settings.selected_model,
-        prompt_template: new_settings.prompt_template,
+        optimize_prompt_template: new_settings.optimize_prompt_template,
+        translate_prompt_template: new_settings.translate_prompt_template,
         auto_copy_mode: new_settings.auto_copy_mode,
     };
 
@@ -1277,8 +1366,16 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
             .map_err(|e| e.to_string())?;
         db.upsert_setting("llm.selected_model", &new_llm_settings.selected_model)
             .map_err(|e| e.to_string())?;
-        db.upsert_setting("llm.prompt_template", &new_llm_settings.prompt_template)
-            .map_err(|e| e.to_string())?;
+        db.upsert_setting(
+            "llm.optimize_prompt_template",
+            &new_llm_settings.optimize_prompt_template,
+        )
+        .map_err(|e| e.to_string())?;
+        db.upsert_setting(
+            "llm.translate_prompt_template",
+            &new_llm_settings.translate_prompt_template,
+        )
+        .map_err(|e| e.to_string())?;
         db.upsert_setting(
             "llm.auto_copy_mode",
             match new_llm_settings.auto_copy_mode {
@@ -1629,9 +1726,18 @@ pub fn run() {
                                         s.selected_model = v;
                                     }
                                 }
-                                if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
+                                if let Ok(Some(v)) = db.get_setting("llm.optimize_prompt_template") {
                                     if let Ok(mut s) = llm_settings_state.lock() {
-                                        s.prompt_template = v;
+                                        s.optimize_prompt_template = v;
+                                    }
+                                } else if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                        s.optimize_prompt_template = v;
+                                    }
+                                }
+                                if let Ok(Some(v)) = db.get_setting("llm.translate_prompt_template") {
+                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                        s.translate_prompt_template = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.auto_copy_mode") {
@@ -1664,12 +1770,12 @@ pub fn run() {
                                                     );
                                                     let _ = db_for_worker.insert_segment(segment);
                                                 }
-                                                DbEvent::MarkRunning { session_id, revision } => {
+                                                DbEvent::MarkOptimizeRunning { session_id, revision } => {
                                                     debug!(
                                                         "[db-worker] mark running session_id={}, revision={}",
                                                         session_id, revision
                                                     );
-                                                    let _ = db_for_worker.update_opt_status(
+                                                    let _ = db_for_worker.update_optimize_status(
                                                         &session_id,
                                                         revision,
                                                         "running",
@@ -1688,41 +1794,95 @@ pub fn run() {
                                                         "[db-worker] mark skipped session_id={}, revision={}",
                                                         session_id, revision
                                                     );
-                                                    let _ = db_for_worker.update_opt_status(
+                                                    let _ = db_for_worker.update_optimize_status(
                                                         &session_id,
                                                         revision,
-                                                        "skipped",
+                                                        "failed",
+                                                    );
+                                                    let _ = db_for_worker.update_translate_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "blocked",
                                                     );
                                                 }
-                                                DbEvent::MarkFailed { session_id, revision } => {
+                                                DbEvent::MarkOptimizeFailed { session_id, revision } => {
                                                     warn!(
                                                         "[db-worker] mark failed session_id={}, revision={}",
                                                         session_id, revision
                                                     );
-                                                    let _ = db_for_worker.update_opt_status(
+                                                    let _ = db_for_worker.update_optimize_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "failed",
+                                                    );
+                                                    let _ = db_for_worker.update_translate_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "blocked",
+                                                    );
+                                                }
+                                                DbEvent::MarkOptimizeSuccess { session_id, revision } => {
+                                                    let _ = db_for_worker.update_optimize_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "success",
+                                                    );
+                                                }
+                                                DbEvent::MarkTranslatePending { session_id, revision } => {
+                                                    let _ = db_for_worker.update_translate_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "pending",
+                                                    );
+                                                }
+                                                DbEvent::MarkTranslateRunning { session_id, revision } => {
+                                                    let _ = db_for_worker.update_translate_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "running",
+                                                    );
+                                                }
+                                                DbEvent::MarkTranslateFailed { session_id, revision } => {
+                                                    let _ = db_for_worker.update_translate_status(
                                                         &session_id,
                                                         revision,
                                                         "failed",
                                                     );
                                                 }
-                                                DbEvent::SaveLlmResult {
+                                                DbEvent::SaveOptimizeResult {
                                                     session_id,
                                                     revision,
                                                     text_optimized,
+                                                } => {
+                                                    let _ =
+                                                        db_for_worker.upsert_optimize_result(OptimizeResultUpsert {
+                                                            session_id,
+                                                            revision,
+                                                            text_optimized: Some(text_optimized),
+                                                            optimize_error: None,
+                                                            optimize_started_at: None,
+                                                            optimize_finished_at: None,
+                                                        });
+                                                }
+                                                DbEvent::SaveTranslateResult {
+                                                    session_id,
+                                                    revision,
                                                     text_english,
                                                 } => {
-                                                    let _ = db_for_worker.upsert_llm_result(NewLlmResult {
-                                                        session_id: session_id.clone(),
-                                                        revision,
-                                                        text_optimized,
-                                                        text_english,
-                                                    });
-                                                    debug!(
-                                                        "[db-worker] save llm result session_id={}, revision={}",
-                                                        session_id, revision
-                                                    );
                                                     let _ =
-                                                        db_for_worker.update_opt_status(&session_id, revision, "done");
+                                                        db_for_worker.upsert_translate_result(TranslateResultUpsert {
+                                                            session_id: session_id.clone(),
+                                                            revision,
+                                                            text_english: Some(text_english),
+                                                            translate_error: None,
+                                                            translate_started_at: None,
+                                                            translate_finished_at: None,
+                                                        });
+                                                    let _ = db_for_worker.update_translate_status(
+                                                        &session_id,
+                                                        revision,
+                                                        "success",
+                                                    );
                                                 }
                                                 DbEvent::CloseSession { session_id } => {
                                                     let _ = db_for_worker.close_session(&session_id);

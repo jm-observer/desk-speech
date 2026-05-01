@@ -13,11 +13,23 @@ pub struct NewSegment {
 }
 
 #[derive(Clone, Debug)]
-pub struct NewLlmResult {
+pub struct OptimizeResultUpsert {
     pub session_id: String,
     pub revision: i64,
-    pub text_optimized: String,
-    pub text_english: String,
+    pub text_optimized: Option<String>,
+    pub optimize_error: Option<String>,
+    pub optimize_started_at: Option<String>,
+    pub optimize_finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TranslateResultUpsert {
+    pub session_id: String,
+    pub revision: i64,
+    pub text_english: Option<String>,
+    pub translate_error: Option<String>,
+    pub translate_started_at: Option<String>,
+    pub translate_finished_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -48,7 +60,8 @@ pub struct SegmentRow {
     pub wall_start: String,
     pub wall_end: String,
     pub text_raw: String,
-    pub opt_status: String,
+    pub optimize_status: String,
+    pub translate_status: String,
     pub text_optimized: Option<String>,
     pub text_english: Option<String>,
     pub created_at: String,
@@ -95,8 +108,8 @@ pub fn session_exists(conn: &Connection, session_id: &str) -> Result<bool> {
 
 pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Result<()> {
     conn.execute(
-        "INSERT INTO asr_raw_records(session_id, revision, start_sec, end_sec, wall_start, wall_end, text_raw, opt_status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
+        "INSERT INTO asr_raw_records(session_id, revision, start_sec, end_sec, wall_start, wall_end, text_raw, opt_status, optimize_status, translate_status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 'pending', 'blocked', ?8)",
         params![
             segment.session_id,
             segment.revision,
@@ -112,51 +125,88 @@ pub fn insert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
     Ok(())
 }
 
-pub fn update_opt_status(conn: &Connection, session_id: &str, revision: i64, status: &str) -> Result<()> {
+pub fn update_optimize_status(conn: &Connection, session_id: &str, revision: i64, status: &str) -> Result<()> {
     conn.execute(
-        "UPDATE asr_raw_records SET opt_status = ?1 WHERE session_id = ?2 AND revision = ?3",
+        "UPDATE asr_raw_records SET optimize_status = ?1 WHERE session_id = ?2 AND revision = ?3",
         params![status, session_id, revision],
     )
-    .with_context(|| format!("failed to update opt_status for {session_id}/{revision}"))?;
+    .with_context(|| format!("failed to update optimize_status for {session_id}/{revision}"))?;
+    Ok(())
+}
+
+pub fn update_translate_status(conn: &Connection, session_id: &str, revision: i64, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE asr_raw_records SET translate_status = ?1 WHERE session_id = ?2 AND revision = ?3",
+        params![status, session_id, revision],
+    )
+    .with_context(|| format!("failed to update translate_status for {session_id}/{revision}"))?;
     Ok(())
 }
 
 pub fn mark_old_revisions_skipped(conn: &Connection, session_id: &str, latest_revision: i64) -> Result<()> {
     conn.execute(
         "UPDATE asr_raw_records
-         SET opt_status = 'skipped'
-         WHERE session_id = ?1 AND revision < ?2 AND opt_status IN ('pending', 'running')",
+         SET optimize_status = 'failed', translate_status = 'blocked'
+         WHERE session_id = ?1 AND revision < ?2 AND optimize_status IN ('pending', 'running')",
         params![session_id, latest_revision],
     )
     .with_context(|| format!("failed to mark skipped revisions for {session_id}"))?;
     Ok(())
 }
 
-pub fn upsert_llm_result(conn: &Connection, result: &NewLlmResult, now: &str) -> Result<()> {
+pub fn upsert_optimize_result(conn: &Connection, result: &OptimizeResultUpsert, now: &str) -> Result<()> {
     conn.execute(
-        "INSERT INTO asr_llm_results(session_id, revision, text_optimized, text_english, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO asr_llm_results(session_id, revision, text_optimized, optimize_error, optimize_started_at, optimize_finished_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(session_id, revision) DO UPDATE SET
             text_optimized = excluded.text_optimized,
-            text_english = excluded.text_english,
+            optimize_error = excluded.optimize_error,
+            optimize_started_at = excluded.optimize_started_at,
+            optimize_finished_at = excluded.optimize_finished_at,
             created_at = excluded.created_at",
         params![
             result.session_id,
             result.revision,
             result.text_optimized,
-            result.text_english,
-            now
+            result.optimize_error,
+            result.optimize_started_at,
+            result.optimize_finished_at,
+            now,
         ],
     )
-    .context("failed to upsert llm result")?;
+    .context("failed to upsert optimize result")?;
+    Ok(())
+}
+
+pub fn upsert_translate_result(conn: &Connection, result: &TranslateResultUpsert, now: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO asr_llm_results(session_id, revision, text_english, translate_error, translate_started_at, translate_finished_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(session_id, revision) DO UPDATE SET
+            text_english = excluded.text_english,
+            translate_error = excluded.translate_error,
+            translate_started_at = excluded.translate_started_at,
+            translate_finished_at = excluded.translate_finished_at,
+            created_at = excluded.created_at",
+        params![
+            result.session_id,
+            result.revision,
+            result.text_english,
+            result.translate_error,
+            result.translate_started_at,
+            result.translate_finished_at,
+            now,
+        ],
+    )
+    .context("failed to upsert translate result")?;
     Ok(())
 }
 
 pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<SegmentRow>> {
     let mut stmt = conn
         .prepare(
-            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw, r.opt_status,
-                    l.text_optimized, l.text_english, r.created_at
+            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE session_id = ?1
@@ -178,10 +228,11 @@ pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<Se
             wall_start: row.get(5)?,
             wall_end: row.get(6)?,
             text_raw: row.get(7)?,
-            opt_status: row.get(8)?,
-            text_optimized: row.get(9)?,
-            text_english: row.get(10)?,
-            created_at: row.get(11)?,
+            optimize_status: row.get(8)?,
+            translate_status: row.get(9)?,
+            text_optimized: row.get(10)?,
+            text_english: row.get(11)?,
+            created_at: row.get(12)?,
         }))
     } else {
         Ok(None)
@@ -196,8 +247,8 @@ pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: 
     let offset = page as u64 * page_size as u64;
     let mut stmt = conn
         .prepare(
-            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw, r.opt_status,
-                    l.text_optimized, l.text_english, r.created_at
+            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE r.session_id = ?1
@@ -217,10 +268,11 @@ pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: 
                 wall_start: row.get(5)?,
                 wall_end: row.get(6)?,
                 text_raw: row.get(7)?,
-                opt_status: row.get(8)?,
-                text_optimized: row.get(9)?,
-                text_english: row.get(10)?,
-                created_at: row.get(11)?,
+                optimize_status: row.get(8)?,
+                translate_status: row.get(9)?,
+                text_optimized: row.get(10)?,
+                text_english: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })
         .context("failed to query list_segments")?;
@@ -271,8 +323,8 @@ pub fn tail_segments(conn: &Connection, session_id: &str, after_id: i64, limit: 
     }
     let mut stmt = conn
         .prepare(
-            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw, r.opt_status,
-                    l.text_optimized, l.text_english, r.created_at
+            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE r.session_id = ?1 AND r.id > ?2
@@ -291,10 +343,11 @@ pub fn tail_segments(conn: &Connection, session_id: &str, after_id: i64, limit: 
                 wall_start: row.get(5)?,
                 wall_end: row.get(6)?,
                 text_raw: row.get(7)?,
-                opt_status: row.get(8)?,
-                text_optimized: row.get(9)?,
-                text_english: row.get(10)?,
-                created_at: row.get(11)?,
+                optimize_status: row.get(8)?,
+                translate_status: row.get(9)?,
+                text_optimized: row.get(10)?,
+                text_english: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })
         .context("failed to query tail_segments")?;

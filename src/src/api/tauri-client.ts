@@ -49,7 +49,8 @@ export interface AppSettings {
   provider_url: string;
   api_key: string;
   selected_model: string;
-  prompt_template: string;
+  optimize_prompt_template: string;
+  translate_prompt_template: string;
   auto_copy_mode: 'off' | 'english' | 'optimized_zh';
 }
 

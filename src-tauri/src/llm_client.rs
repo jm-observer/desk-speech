@@ -20,8 +20,12 @@ pub struct CachedModels {
 }
 
 #[derive(Deserialize, Debug)]
-struct LlmPostprocessOutput {
+struct LlmOptimizeOutput {
     text_optimized: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct LlmTranslateOutput {
     text_english: String,
 }
 
@@ -37,10 +41,26 @@ pub fn model_cache_valid(cache: &CachedModels) -> bool {
     cache.fetched_at.elapsed() <= MODEL_CACHE_TTL
 }
 
-pub async fn postprocess_text(settings: &LlmSettings, input_text: &str) -> Result<(String, String), String> {
+pub async fn optimize_text(settings: &LlmSettings, input_text: &str) -> Result<String, String> {
+    let content = chat_json_completion(settings, &settings.optimize_prompt_template, input_text).await?;
+    let json = extract_json(&content)?;
+    let parsed: LlmOptimizeOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
+    info!("optimize output: {parsed:?}");
+    Ok(parsed.text_optimized)
+}
+
+pub async fn translate_text(settings: &LlmSettings, optimized_text: &str) -> Result<String, String> {
+    let content = chat_json_completion(settings, &settings.translate_prompt_template, optimized_text).await?;
+    let json = extract_json(&content)?;
+    let parsed: LlmTranslateOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
+    info!("translate output: {parsed:?}");
+    Ok(parsed.text_english)
+}
+
+async fn chat_json_completion(settings: &LlmSettings, system_prompt: &str, input_text: &str) -> Result<String, String> {
     let client = build_client(settings);
     let system_message = ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-        content: settings.prompt_template.clone().into(),
+        content: system_prompt.to_string().into(),
         name: None,
     });
     let user_message = ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
@@ -56,19 +76,12 @@ pub async fn postprocess_text(settings: &LlmSettings, input_text: &str) -> Resul
         .map_err(|e| e.to_string())?;
 
     let response = client.chat().create(request).await.map_err(|e| e.to_string())?;
-    let content = response
+    response
         .choices
         .first()
         .and_then(|c| c.message.content.as_ref())
-        .ok_or("empty llm response")?;
-
-    let json = extract_json(content)?;
-    let parsed: LlmPostprocessOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
-    info!("{parsed:?}");
-    // if parsed.text_optimized.trim().is_empty() || parsed.text_english.trim().is_empty() {
-    //     return Err("llm response contains empty fields".to_string());
-    // }
-    Ok((parsed.text_optimized, parsed.text_english))
+        .cloned()
+        .ok_or("empty llm response".to_string())
 }
 
 fn build_client(settings: &LlmSettings) -> Client<OpenAIConfig> {
