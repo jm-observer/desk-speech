@@ -387,6 +387,14 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 }
             }
 
+            let llm_input_text = ctx
+                .segments
+                .lock()
+                .ok()
+                .and_then(|segs| segs.last().map(|seg| seg.text.clone()))
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| text_corrected.clone());
+
             if let Some(writer) = ctx.db_writer {
                 let event = DbEvent::InsertSegment {
                     segment: NewSegment {
@@ -411,7 +419,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                     ctx.app_handle.clone(),
                     ctx.session_id.to_string(),
                     revision,
-                    text_corrected,
+                    llm_input_text,
                 );
             }
         }
@@ -424,9 +432,15 @@ fn spawn_llm_postprocess_task_v2(
     app_handle: tauri::AppHandle,
     session_id: String,
     revision: i64,
-    text_corrected: String,
+    llm_input_text: String,
 ) {
     tauri::async_runtime::spawn(async move {
+        info!(
+            "[llm] start postprocess session_id={}, revision={}, text_len={}",
+            session_id,
+            revision,
+            llm_input_text.len()
+        );
         update_segment_llm_state(&state.segments, revision, "running", None, None);
         let _ = writer.try_send(DbEvent::MarkSkippedBefore {
             session_id: session_id.clone(),
@@ -437,7 +451,7 @@ fn spawn_llm_postprocess_task_v2(
             revision,
         });
 
-        let settings = match state.llm_settings.lock() {
+        let mut settings = match state.llm_settings.lock() {
             Ok(s) => s.clone(),
             Err(err) => {
                 error!("llm settings lock failed: {}", err);
@@ -447,13 +461,38 @@ fn spawn_llm_postprocess_task_v2(
             }
         };
 
-        if settings.api_key.trim().is_empty() || settings.selected_model.trim().is_empty() {
-            update_segment_llm_state(&state.segments, revision, "failed", None, None);
-            let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
-            return;
+        if settings.selected_model.trim().is_empty() {
+            match llm_list_models(&settings).await {
+                Ok(models) => {
+                    if let Some(first) = models.into_iter().find(|m| !m.trim().is_empty()) {
+                        warn!(
+                            "[llm] selected_model is empty, fallback to first model={}, session_id={}, revision={}",
+                            first, session_id, revision
+                        );
+                        settings.selected_model = first;
+                    } else {
+                        warn!(
+                            "[llm] skip due to empty model list, session_id={}, revision={}",
+                            session_id, revision
+                        );
+                        update_segment_llm_state(&state.segments, revision, "failed", None, None);
+                        let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+                        return;
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "[llm] skip due to empty model and list_models failed, session_id={}, revision={}, err={}",
+                        session_id, revision, err
+                    );
+                    update_segment_llm_state(&state.segments, revision, "failed", None, None);
+                    let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
+                    return;
+                }
+            }
         }
 
-        let (optimized, english) = match postprocess_text(&settings, &text_corrected).await {
+        let (optimized, english) = match postprocess_text(&settings, &llm_input_text).await {
             Ok(v) => v,
             Err(err) => {
                 error!("llm postprocess failed: {}", err);
@@ -465,6 +504,10 @@ fn spawn_llm_postprocess_task_v2(
 
         let latest_revision = state.next_revision.load(Ordering::Relaxed) as i64 - 1;
         if revision < latest_revision {
+            info!(
+                "[llm] revision skipped as stale, session_id={}, revision={}, latest_revision={}",
+                session_id, revision, latest_revision
+            );
             update_segment_llm_state(&state.segments, revision, "skipped", None, None);
             let _ = writer.try_send(DbEvent::MarkSkipped { session_id, revision });
             return;
@@ -482,6 +525,13 @@ fn spawn_llm_postprocess_task_v2(
             let _ = writer.try_send(DbEvent::MarkFailed { session_id, revision });
             return;
         }
+        info!(
+            "[llm] postprocess done, session_id={}, revision={}, optimized_len={}, english_len={}",
+            session_id,
+            revision,
+            optimized_for_memory.len(),
+            english
+        );
         update_segment_llm_state(
             &state.segments,
             revision,
@@ -1500,20 +1550,40 @@ pub fn run() {
                                     while let Ok(event) = rx.recv() {
                                         match event {
                                             DbEvent::InsertSegment { segment } => {
+                                                debug!(
+                                                    "[db-worker] insert segment session_id={}, revision={}",
+                                                    segment.session_id, segment.revision
+                                                );
                                                 let _ = db_for_worker.insert_segment(segment);
                                             }
                                             DbEvent::MarkRunning { session_id, revision } => {
+                                                debug!(
+                                                    "[db-worker] mark running session_id={}, revision={}",
+                                                    session_id, revision
+                                                );
                                                 let _ =
                                                     db_for_worker.update_opt_status(&session_id, revision, "running");
                                             }
                                             DbEvent::MarkSkippedBefore { session_id, revision } => {
+                                                debug!(
+                                                    "[db-worker] mark skipped before session_id={}, revision={}",
+                                                    session_id, revision
+                                                );
                                                 let _ = db_for_worker.mark_old_revisions_skipped(&session_id, revision);
                                             }
                                             DbEvent::MarkSkipped { session_id, revision } => {
+                                                debug!(
+                                                    "[db-worker] mark skipped session_id={}, revision={}",
+                                                    session_id, revision
+                                                );
                                                 let _ =
                                                     db_for_worker.update_opt_status(&session_id, revision, "skipped");
                                             }
                                             DbEvent::MarkFailed { session_id, revision } => {
+                                                warn!(
+                                                    "[db-worker] mark failed session_id={}, revision={}",
+                                                    session_id, revision
+                                                );
                                                 let _ =
                                                     db_for_worker.update_opt_status(&session_id, revision, "failed");
                                             }
@@ -1529,6 +1599,10 @@ pub fn run() {
                                                     text_optimized,
                                                     text_english,
                                                 });
+                                                debug!(
+                                                    "[db-worker] save llm result session_id={}, revision={}",
+                                                    session_id, revision
+                                                );
                                                 let _ = db_for_worker.update_opt_status(&session_id, revision, "done");
                                             }
                                             DbEvent::CloseSession { session_id } => {

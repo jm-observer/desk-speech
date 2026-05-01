@@ -224,8 +224,8 @@ pub fn get_model_config(model_type: u32, model_dir: &Path) -> Option<OfflineReco
             let mut config = OfflineRecognizerConfig::default();
             config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
                 model: p("model.int8.onnx"),
+                language: Some("auto".into()),
                 use_itn: true,
-                ..Default::default()
             };
             config.model_config.tokens = p("tokens.txt");
             config.model_config.num_threads = 2;

@@ -227,16 +227,18 @@ function App() {
     for (const seg of store.segments) {
       const key = seg.id !== null ? String(seg.id) : `${seg.wall_start}-${seg.wall_end}-${seg.start}-${seg.end}`;
       const rawText = seg.text_raw.trim();
-      if (rawText && !copiedRawKeysRef.current.has(key)) {
-        copiedRawKeysRef.current.add(key);
-        TauriAPI.copyToClipboard(rawText).catch((err) => console.error('Auto copy raw text failed', err));
-      }
-
       const optimizedText = (seg.text_optimized || '').trim();
-      const shouldCopyOptimized = optimizedText && optimizedText !== rawText && seg.opt_status === 'done';
+      const shouldCopyOptimized = optimizedText && seg.opt_status === 'done';
       if (shouldCopyOptimized && !copiedOptimizedKeysRef.current.has(key)) {
         copiedOptimizedKeysRef.current.add(key);
         TauriAPI.copyToClipboard(optimizedText).catch((err) => console.error('Auto copy optimized text failed', err));
+        continue;
+      }
+
+      // Fallback to raw text only when optimized text is not ready.
+      if (!shouldCopyOptimized && rawText && !copiedRawKeysRef.current.has(key)) {
+        copiedRawKeysRef.current.add(key);
+        TauriAPI.copyToClipboard(rawText).catch((err) => console.error('Auto copy raw text failed', err));
       }
     }
   }, [store.autoCopy, store.segments]);
