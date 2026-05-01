@@ -9,7 +9,7 @@ interface SegmentCardProps {
   isActive?: boolean;
   showEnglish?: boolean;
   onSeek: (time: number) => void;
-  onCopy: (text: string) => void;
+  onCopy: (text: string, source: 'english' | 'optimized' | 'raw') => void;
 }
 
 export const SegmentCard: React.FC<SegmentCardProps> = ({
@@ -19,8 +19,16 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   onSeek,
   onCopy,
 }) => {
-  const isProcessing = segment.opt_status === 'running' || segment.opt_status === 'pending';
+  const optimizeRunning = segment.optimize_status === 'running' || segment.optimize_status === 'pending';
+  const translateRunning = segment.translate_status === 'running' || segment.translate_status === 'pending';
+  const isProcessing = optimizeRunning || translateRunning;
   const duration = segment.end - segment.start;
+  const preferredCopyText = segment.text_english || segment.text_optimized || segment.text_raw;
+  const copySource: 'english' | 'optimized' | 'raw' = segment.text_english
+    ? 'english'
+    : segment.text_optimized
+      ? 'optimized'
+      : 'raw';
 
   return (
     <div className={cn(
@@ -40,14 +48,9 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
         <div className="flex-1" />
         
         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <Button variant="ghost" size="icon" className="w-7 h-7" onClick={() => onCopy(segment.text_raw)}>
+          <Button variant="ghost" size="icon" className="w-7 h-7" onClick={() => onCopy(preferredCopyText, copySource)}>
             <Icon name="copy" size={14} />
           </Button>
-          {segment.text_english && (
-            <Button variant="ghost" size="icon" className="w-7 h-7" onClick={() => onCopy(segment.text_english!)}>
-              <Icon name="languages" size={14} />
-            </Button>
-          )}
           <Button variant="ghost" size="icon" className="w-7 h-7">
             <Icon name="download" size={14} />
           </Button>
@@ -55,16 +58,19 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <p className={cn(
-          "text-[15px] leading-[1.7] text-[var(--ink)] break-words text-pretty",
-          isProcessing && "text-[var(--ink-4)] animate-shimmer rounded"
-        )}>
-          {segment.text_optimized || segment.text_raw}
+        <p className="text-[13px] leading-[1.7] text-[var(--ink-2)] break-words text-pretty">{segment.text_raw}</p>
+
+        <p className={cn("text-[15px] leading-[1.7] break-words text-pretty", optimizeRunning && "text-[var(--ink-4)]")}>
+          {segment.optimize_status === 'failed'
+            ? '优化失败'
+            : segment.text_optimized || (optimizeRunning ? '优化中...' : segment.text_raw)}
         </p>
         
-        {showEnglish && segment.text_english && (
-          <p className="text-[14px] leading-[1.7] text-[var(--ink-2)] break-words text-pretty">
-            {segment.text_english}
+        {showEnglish && (
+          <p className={cn("text-[14px] leading-[1.7] break-words text-pretty", translateRunning && "text-[var(--ink-4)]")}>
+            {segment.translate_status === 'failed'
+              ? '翻译失败，已保留优化文本'
+              : segment.text_english || (translateRunning ? '翻译中...' : '')}
           </p>
         )}
       </div>

@@ -73,3 +73,53 @@ fn supports_rule_version_and_tail_query() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn split_stage_status_and_latest_only_constraints_hold() {
+    let path = temp_db_path("db-split-stages");
+    let db = SpeechDatabase::init(&path).unwrap();
+    let session_id = db.create_session().unwrap();
+
+    db.insert_segment(NewSegment {
+        session_id: session_id.clone(),
+        revision: 1,
+        start_sec: 0.0,
+        end_sec: 0.5,
+        wall_start: "2026-05-01 10:00:00".to_string(),
+        wall_end: "2026-05-01 10:00:01".to_string(),
+        text_raw: "raw-1".to_string(),
+    })
+    .unwrap();
+    db.insert_segment(NewSegment {
+        session_id: session_id.clone(),
+        revision: 2,
+        start_sec: 0.6,
+        end_sec: 1.0,
+        wall_start: "2026-05-01 10:00:01".to_string(),
+        wall_end: "2026-05-01 10:00:02".to_string(),
+        text_raw: "raw-2".to_string(),
+    })
+    .unwrap();
+
+    db.update_optimize_status(&session_id, 1, "running").unwrap();
+    db.update_optimize_status(&session_id, 2, "running").unwrap();
+    db.mark_old_revisions_skipped(&session_id, 2).unwrap();
+    db.update_optimize_status(&session_id, 2, "success").unwrap();
+    db.update_translate_status(&session_id, 2, "failed").unwrap();
+
+    let segments = db.list_segments(&session_id, 0, 10).unwrap();
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].revision, 1);
+    assert_eq!(segments[0].optimize_status, "failed");
+    assert_eq!(segments[0].translate_status, "blocked");
+    assert_eq!(segments[1].revision, 2);
+    assert_eq!(segments[1].optimize_status, "success");
+    assert_eq!(segments[1].translate_status, "failed");
+
+    let impossible_combo = segments
+        .iter()
+        .any(|seg| seg.optimize_status == "failed" && seg.translate_status == "success");
+    assert!(!impossible_combo);
+
+    let _ = std::fs::remove_file(path);
+}

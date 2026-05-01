@@ -60,6 +60,27 @@ function App() {
   const [copiedState, setCopiedState] = useState<'zh' | 'en' | null>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
 
+  const mergeSegmentsByRevision = useCallback((incoming: Segment[]) => {
+    store.setSegments((prev) => {
+      if (prev.length === 0) {
+        return incoming;
+      }
+      const merged = new Map<number, Segment>();
+      prev.forEach((seg, index) => {
+        const key = seg.revision ?? -(index + 1);
+        merged.set(key, seg);
+      });
+      incoming.forEach((seg, index) => {
+        const key = seg.revision ?? -(index + 1);
+        const current = merged.get(key);
+        if (!current || (seg.revision ?? 0) >= (current.revision ?? 0)) {
+          merged.set(key, seg);
+        }
+      });
+      return Array.from(merged.values()).sort((a, b) => a.start - b.start);
+    });
+  }, [store]);
+
   // Recording Logic
   const stopPolling = useCallback(() => {
     if (pollTimer.current) {
@@ -77,6 +98,7 @@ function App() {
 
         const mappedSegments: Segment[] = state.segments.map((s: RawSegment) => ({
           id: s.segment_id,
+          revision: s.revision,
           start: s.start,
           end: s.end,
           wall_start: s.wall_start,
@@ -84,12 +106,18 @@ function App() {
           text_raw: s.text,
           text_optimized: s.text_optimized,
           text_english: s.text_english,
-          opt_status: s.opt_status || 'done',
+          optimize_status: s.optimize_status || 'pending',
+          translate_status: s.translate_status || 'blocked',
         }));
+        mergeSegmentsByRevision(mappedSegments);
 
-        store.setSegments(mappedSegments);
-
-        const hasPending = mappedSegments.some((seg) => seg.opt_status === 'running' || seg.opt_status === 'pending');
+        const hasPending = mappedSegments.some(
+          (seg) =>
+            seg.optimize_status === 'pending' ||
+            seg.optimize_status === 'running' ||
+            seg.translate_status === 'pending' ||
+            seg.translate_status === 'running'
+        );
         if (state.recording) {
           store.setStatus(hasPending ? 'processing' : 'recording');
           return;
@@ -115,7 +143,7 @@ function App() {
         store.setStatus('error');
       }
     }, 500);
-  }, [store, stopPolling]);
+  }, [mergeSegmentsByRevision, store, stopPolling]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -171,6 +199,17 @@ function App() {
     }
   };
 
+  const handleSegmentCopy = (text: string, source: 'english' | 'optimized' | 'raw') => {
+    handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
+    if (source === 'raw') {
+      window.alert('当前仅有原始文本，已复制原始文本');
+      return;
+    }
+    if (source === 'optimized') {
+      window.alert('翻译缺失，已复制优化文本');
+    }
+  };
+
   const handleClear = async () => {
     await TauriAPI.clearResults();
     store.setSegments([]);
@@ -189,7 +228,10 @@ function App() {
   };
 
   const handleCopyZh = () => {
-    const text = store.segments.map((seg) => seg.text_optimized || seg.text_raw).filter(Boolean).join('\n');
+    const text = store.segments
+      .map((seg) => seg.text_english || seg.text_optimized || seg.text_raw)
+      .filter(Boolean)
+      .join('\n');
     if (text) {
       handleCopy(text, 'zh').catch((err) => console.error('Copy zh failed', err));
     }
@@ -354,9 +396,7 @@ function App() {
                   isActive={activeSegmentId !== null && seg.id === activeSegmentId}
                   showEnglish={store.showEnglish}
                   onSeek={handleSeek}
-                  onCopy={(text) => {
-                    handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
-                  }}
+                  onCopy={handleSegmentCopy}
                 />
               ))}
             </div>

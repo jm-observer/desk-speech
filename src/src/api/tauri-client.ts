@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 export interface Segment {
   id: number | null;
+  revision?: number;
   start: number;
   end: number;
   wall_start: string;
@@ -9,11 +10,13 @@ export interface Segment {
   text_raw: string;
   text_optimized?: string;
   text_english?: string;
-  opt_status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  optimize_status: 'pending' | 'running' | 'success' | 'failed';
+  translate_status: 'blocked' | 'pending' | 'running' | 'success' | 'failed';
 }
 
 export interface RawSegment {
   segment_id: number | null;
+  revision?: number;
   start: number;
   end: number;
   wall_start: string;
@@ -21,7 +24,8 @@ export interface RawSegment {
   text: string;
   text_optimized?: string;
   text_english?: string;
-  opt_status?: Segment['opt_status'];
+  optimize_status?: Segment['optimize_status'];
+  translate_status?: Segment['translate_status'];
 }
 
 export interface RecordingState {

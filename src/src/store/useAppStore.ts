@@ -16,6 +16,7 @@ export const useAppStore = () => {
 
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
+    revision: typeof row.revision === 'number' ? row.revision : undefined,
     start: typeof row.start_sec === 'number' ? row.start_sec : 0,
     end: typeof row.end_sec === 'number' ? row.end_sec : 0,
     wall_start: typeof row.wall_start === 'string' ? row.wall_start : '',
@@ -23,14 +24,21 @@ export const useAppStore = () => {
     text_raw: typeof row.text_raw === 'string' ? row.text_raw : '',
     text_optimized: typeof row.text_optimized === 'string' ? row.text_optimized : undefined,
     text_english: typeof row.text_english === 'string' ? row.text_english : undefined,
-    opt_status:
-      row.opt_status === 'pending' ||
-      row.opt_status === 'running' ||
-      row.opt_status === 'done' ||
-      row.opt_status === 'failed' ||
-      row.opt_status === 'skipped'
-        ? row.opt_status
-        : 'done',
+    optimize_status:
+      row.optimize_status === 'pending' ||
+      row.optimize_status === 'running' ||
+      row.optimize_status === 'success' ||
+      row.optimize_status === 'failed'
+        ? row.optimize_status
+        : 'pending',
+    translate_status:
+      row.translate_status === 'blocked' ||
+      row.translate_status === 'pending' ||
+      row.translate_status === 'running' ||
+      row.translate_status === 'success' ||
+      row.translate_status === 'failed'
+        ? row.translate_status
+        : 'blocked',
   }), []);
 
   const loadLatestSessionSegments = useCallback(async (): Promise<boolean> => {

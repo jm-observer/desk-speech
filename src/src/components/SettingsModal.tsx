@@ -131,7 +131,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
             <select className="border rounded px-3 py-2 col-span-2" value={settings.selected_model} onChange={(e) => patch('selected_model', e.target.value)}>
               {models.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
-            <textarea className="border rounded px-3 py-2 col-span-2 min-h-[140px]" value={settings.prompt_template} onChange={(e) => patch('prompt_template', e.target.value)} placeholder="系统提示词" />
+            <div className="col-span-2 space-y-1">
+              <label className="text-[12px] text-[var(--ink-3)]">优化系统提示词</label>
+              <p className="text-[11px] text-[var(--ink-4)]">用于文本润色、纠错、去口语噪音</p>
+              <textarea
+                className="border rounded px-3 py-2 w-full min-h-[110px]"
+                value={settings.optimize_prompt_template}
+                onChange={(e) => patch('optimize_prompt_template', e.target.value)}
+                placeholder="用于文本润色、纠错、去口语噪音"
+              />
+            </div>
+            <div className="col-span-2 space-y-1">
+              <label className="text-[12px] text-[var(--ink-3)]">翻译系统提示词</label>
+              <p className="text-[11px] text-[var(--ink-4)]">用于将优化后文本翻译为英文</p>
+              <textarea
+                className="border rounded px-3 py-2 w-full min-h-[110px]"
+                value={settings.translate_prompt_template}
+                onChange={(e) => patch('translate_prompt_template', e.target.value)}
+                placeholder="用于将优化后文本翻译为英文"
+              />
+            </div>
           </div>
         )}
 
