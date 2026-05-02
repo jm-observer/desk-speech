@@ -40,14 +40,9 @@ export const useAppStore = () => {
         : 'blocked',
   }), []);
 
-  const loadLatestSessionSegments = useCallback(async (): Promise<boolean> => {
+  const loadSegments = useCallback(async (): Promise<boolean> => {
     try {
-      const sessions = await TauriAPI.listSessions(0, 1);
-      const latest = sessions[0];
-      if (!latest || typeof latest.id !== 'string') {
-        return false;
-      }
-      const rows = await TauriAPI.listSessionSegments(latest.id, 0, 200);
+      const rows = await TauriAPI.listSegments(0, 200);
       const mapped = rows.map(mapDbSegment).filter((seg) => seg.text_raw.trim().length > 0);
       if (mapped.length > 0) {
         setSegments(mapped);
@@ -55,7 +50,7 @@ export const useAppStore = () => {
         return true;
       }
     } catch (err) {
-      console.error('Load latest session segments failed', err);
+      console.error('Load segments failed', err);
     }
     return false;
   }, [mapDbSegment]);
@@ -89,7 +84,7 @@ export const useAppStore = () => {
       const res = await TauriAPI.getInitStatus();
       if (canceled) return;
       if (res.status === 1) {
-        const loaded = await loadLatestSessionSegments();
+        const loaded = await loadSegments();
         if (!loaded) {
           setStatus('idle');
         }
@@ -108,7 +103,7 @@ export const useAppStore = () => {
         window.clearTimeout(initTimer);
       }
     };
-  }, [loadLatestSessionSegments]);
+  }, [loadSegments]);
 
   return {
     status, setStatus,

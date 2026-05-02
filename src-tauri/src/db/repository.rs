@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 
+pub(crate) const GLOBAL_SCOPE_ID: &str = "global";
+
 #[derive(Clone, Debug)]
 pub struct NewSegment {
-    pub session_id: String,
     pub segment_id: u64,
     pub revision: i64,
     pub start_sec: f32,
@@ -15,7 +16,6 @@ pub struct NewSegment {
 
 #[derive(Clone, Debug)]
 pub struct OptimizeResultUpsert {
-    pub session_id: String,
     pub revision: i64,
     pub text_optimized: Option<String>,
     pub optimize_error: Option<String>,
@@ -25,7 +25,6 @@ pub struct OptimizeResultUpsert {
 
 #[derive(Clone, Debug)]
 pub struct TranslateResultUpsert {
-    pub session_id: String,
     pub revision: i64,
     pub text_english: Option<String>,
     pub translate_error: Option<String>,
@@ -54,7 +53,6 @@ pub struct CorrectionRule {
 #[derive(Clone, Debug)]
 pub struct SegmentRow {
     pub id: i64,
-    pub session_id: String,
     pub revision: i64,
     pub start_sec: f32,
     pub end_sec: f32,
@@ -68,42 +66,34 @@ pub struct SegmentRow {
     pub created_at: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct SessionRow {
-    pub id: String,
-    pub started_at: String,
-    pub ended_at: Option<String>,
-    pub sample_rate: i64,
-    pub channel_count: i64,
-    pub created_at: String,
-}
-
-pub fn create_session(conn: &Connection, session_id: &str, now: &str) -> Result<String> {
+pub fn ensure_global_scope(conn: &Connection, now: &str) -> Result<()> {
     conn.execute(
-        "INSERT INTO sessions(id, started_at, created_at) VALUES (?1, ?2, ?2)",
-        params![session_id, now],
+        "INSERT INTO sessions(id, started_at, created_at)
+         VALUES (?1, ?2, ?2)
+         ON CONFLICT(id) DO NOTHING",
+        params![GLOBAL_SCOPE_ID, now],
     )
-    .with_context(|| format!("failed to create session {session_id}"))?;
-    Ok(session_id.to_string())
-}
-
-pub fn close_session(conn: &Connection, session_id: &str, now: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
-        params![now, session_id],
-    )
-    .with_context(|| format!("failed to close session {session_id}"))?;
+    .context("failed to ensure global scope")?;
     Ok(())
 }
 
-pub fn session_exists(conn: &Connection, session_id: &str) -> Result<bool> {
+pub fn touch_global_scope_end(conn: &Connection, now: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+        params![now, GLOBAL_SCOPE_ID],
+    )
+    .context("failed to update global scope end time")?;
+    Ok(())
+}
+
+pub fn global_scope_exists(conn: &Connection) -> Result<bool> {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(1) FROM sessions WHERE id = ?1",
-            params![session_id],
+            params![GLOBAL_SCOPE_ID],
             |row| row.get(0),
         )
-        .with_context(|| format!("failed to check session existence: {session_id}"))?;
+        .context("failed to check global scope existence")?;
     Ok(count > 0)
 }
 
@@ -121,7 +111,7 @@ pub fn upsert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
     conn.execute(
         sql,
         params![
-            segment.session_id,
+            GLOBAL_SCOPE_ID,
             segment.segment_id,
             segment.revision,
             segment.start_sec,
@@ -134,39 +124,39 @@ pub fn upsert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
     )
     .with_context(|| {
         format!(
-            "failed to upsert segment session_id={}, segment_id={}, revision={}",
-            segment.session_id, segment.segment_id, segment.revision
+            "failed to upsert segment segment_id={}, revision={}",
+            segment.segment_id, segment.revision
         )
     })?;
     Ok(())
 }
 
-pub fn update_optimize_status(conn: &Connection, session_id: &str, revision: i64, status: &str) -> Result<()> {
+pub fn update_optimize_status(conn: &Connection, revision: i64, status: &str) -> Result<()> {
     conn.execute(
         "UPDATE asr_raw_records SET optimize_status = ?1 WHERE session_id = ?2 AND revision = ?3",
-        params![status, session_id, revision],
+        params![status, GLOBAL_SCOPE_ID, revision],
     )
-    .with_context(|| format!("failed to update optimize_status for {session_id}/{revision}"))?;
+    .with_context(|| format!("failed to update optimize_status for revision {revision}"))?;
     Ok(())
 }
 
-pub fn update_translate_status(conn: &Connection, session_id: &str, revision: i64, status: &str) -> Result<()> {
+pub fn update_translate_status(conn: &Connection, revision: i64, status: &str) -> Result<()> {
     conn.execute(
         "UPDATE asr_raw_records SET translate_status = ?1 WHERE session_id = ?2 AND revision = ?3",
-        params![status, session_id, revision],
+        params![status, GLOBAL_SCOPE_ID, revision],
     )
-    .with_context(|| format!("failed to update translate_status for {session_id}/{revision}"))?;
+    .with_context(|| format!("failed to update translate_status for revision {revision}"))?;
     Ok(())
 }
 
-pub fn mark_old_revisions_skipped(conn: &Connection, session_id: &str, latest_revision: i64) -> Result<()> {
+pub fn mark_old_revisions_skipped(conn: &Connection, latest_revision: i64) -> Result<()> {
     conn.execute(
         "UPDATE asr_raw_records
          SET optimize_status = 'failed', translate_status = 'blocked'
          WHERE session_id = ?1 AND revision < ?2 AND optimize_status IN ('pending', 'running')",
-        params![session_id, latest_revision],
+        params![GLOBAL_SCOPE_ID, latest_revision],
     )
-    .with_context(|| format!("failed to mark skipped revisions for {session_id}"))?;
+    .context("failed to mark skipped revisions")?;
     Ok(())
 }
 
@@ -181,7 +171,7 @@ pub fn upsert_optimize_result(conn: &Connection, result: &OptimizeResultUpsert, 
             optimize_finished_at = excluded.optimize_finished_at,
             created_at = excluded.created_at",
         params![
-            result.session_id,
+            GLOBAL_SCOPE_ID,
             result.revision,
             result.text_optimized,
             result.optimize_error,
@@ -205,7 +195,7 @@ pub fn upsert_translate_result(conn: &Connection, result: &TranslateResultUpsert
             translate_finished_at = excluded.translate_finished_at,
             created_at = excluded.created_at",
         params![
-            result.session_id,
+            GLOBAL_SCOPE_ID,
             result.revision,
             result.text_english,
             result.translate_error,
@@ -218,7 +208,7 @@ pub fn upsert_translate_result(conn: &Connection, result: &TranslateResultUpsert
     Ok(())
 }
 
-pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<SegmentRow>> {
+pub fn get_last_segment(conn: &Connection) -> Result<Option<SegmentRow>> {
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
@@ -232,12 +222,11 @@ pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<Se
         .context("failed to prepare get_last_segment statement")?;
 
     let mut rows = stmt
-        .query(params![session_id])
+        .query(params![GLOBAL_SCOPE_ID])
         .context("failed to query last segment")?;
     if let Some(row) = rows.next().context("failed to read last segment row")? {
         Ok(Some(SegmentRow {
             id: row.get(0)?,
-            session_id: row.get(1)?,
             revision: row.get(2)?,
             start_sec: row.get(3)?,
             end_sec: row.get(4)?,
@@ -255,7 +244,7 @@ pub fn get_last_segment(conn: &Connection, session_id: &str) -> Result<Option<Se
     }
 }
 
-pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
+pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
     if page_size == 0 {
         return Err(anyhow!("page_size must be greater than 0"));
     }
@@ -274,10 +263,9 @@ pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: 
         .context("failed to prepare list_segments statement")?;
 
     let mapped = stmt
-        .query_map(params![session_id, page_size, offset], |row| {
+        .query_map(params![GLOBAL_SCOPE_ID, page_size, offset], |row| {
             Ok(SegmentRow {
                 id: row.get(0)?,
-                session_id: row.get(1)?,
                 revision: row.get(2)?,
                 start_sec: row.get(3)?,
                 end_sec: row.get(4)?,
@@ -299,41 +287,7 @@ pub fn list_segments(conn: &Connection, session_id: &str, page: u32, page_size: 
     Ok(rows)
 }
 
-pub fn list_sessions(conn: &Connection, page: u32, page_size: u32) -> Result<Vec<SessionRow>> {
-    if page_size == 0 {
-        return Err(anyhow!("page_size must be greater than 0"));
-    }
-
-    let offset = page as u64 * page_size as u64;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, started_at, ended_at, sample_rate, channel_count, created_at
-             FROM sessions
-             ORDER BY started_at DESC
-             LIMIT ?1 OFFSET ?2",
-        )
-        .context("failed to prepare list_sessions statement")?;
-
-    let mapped = stmt
-        .query_map(params![page_size, offset], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                started_at: row.get(1)?,
-                ended_at: row.get(2)?,
-                sample_rate: row.get(3)?,
-                channel_count: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })
-        .context("failed to query list_sessions")?;
-
-    let rows = mapped
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("failed to collect sessions")?;
-    Ok(rows)
-}
-
-pub fn tail_segments(conn: &Connection, session_id: &str, after_id: i64, limit: u32) -> Result<Vec<SegmentRow>> {
+pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec<SegmentRow>> {
     if limit == 0 {
         return Err(anyhow!("limit must be greater than 0"));
     }
@@ -349,10 +303,9 @@ pub fn tail_segments(conn: &Connection, session_id: &str, after_id: i64, limit: 
         )
         .context("failed to prepare tail_segments statement")?;
     let mapped = stmt
-        .query_map(params![session_id, after_id, limit], |row| {
+        .query_map(params![GLOBAL_SCOPE_ID, after_id, limit], |row| {
             Ok(SegmentRow {
                 id: row.get(0)?,
-                session_id: row.get(1)?,
                 revision: row.get(2)?,
                 start_sec: row.get(3)?,
                 end_sec: row.get(4)?,

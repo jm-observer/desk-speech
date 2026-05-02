@@ -9,54 +9,18 @@ pub(crate) const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
 
 #[derive(Clone)]
 pub(crate) enum DbEvent {
-    InsertSegment {
-        segment: NewSegment,
-    },
-    MarkOptimizeRunning {
-        session_id: String,
-        revision: i64,
-    },
-    MarkOptimizeSuccess {
-        session_id: String,
-        revision: i64,
-    },
-    MarkTranslatePending {
-        session_id: String,
-        revision: i64,
-    },
-    MarkTranslateRunning {
-        session_id: String,
-        revision: i64,
-    },
-    MarkTranslateFailed {
-        session_id: String,
-        revision: i64,
-    },
-    MarkSkippedBefore {
-        session_id: String,
-        revision: i64,
-    },
-    MarkSkipped {
-        session_id: String,
-        revision: i64,
-    },
-    MarkOptimizeFailed {
-        session_id: String,
-        revision: i64,
-    },
-    SaveOptimizeResult {
-        session_id: String,
-        revision: i64,
-        text_optimized: String,
-    },
-    SaveTranslateResult {
-        session_id: String,
-        revision: i64,
-        text_english: String,
-    },
-    CloseSession {
-        session_id: String,
-    },
+    InsertSegment { segment: NewSegment },
+    MarkOptimizeRunning { revision: i64 },
+    MarkOptimizeSuccess { revision: i64 },
+    MarkTranslatePending { revision: i64 },
+    MarkTranslateRunning { revision: i64 },
+    MarkTranslateFailed { revision: i64 },
+    MarkSkippedBefore { revision: i64 },
+    MarkSkipped { revision: i64 },
+    MarkOptimizeFailed { revision: i64 },
+    SaveOptimizeResult { revision: i64, text_optimized: String },
+    SaveTranslateResult { revision: i64, text_english: String },
+    TouchGlobalScopeEnd,
 }
 
 pub(crate) fn start_db_worker(db: db::SpeechDatabase) -> SyncSender<DbEvent> {
@@ -67,70 +31,56 @@ pub(crate) fn start_db_worker(db: db::SpeechDatabase) -> SyncSender<DbEvent> {
                 match event {
                     DbEvent::InsertSegment { segment } => {
                         debug!(
-                            "[db-worker] upsert segment session_id={}, segment_id={}, revision={}",
-                            segment.session_id, segment.segment_id, segment.revision
+                            "[db-worker] upsert segment segment_id={}, revision={}",
+                            segment.segment_id, segment.revision
                         );
                         if let Err(err) = db.upsert_segment(segment.clone()) {
                             error!(
-                                "[db-worker] upsert failed session_id={}, segment_id={}, revision={}, err={}",
-                                segment.session_id, segment.segment_id, segment.revision, err
+                                "[db-worker] upsert failed segment_id={}, revision={}, err={}",
+                                segment.segment_id, segment.revision, err
                             );
                         } else {
                             debug!(
-                                "[db-worker] upsert ok session_id={}, segment_id={}, revision={}",
-                                segment.session_id, segment.segment_id, segment.revision
+                                "[db-worker] upsert ok segment_id={}, revision={}",
+                                segment.segment_id, segment.revision
                             );
                         }
                     }
-                    DbEvent::MarkOptimizeRunning { session_id, revision } => {
-                        debug!(
-                            "[db-worker] mark running session_id={}, revision={}",
-                            session_id, revision
-                        );
-                        let _ = db.update_optimize_status(&session_id, revision, "running");
+                    DbEvent::MarkOptimizeRunning { revision } => {
+                        debug!("[db-worker] mark running revision={}", revision);
+                        let _ = db.update_optimize_status(revision, "running");
                     }
-                    DbEvent::MarkSkippedBefore { session_id, revision } => {
-                        debug!(
-                            "[db-worker] mark skipped before session_id={}, revision={}",
-                            session_id, revision
-                        );
-                        let _ = db.mark_old_revisions_skipped(&session_id, revision);
+                    DbEvent::MarkSkippedBefore { revision } => {
+                        debug!("[db-worker] mark skipped before revision={}", revision);
+                        let _ = db.mark_old_revisions_skipped(revision);
                     }
-                    DbEvent::MarkSkipped { session_id, revision } => {
-                        debug!(
-                            "[db-worker] mark skipped session_id={}, revision={}",
-                            session_id, revision
-                        );
-                        let _ = db.update_optimize_status(&session_id, revision, "failed");
-                        let _ = db.update_translate_status(&session_id, revision, "blocked");
+                    DbEvent::MarkSkipped { revision } => {
+                        debug!("[db-worker] mark skipped revision={}", revision);
+                        let _ = db.update_optimize_status(revision, "failed");
+                        let _ = db.update_translate_status(revision, "blocked");
                     }
-                    DbEvent::MarkOptimizeFailed { session_id, revision } => {
-                        warn!(
-                            "[db-worker] mark failed session_id={}, revision={}",
-                            session_id, revision
-                        );
-                        let _ = db.update_optimize_status(&session_id, revision, "failed");
-                        let _ = db.update_translate_status(&session_id, revision, "blocked");
+                    DbEvent::MarkOptimizeFailed { revision } => {
+                        warn!("[db-worker] mark failed revision={}", revision);
+                        let _ = db.update_optimize_status(revision, "failed");
+                        let _ = db.update_translate_status(revision, "blocked");
                     }
-                    DbEvent::MarkOptimizeSuccess { session_id, revision } => {
-                        let _ = db.update_optimize_status(&session_id, revision, "success");
+                    DbEvent::MarkOptimizeSuccess { revision } => {
+                        let _ = db.update_optimize_status(revision, "success");
                     }
-                    DbEvent::MarkTranslatePending { session_id, revision } => {
-                        let _ = db.update_translate_status(&session_id, revision, "pending");
+                    DbEvent::MarkTranslatePending { revision } => {
+                        let _ = db.update_translate_status(revision, "pending");
                     }
-                    DbEvent::MarkTranslateRunning { session_id, revision } => {
-                        let _ = db.update_translate_status(&session_id, revision, "running");
+                    DbEvent::MarkTranslateRunning { revision } => {
+                        let _ = db.update_translate_status(revision, "running");
                     }
-                    DbEvent::MarkTranslateFailed { session_id, revision } => {
-                        let _ = db.update_translate_status(&session_id, revision, "failed");
+                    DbEvent::MarkTranslateFailed { revision } => {
+                        let _ = db.update_translate_status(revision, "failed");
                     }
                     DbEvent::SaveOptimizeResult {
-                        session_id,
                         revision,
                         text_optimized,
                     } => {
                         let _ = db.upsert_optimize_result(OptimizeResultUpsert {
-                            session_id,
                             revision,
                             text_optimized: Some(text_optimized),
                             optimize_error: None,
@@ -138,23 +88,18 @@ pub(crate) fn start_db_worker(db: db::SpeechDatabase) -> SyncSender<DbEvent> {
                             optimize_finished_at: None,
                         });
                     }
-                    DbEvent::SaveTranslateResult {
-                        session_id,
-                        revision,
-                        text_english,
-                    } => {
+                    DbEvent::SaveTranslateResult { revision, text_english } => {
                         let _ = db.upsert_translate_result(TranslateResultUpsert {
-                            session_id: session_id.clone(),
                             revision,
                             text_english: Some(text_english),
                             translate_error: None,
                             translate_started_at: None,
                             translate_finished_at: None,
                         });
-                        let _ = db.update_translate_status(&session_id, revision, "success");
+                        let _ = db.update_translate_status(revision, "success");
                     }
-                    DbEvent::CloseSession { session_id } => {
-                        let _ = db.close_session(&session_id);
+                    DbEvent::TouchGlobalScopeEnd => {
+                        let _ = db.touch_global_scope_end();
                     }
                 }
             }

@@ -52,12 +52,11 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
 
     info!("[start_recording] starting at {now}");
 
-    let session_id = {
+    {
         let db_guard = mutex_lock(&state.db);
         let db = db_guard.as_ref().ok_or("Database not initialized")?;
-        db.create_session().map_err(|e| e.to_string())?
+        db.ensure_global_scope().map_err(|e| e.to_string())?
     };
-    *write_lock(&state.current_session_id) = Some(session_id.clone());
     let stop_signal = Arc::clone(&state.stop_signal);
     let recording = Arc::clone(&state.recording);
     let segments = Arc::clone(&state.segments);
@@ -74,7 +73,6 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
         recorded_audio: Arc::clone(&state.recorded_audio),
         db: Arc::clone(&state.db),
         db_writer: Arc::clone(&state.db_writer),
-        current_session_id: Arc::clone(&state.current_session_id),
         correction_engine: Arc::clone(&state.correction_engine),
         start_wall_clock: Arc::clone(&state.start_wall_clock),
         start_instant: Arc::clone(&state.start_instant),
@@ -90,11 +88,9 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
     });
     let db_writer = mutex_lock(&state.db_writer).as_ref().cloned();
     info!(
-        "[start_recording] created session_id={}, db_writer_ready={}",
-        session_id,
+        "[start_recording] global scope ready, db_writer_ready={}",
         db_writer.is_some()
     );
-    let current_session_id = Arc::clone(&state.current_session_id);
     let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
     let next_revision = Arc::clone(&state.next_revision);
     let anchor = RecordingAnchor {
@@ -104,7 +100,6 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
     let selected_device = read_lock(&state.selected_device).clone();
 
     let db_writer_for_run = db_writer.clone();
-    let session_id_for_run = session_id.clone();
     tauri::async_runtime::spawn(async move {
         let join = tauri::async_runtime::spawn_blocking(move || {
             run_recording(
@@ -119,7 +114,6 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
                     app_state: &app_state,
                     app_handle: &app,
                     db_writer: db_writer_for_run.as_ref(),
-                    session_id: &session_id_for_run,
                     recorded_audio: &recorded_audio,
                     anchor: &anchor,
                     selected_device: selected_device.as_deref(),
@@ -148,13 +142,7 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
 
         recording.store(false, Ordering::SeqCst);
         if let Some(writer) = db_writer.as_ref() {
-            let _ = writer.try_send(DbEvent::CloseSession {
-                session_id: session_id.clone(),
-            });
-        }
-        {
-            let mut guard = write_lock(&current_session_id);
-            *guard = None;
+            let _ = writer.try_send(DbEvent::TouchGlobalScopeEnd);
         }
         info!("[recording task] stopped");
     });
@@ -233,7 +221,6 @@ fn run_recording(
                             correction_engine: runtime.correction_engine,
                             state: runtime.app_state,
                             app_handle: runtime.app_handle,
-                            session_id: runtime.session_id,
                             db_writer: runtime.db_writer,
                             base_wall: &runtime.anchor.base_wall,
                             audio_offset_samples: runtime.anchor.audio_offset,
@@ -267,7 +254,6 @@ fn run_recording(
             correction_engine: runtime.correction_engine,
             state: runtime.app_state,
             app_handle: runtime.app_handle,
-            session_id: runtime.session_id,
             db_writer: runtime.db_writer,
             base_wall: &runtime.anchor.base_wall,
             audio_offset_samples: runtime.anchor.audio_offset,
@@ -437,7 +423,6 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
             if let Some(writer) = ctx.db_writer {
                 let event = DbEvent::InsertSegment {
                     segment: NewSegment {
-                        session_id: ctx.session_id.to_string(),
                         segment_id: db_segment_id,
                         revision,
                         start_sec: rel_start,
@@ -452,14 +437,14 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                         warn!("[db-worker] queue full, dropping segment event");
                     } else {
                         warn!(
-                            "[db-worker] failed to enqueue segment session_id={}, segment_id={}, revision={}, err={}",
-                            ctx.session_id, db_segment_id, revision, err
+                            "[db-worker] failed to enqueue segment segment_id={}, revision={}, err={}",
+                            db_segment_id, revision, err
                         );
                     }
                 } else {
                     debug!(
-                        "[db-worker] enqueued segment session_id={}, segment_id={}, revision={}",
-                        ctx.session_id, db_segment_id, revision
+                        "[db-worker] enqueued segment segment_id={}, revision={}",
+                        db_segment_id, revision
                     );
                 }
             } else {
@@ -468,7 +453,6 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                     let db_guard = mutex_lock(&ctx.state.db);
                     if let Some(db) = db_guard.as_ref() {
                         let result = db.upsert_segment(NewSegment {
-                            session_id: ctx.session_id.to_string(),
                             segment_id: db_segment_id,
                             revision,
                             start_sec: rel_start,
@@ -479,12 +463,12 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                         });
                         match result {
                             Ok(()) => info!(
-                                "[db-direct] upsert ok session_id={}, segment_id={}, revision={}",
-                                ctx.session_id, db_segment_id, revision
+                                "[db-direct] upsert ok segment_id={}, revision={}",
+                                db_segment_id, revision
                             ),
                             Err(err) => error!(
-                                "[db-direct] upsert failed session_id={}, segment_id={}, revision={}, err={}",
-                                ctx.session_id, db_segment_id, revision, err
+                                "[db-direct] upsert failed segment_id={}, revision={}, err={}",
+                                db_segment_id, revision, err
                             ),
                         }
                     }
@@ -496,7 +480,6 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                     writer.clone(),
                     Arc::clone(ctx.state),
                     ctx.app_handle.clone(),
-                    ctx.session_id.to_string(),
                     revision,
                     llm_input_text,
                 );
@@ -509,26 +492,18 @@ fn spawn_llm_postprocess_task_v2(
     writer: SyncSender<DbEvent>,
     state: Arc<AppState>,
     app_handle: tauri::AppHandle,
-    session_id: String,
     revision: i64,
     llm_input_text: String,
 ) {
     tauri::async_runtime::spawn(async move {
         info!(
-            "[llm] start postprocess session_id={}, revision={}, text_len={}",
-            session_id,
+            "[llm] start postprocess revision={}, text_len={}",
             revision,
             llm_input_text.len()
         );
         update_segment_llm_state(&state.segments, revision, Some("running"), None, None, None);
-        let _ = writer.try_send(DbEvent::MarkSkippedBefore {
-            session_id: session_id.clone(),
-            revision,
-        });
-        let _ = writer.try_send(DbEvent::MarkOptimizeRunning {
-            session_id: session_id.clone(),
-            revision,
-        });
+        let _ = writer.try_send(DbEvent::MarkSkippedBefore { revision });
+        let _ = writer.try_send(DbEvent::MarkOptimizeRunning { revision });
 
         let settings = read_lock(&state.llm_settings).clone();
 
@@ -537,8 +512,8 @@ fn spawn_llm_postprocess_task_v2(
                 Ok(models) => {
                     if let Some(first) = models.into_iter().find(|m| !m.trim().is_empty()) {
                         warn!(
-                            "[llm] selected_model is empty, fallback to first model={}, session_id={}, revision={}",
-                            first, session_id, revision
+                            "[llm] selected_model is empty, fallback to first model={}, revision={}",
+                            first, revision
                         );
                         let mut fallback_settings = settings.clone();
                         fallback_settings.selected_model = first;
@@ -546,7 +521,6 @@ fn spawn_llm_postprocess_task_v2(
                             &writer,
                             &state,
                             &app_handle,
-                            &session_id,
                             revision,
                             &llm_input_text,
                             fallback_settings,
@@ -554,37 +528,25 @@ fn spawn_llm_postprocess_task_v2(
                         .await;
                         return;
                     } else {
-                        warn!(
-                            "[llm] skip due to empty model list, session_id={}, revision={}",
-                            session_id, revision
-                        );
+                        warn!("[llm] skip due to empty model list, revision={}", revision);
                         update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-                        let _ = writer.try_send(DbEvent::MarkOptimizeFailed { session_id, revision });
+                        let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
                         return;
                     }
                 }
                 Err(err) => {
                     warn!(
-                        "[llm] skip due to empty model and list_models failed, session_id={}, revision={}, err={}",
-                        session_id, revision, err
+                        "[llm] skip due to empty model and list_models failed, revision={}, err={}",
+                        revision, err
                     );
                     update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-                    let _ = writer.try_send(DbEvent::MarkOptimizeFailed { session_id, revision });
+                    let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
                     return;
                 }
             }
         }
 
-        perform_postprocess_and_copy(
-            &writer,
-            &state,
-            &app_handle,
-            &session_id,
-            revision,
-            &llm_input_text,
-            settings,
-        )
-        .await;
+        perform_postprocess_and_copy(&writer, &state, &app_handle, revision, &llm_input_text, settings).await;
     });
 }
 
@@ -592,7 +554,6 @@ async fn perform_postprocess_and_copy(
     writer: &SyncSender<DbEvent>,
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
-    session_id: &str,
     revision: i64,
     llm_input_text: &str,
     settings: LlmSettings,
@@ -602,10 +563,7 @@ async fn perform_postprocess_and_copy(
         Err(err) => {
             error!("llm postprocess failed: {}", err);
             update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-            let _ = writer.try_send(DbEvent::MarkOptimizeFailed {
-                session_id: session_id.to_string(),
-                revision,
-            });
+            let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
             return;
         }
     };
@@ -613,45 +571,31 @@ async fn perform_postprocess_and_copy(
     let latest_revision = state.next_revision.load(Ordering::Relaxed) as i64 - 1;
     if revision < latest_revision {
         info!(
-            "[llm] revision skipped as stale, session_id={}, revision={}, latest_revision={}",
-            session_id, revision, latest_revision
+            "[llm] revision skipped as stale, revision={}, latest_revision={}",
+            revision, latest_revision
         );
         update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-        let _ = writer.try_send(DbEvent::MarkSkipped {
-            session_id: session_id.to_string(),
-            revision,
-        });
+        let _ = writer.try_send(DbEvent::MarkSkipped { revision });
         return;
     }
 
     let optimized_for_memory = optimized.clone();
     let result = DbEvent::SaveOptimizeResult {
-        session_id: session_id.to_string(),
         revision,
         text_optimized: optimized,
     };
     if writer.try_send(result).is_err() {
         update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-        let _ = writer.try_send(DbEvent::MarkOptimizeFailed {
-            session_id: session_id.to_string(),
-            revision,
-        });
+        let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
         return;
     }
     info!(
-        "[llm] optimize done, session_id={}, revision={}, optimized_len={}",
-        session_id,
+        "[llm] optimize done, revision={}, optimized_len={}",
         revision,
         optimized_for_memory.len()
     );
-    let _ = writer.try_send(DbEvent::MarkOptimizeSuccess {
-        session_id: session_id.to_string(),
-        revision,
-    });
-    let _ = writer.try_send(DbEvent::MarkTranslatePending {
-        session_id: session_id.to_string(),
-        revision,
-    });
+    let _ = writer.try_send(DbEvent::MarkOptimizeSuccess { revision });
+    let _ = writer.try_send(DbEvent::MarkTranslatePending { revision });
     update_segment_llm_state(
         &state.segments,
         revision,
@@ -661,42 +605,31 @@ async fn perform_postprocess_and_copy(
         None,
     );
 
-    let _ = writer.try_send(DbEvent::MarkTranslateRunning {
-        session_id: session_id.to_string(),
-        revision,
-    });
+    let _ = writer.try_send(DbEvent::MarkTranslateRunning { revision });
     update_segment_llm_state(&state.segments, revision, None, Some("running"), None, None);
 
     let english = match translate_text(&settings, &optimized_for_memory).await {
         Ok(v) => v,
         Err(err) => {
             error!("llm translate failed: {}", err);
-            let _ = writer.try_send(DbEvent::MarkTranslateFailed {
-                session_id: session_id.to_string(),
-                revision,
-            });
+            let _ = writer.try_send(DbEvent::MarkTranslateFailed { revision });
             update_segment_llm_state(&state.segments, revision, None, Some("failed"), None, None);
             return;
         }
     };
 
     let result = DbEvent::SaveTranslateResult {
-        session_id: session_id.to_string(),
         revision,
         text_english: english.clone(),
     };
     if writer.try_send(result).is_err() {
-        let _ = writer.try_send(DbEvent::MarkTranslateFailed {
-            session_id: session_id.to_string(),
-            revision,
-        });
+        let _ = writer.try_send(DbEvent::MarkTranslateFailed { revision });
         update_segment_llm_state(&state.segments, revision, None, Some("failed"), None, None);
         return;
     }
 
     info!(
-        "[llm] translate done, session_id={}, revision={}, english_len={}",
-        session_id,
+        "[llm] translate done, revision={}, english_len={}",
         revision,
         english.len()
     );
@@ -719,10 +652,7 @@ async fn perform_postprocess_and_copy(
         if let Err(err) = app_handle.clipboard().write_text(text) {
             error!("copy {mode_name} to clipboard failed: {}", err);
         } else {
-            info!(
-                "[llm] auto copy done, session_id={}, revision={}, mode={}",
-                session_id, revision, mode_name
-            );
+            info!("[llm] auto copy done, revision={}, mode={}", revision, mode_name);
         }
     }
 }

@@ -15,10 +15,9 @@ fn temp_db_path(name: &str) -> std::path::PathBuf {
 fn initializes_and_migrates_schema() {
     let path = temp_db_path("db-migrate");
     let db = SpeechDatabase::init(&path).unwrap();
-    let session_id = db.create_session().unwrap();
+    db.ensure_global_scope().unwrap();
 
     db.upsert_segment(NewSegment {
-        session_id: session_id.clone(),
         segment_id: 1,
         revision: 1,
         start_sec: 0.0,
@@ -29,9 +28,7 @@ fn initializes_and_migrates_schema() {
     })
     .unwrap();
 
-    let sessions = db.list_sessions(0, 1).unwrap();
-    let segments = db.list_segments(&session_id, 0, 10).unwrap();
-    assert_eq!(sessions.len(), 1);
+    let segments = db.list_segments(0, 10).unwrap();
     assert_eq!(segments.len(), 1);
 
     let _ = std::fs::remove_file(path);
@@ -41,11 +38,10 @@ fn initializes_and_migrates_schema() {
 fn supports_rule_version_and_tail_query() {
     let path = temp_db_path("db-tail");
     let db = SpeechDatabase::init(&path).unwrap();
-    let session_id = db.create_session().unwrap();
+    db.ensure_global_scope().unwrap();
 
     for i in 0..3 {
         db.upsert_segment(NewSegment {
-            session_id: session_id.clone(),
             segment_id: i as u64 + 1,
             revision: i as i64 + 1,
             start_sec: i as f32,
@@ -67,7 +63,7 @@ fn supports_rule_version_and_tail_query() {
 
     let first_ver = db.bump_rule_version("v1").unwrap();
     let latest = db.get_latest_rule_version().unwrap();
-    let tails = db.tail_segments(&session_id, 1, 10).unwrap();
+    let tails = db.tail_segments(1, 10).unwrap();
 
     assert_eq!(first_ver, 1);
     assert_eq!(latest.unwrap().0, 1);
@@ -80,10 +76,9 @@ fn supports_rule_version_and_tail_query() {
 fn split_stage_status_and_latest_only_constraints_hold() {
     let path = temp_db_path("db-split-stages");
     let db = SpeechDatabase::init(&path).unwrap();
-    let session_id = db.create_session().unwrap();
+    db.ensure_global_scope().unwrap();
 
     db.upsert_segment(NewSegment {
-        session_id: session_id.clone(),
         segment_id: 1,
         revision: 1,
         start_sec: 0.0,
@@ -94,7 +89,6 @@ fn split_stage_status_and_latest_only_constraints_hold() {
     })
     .unwrap();
     db.upsert_segment(NewSegment {
-        session_id: session_id.clone(),
         segment_id: 2,
         revision: 2,
         start_sec: 0.6,
@@ -105,13 +99,13 @@ fn split_stage_status_and_latest_only_constraints_hold() {
     })
     .unwrap();
 
-    db.update_optimize_status(&session_id, 1, "running").unwrap();
-    db.update_optimize_status(&session_id, 2, "running").unwrap();
-    db.mark_old_revisions_skipped(&session_id, 2).unwrap();
-    db.update_optimize_status(&session_id, 2, "success").unwrap();
-    db.update_translate_status(&session_id, 2, "failed").unwrap();
+    db.update_optimize_status(1, "running").unwrap();
+    db.update_optimize_status(2, "running").unwrap();
+    db.mark_old_revisions_skipped(2).unwrap();
+    db.update_optimize_status(2, "success").unwrap();
+    db.update_translate_status(2, "failed").unwrap();
 
-    let segments = db.list_segments(&session_id, 0, 10).unwrap();
+    let segments = db.list_segments(0, 10).unwrap();
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0].revision, 1);
     assert_eq!(segments[0].optimize_status, "failed");

@@ -7,11 +7,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use repository::{
-    CorrectionRule, NewRule, NewSegment, OptimizeResultUpsert, SegmentRow, SessionRow, TranslateResultUpsert,
-};
+use repository::{CorrectionRule, NewRule, NewSegment, OptimizeResultUpsert, SegmentRow, TranslateResultUpsert};
 use rusqlite::Connection;
-use uuid::Uuid;
 
 #[cfg(test)]
 #[path = "../lock_utils.rs"]
@@ -43,17 +40,16 @@ impl SpeechDatabase {
         })
     }
 
-    pub fn create_session(&self) -> Result<String> {
-        let session_id = Uuid::new_v4().to_string();
+    pub fn ensure_global_scope(&self) -> Result<()> {
         let now = now_str();
         let conn = mutex_lock(&self.conn);
-        repository::create_session(&conn, &session_id, &now)
+        repository::ensure_global_scope(&conn, &now)
     }
 
-    pub fn close_session(&self, session_id: &str) -> Result<()> {
+    pub fn touch_global_scope_end(&self) -> Result<()> {
         let now = now_str();
         let conn = mutex_lock(&self.conn);
-        repository::close_session(&conn, session_id, &now)
+        repository::touch_global_scope_end(&conn, &now)
     }
 
     pub fn upsert_segment(&self, segment: NewSegment) -> Result<()> {
@@ -62,19 +58,19 @@ impl SpeechDatabase {
         repository::upsert_segment(&conn, &segment, &now)
     }
 
-    pub fn mark_old_revisions_skipped(&self, session_id: &str, latest_revision: i64) -> Result<()> {
+    pub fn mark_old_revisions_skipped(&self, latest_revision: i64) -> Result<()> {
         let conn = mutex_lock(&self.conn);
-        repository::mark_old_revisions_skipped(&conn, session_id, latest_revision)
+        repository::mark_old_revisions_skipped(&conn, latest_revision)
     }
 
-    pub fn update_optimize_status(&self, session_id: &str, revision: i64, status: &str) -> Result<()> {
+    pub fn update_optimize_status(&self, revision: i64, status: &str) -> Result<()> {
         let conn = mutex_lock(&self.conn);
-        repository::update_optimize_status(&conn, session_id, revision, status)
+        repository::update_optimize_status(&conn, revision, status)
     }
 
-    pub fn update_translate_status(&self, session_id: &str, revision: i64, status: &str) -> Result<()> {
+    pub fn update_translate_status(&self, revision: i64, status: &str) -> Result<()> {
         let conn = mutex_lock(&self.conn);
-        repository::update_translate_status(&conn, session_id, revision, status)
+        repository::update_translate_status(&conn, revision, status)
     }
 
     pub fn upsert_optimize_result(&self, result: OptimizeResultUpsert) -> Result<()> {
@@ -89,24 +85,14 @@ impl SpeechDatabase {
         repository::upsert_translate_result(&conn, &result, &now)
     }
 
-    pub fn list_segments(&self, session_id: &str, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
+    pub fn list_segments(&self, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
         let conn = mutex_lock(&self.conn);
-        repository::list_segments(&conn, session_id, page, page_size)
+        repository::list_segments(&conn, page, page_size)
     }
 
-    pub fn list_sessions(&self, page: u32, page_size: u32) -> Result<Vec<SessionRow>> {
+    pub fn tail_segments(&self, after_id: i64, limit: u32) -> Result<Vec<SegmentRow>> {
         let conn = mutex_lock(&self.conn);
-        repository::list_sessions(&conn, page, page_size)
-    }
-
-    pub fn tail_segments(&self, session_id: &str, after_id: i64, limit: u32) -> Result<Vec<SegmentRow>> {
-        let conn = mutex_lock(&self.conn);
-        repository::tail_segments(&conn, session_id, after_id, limit)
-    }
-
-    pub fn session_exists(&self, session_id: &str) -> Result<bool> {
-        let conn = mutex_lock(&self.conn);
-        repository::session_exists(&conn, session_id)
+        repository::tail_segments(&conn, after_id, limit)
     }
 
     pub fn upsert_rule(&self, rule: NewRule) -> Result<()> {
@@ -173,8 +159,7 @@ mod tests {
     fn init_creates_schema() {
         let path = temp_db_path("schema");
         let db = SpeechDatabase::init(&path).unwrap();
-        let session_id = db.create_session().unwrap();
-        assert!(!session_id.is_empty());
+        db.ensure_global_scope().unwrap();
         let _ = std::fs::remove_file(path);
     }
 
@@ -182,10 +167,9 @@ mod tests {
     fn segment_and_rule_roundtrip() {
         let path = temp_db_path("roundtrip");
         let db = SpeechDatabase::init(&path).unwrap();
-        let session_id = db.create_session().unwrap();
+        db.ensure_global_scope().unwrap();
 
         db.upsert_segment(NewSegment {
-            session_id: session_id.clone(),
             segment_id: 1,
             revision: 1,
             start_sec: 0.0,
@@ -196,7 +180,7 @@ mod tests {
         })
         .unwrap();
 
-        let segments = db.list_segments(&session_id, 0, 10).unwrap();
+        let segments = db.list_segments(0, 10).unwrap();
         assert_eq!(segments.len(), 1);
 
         db.upsert_rule(NewRule {
@@ -229,8 +213,8 @@ mod tests {
     fn reject_zero_page_size() {
         let path = temp_db_path("paging");
         let db = SpeechDatabase::init(&path).unwrap();
-        let session_id = db.create_session().unwrap();
-        let err = db.list_segments(&session_id, 0, 0).unwrap_err();
+        db.ensure_global_scope().unwrap();
+        let err = db.list_segments(0, 0).unwrap_err();
         assert!(err.to_string().contains("page_size"));
         let _ = std::fs::remove_file(path);
     }
@@ -239,11 +223,10 @@ mod tests {
     fn latest_only_marks_old_revisions_skipped_and_keeps_latest_pending() {
         let path = temp_db_path("latest-only");
         let db = SpeechDatabase::init(&path).unwrap();
-        let session_id = db.create_session().unwrap();
+        db.ensure_global_scope().unwrap();
 
         for revision in 1..=3 {
             db.upsert_segment(NewSegment {
-                session_id: session_id.clone(),
                 segment_id: revision as u64,
                 revision,
                 start_sec: revision as f32,
@@ -255,11 +238,11 @@ mod tests {
             .unwrap();
         }
 
-        db.update_optimize_status(&session_id, 1, "running").unwrap();
-        db.update_optimize_status(&session_id, 2, "running").unwrap();
-        db.mark_old_revisions_skipped(&session_id, 3).unwrap();
+        db.update_optimize_status(1, "running").unwrap();
+        db.update_optimize_status(2, "running").unwrap();
+        db.mark_old_revisions_skipped(3).unwrap();
 
-        let segments = db.list_segments(&session_id, 0, 10).unwrap();
+        let segments = db.list_segments(0, 10).unwrap();
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].revision, 1);
         assert_eq!(segments[0].optimize_status, "failed");
@@ -275,10 +258,9 @@ mod tests {
     fn llm_result_roundtrip_for_two_stages() {
         let path = temp_db_path("llm-result");
         let db = SpeechDatabase::init(&path).unwrap();
-        let session_id = db.create_session().unwrap();
+        db.ensure_global_scope().unwrap();
 
         db.upsert_segment(NewSegment {
-            session_id: session_id.clone(),
             segment_id: 1,
             revision: 1,
             start_sec: 0.0,
@@ -290,7 +272,6 @@ mod tests {
         .unwrap();
 
         db.upsert_optimize_result(OptimizeResultUpsert {
-            session_id: session_id.clone(),
             revision: 1,
             text_optimized: Some("优化文本".to_string()),
             optimize_error: None,
@@ -299,7 +280,6 @@ mod tests {
         })
         .unwrap();
         db.upsert_translate_result(TranslateResultUpsert {
-            session_id: session_id.clone(),
             revision: 1,
             text_english: Some("optimized english".to_string()),
             translate_error: None,
@@ -307,10 +287,10 @@ mod tests {
             translate_finished_at: None,
         })
         .unwrap();
-        db.update_optimize_status(&session_id, 1, "success").unwrap();
-        db.update_translate_status(&session_id, 1, "success").unwrap();
+        db.update_optimize_status(1, "success").unwrap();
+        db.update_translate_status(1, "success").unwrap();
 
-        let segments = db.list_segments(&session_id, 0, 10).unwrap();
+        let segments = db.list_segments(0, 10).unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text_raw, "原始文本");
         assert_eq!(segments[0].text_optimized.as_deref(), Some("优化文本"));
