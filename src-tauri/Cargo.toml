@@ -31,3 +31,4 @@ chrono = "0.4"
 async-openai = { version = "0.36.1", features = ["chat-completion", "model"] }
 serde_json = "1.0.149"
 custom-utils = "0.11.7"
+tokio = { version = "1", features = ["full"] }

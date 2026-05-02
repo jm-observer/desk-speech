@@ -14,8 +14,9 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::correction::CorrectionEngine;
 use crate::db::repository::{NewSegment, OptimizeResultUpsert, TranslateResultUpsert};
@@ -159,14 +160,15 @@ struct SegmentResult {
 }
 
 fn update_segment_llm_state(
-    segments: &Arc<Mutex<Vec<SegmentResult>>>,
+    segments: &Arc<RwLock<Vec<SegmentResult>>>,
     revision: i64,
     optimize_status: Option<&str>,
     translate_status: Option<&str>,
     optimized: Option<String>,
     english: Option<String>,
 ) {
-    if let Ok(mut segs) = segments.lock() {
+    {
+        let mut segs = segments.blocking_write();
         if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
             if let Some(status) = optimize_status {
                 seg.optimize_status = status.to_string();
@@ -194,27 +196,27 @@ pub(crate) struct RecordingState {
 }
 
 pub(crate) struct AppState {
-    recognizer: Arc<Mutex<Option<OfflineRecognizer>>>,
-    vad: Arc<Mutex<Option<VoiceActivityDetector>>>,
+    recognizer: Arc<RwLock<Option<OfflineRecognizer>>>,
+    vad: Arc<RwLock<Option<VoiceActivityDetector>>>,
     recording: Arc<AtomicBool>,
     stop_signal: Arc<AtomicBool>,
-    segments: Arc<Mutex<Vec<SegmentResult>>>,
-    recorded_audio: Arc<Mutex<RollingAudioBuffer>>,
+    segments: Arc<RwLock<Vec<SegmentResult>>>,
+    recorded_audio: Arc<RwLock<RollingAudioBuffer>>,
     db: Arc<Mutex<Option<db::SpeechDatabase>>>,
     db_writer: Arc<Mutex<Option<SyncSender<DbEvent>>>>,
-    current_session_id: Arc<Mutex<Option<String>>>,
+    current_session_id: Arc<RwLock<Option<String>>>,
     correction_engine: Arc<CorrectionEngine>,
-    start_wall_clock: Arc<Mutex<Option<chrono::DateTime<Local>>>>,
-    start_instant: Arc<Mutex<Option<Instant>>>,
+    start_wall_clock: Arc<RwLock<Option<chrono::DateTime<Local>>>>,
+    start_instant: Arc<RwLock<Option<Instant>>>,
     init_status: Arc<AtomicU8>,
-    init_error: Arc<Mutex<String>>,
+    init_error: Arc<RwLock<String>>,
     num_threads: Arc<AtomicU32>,
     next_realtime_segment_id: Arc<AtomicU64>,
     next_revision: Arc<AtomicU64>,
-    settings: Arc<Mutex<VadSettings>>,
-    llm_settings: Arc<Mutex<LlmSettings>>,
-    llm_models_cache: Arc<Mutex<Option<CachedModels>>>,
-    selected_device: Arc<Mutex<Option<String>>>,
+    settings: Arc<RwLock<VadSettings>>,
+    llm_settings: Arc<RwLock<LlmSettings>>,
+    llm_models_cache: Arc<RwLock<Option<CachedModels>>>,
+    selected_device: Arc<RwLock<Option<String>>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -244,7 +246,7 @@ struct RecordingAnchor {
 
 struct RecordingRuntime<'a> {
     stop_signal: &'a AtomicBool,
-    segments: &'a Arc<Mutex<Vec<SegmentResult>>>,
+    segments: &'a Arc<RwLock<Vec<SegmentResult>>>,
     next_realtime_segment_id: &'a AtomicU64,
     next_revision: &'a AtomicU64,
     correction_engine: &'a CorrectionEngine,
@@ -252,13 +254,13 @@ struct RecordingRuntime<'a> {
     app_handle: &'a tauri::AppHandle,
     db_writer: Option<&'a SyncSender<DbEvent>>,
     session_id: &'a str,
-    recorded_audio: &'a Arc<Mutex<RollingAudioBuffer>>,
+    recorded_audio: &'a Arc<RwLock<RollingAudioBuffer>>,
     anchor: &'a RecordingAnchor,
     selected_device: Option<&'a str>,
 }
 
 struct RecognizeContext<'a> {
-    segments: &'a Arc<Mutex<Vec<SegmentResult>>>,
+    segments: &'a Arc<RwLock<Vec<SegmentResult>>>,
     next_realtime_segment_id: &'a AtomicU64,
     next_revision: &'a AtomicU64,
     correction_engine: &'a CorrectionEngine,
@@ -411,7 +413,8 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 translate_status: "blocked".to_string(),
             };
 
-            let db_segment_id = if let Ok(mut segs) = ctx.segments.lock() {
+            let db_segment_id = {
+                let mut segs = ctx.segments.blocking_write();
                 if merge_segment_in_place(&mut segs, &new_segment) {
                     segs.last().map(|s| s.segment_id).unwrap_or(new_segment.segment_id)
                 } else {
@@ -419,15 +422,13 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                     segs.push(new_segment);
                     id
                 }
-            } else {
-                new_segment.segment_id
             };
 
             let llm_input_text = ctx
                 .segments
-                .lock()
-                .ok()
-                .and_then(|segs| segs.last().map(|seg| seg.text.clone()))
+                .blocking_read()
+                .last()
+                .map(|seg| seg.text.clone())
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| text_corrected.clone());
 
@@ -461,7 +462,8 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 }
             } else {
                 warn!("[db-worker] writer not ready, fallback to direct upsert");
-                if let Ok(db_guard) = ctx.state.db.lock() {
+                {
+                    let db_guard = ctx.state.db.blocking_lock();
                     if let Some(db) = db_guard.as_ref() {
                         let result = db.upsert_segment(NewSegment {
                             session_id: ctx.session_id.to_string(),
@@ -526,15 +528,7 @@ fn spawn_llm_postprocess_task_v2(
             revision,
         });
 
-        let settings = match state.llm_settings.lock() {
-            Ok(s) => s.clone(),
-            Err(err) => {
-                error!("llm settings lock failed: {}", err);
-                update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-                let _ = writer.try_send(DbEvent::MarkOptimizeFailed { session_id, revision });
-                return;
-            }
-        };
+        let settings = state.llm_settings.blocking_read().clone();
 
         if settings.selected_model.trim().is_empty() {
             match llm_list_models(&settings).await {
@@ -769,17 +763,13 @@ pub(crate) fn set_input_device(device_name: Option<String>, state: tauri::State<
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change device while recording".to_string());
     }
-    *state.selected_device.lock().map_err(|e| e.to_string())? = device_name;
+    *state.selected_device.blocking_write() = device_name;
     Ok(())
 }
 
 pub(crate) fn get_selected_device(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
     info!("[get_selected_device]");
-    state
-        .selected_device
-        .lock()
-        .map(|d| d.clone())
-        .map_err(|e| e.to_string())
+    Ok(state.selected_device.blocking_read().clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -800,35 +790,31 @@ pub(crate) fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, App
 
     // Take recognizer and VAD out of shared state for exclusive use
     let recognizer = {
-        let mut guard = state.recognizer.lock().map_err(|e| e.to_string())?;
+        let mut guard = state.recognizer.blocking_write();
         guard.take().ok_or("Recognizer not available")?
     };
     let vad = {
-        let mut guard = state.vad.lock().map_err(|e| e.to_string())?;
+        let mut guard = state.vad.blocking_write();
         guard.take().ok_or("VAD not available")?
     };
 
     state.stop_signal.store(false, Ordering::Relaxed);
 
     // Get current audio length as offset for new segments
-    let audio_offset = state
-        .recorded_audio
-        .lock()
-        .map_err(|e| e.to_string())?
-        .global_end_sample();
+    let audio_offset = state.recorded_audio.blocking_read().global_end_sample();
 
     let now = Local::now();
-    *state.start_wall_clock.lock().map_err(|e| e.to_string())? = Some(now);
-    *state.start_instant.lock().map_err(|e| e.to_string())? = Some(Instant::now());
+    *state.start_wall_clock.blocking_write() = Some(now);
+    *state.start_instant.blocking_write() = Some(Instant::now());
 
     info!("[start_recording] starting at {now}");
 
     let session_id = {
-        let db_guard = state.db.lock().map_err(|e| e.to_string())?;
+        let db_guard = state.db.blocking_lock();
         let db = db_guard.as_ref().ok_or("Database not initialized")?;
         db.create_session().map_err(|e| e.to_string())?
     };
-    *state.current_session_id.lock().map_err(|e| e.to_string())? = Some(session_id.clone());
+    *state.current_session_id.blocking_write() = Some(session_id.clone());
     let stop_signal = Arc::clone(&state.stop_signal);
     let recording = Arc::clone(&state.recording);
     let segments = Arc::clone(&state.segments);
@@ -859,7 +845,7 @@ pub(crate) fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, App
         llm_models_cache: Arc::clone(&state.llm_models_cache),
         selected_device: Arc::clone(&state.selected_device),
     });
-    let db_writer = state.db_writer.lock().map_err(|e| e.to_string())?.as_ref().cloned();
+    let db_writer = state.db_writer.blocking_lock().as_ref().cloned();
     info!(
         "[start_recording] created session_id={}, db_writer_ready={}",
         session_id,
@@ -872,7 +858,7 @@ pub(crate) fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, App
         base_wall: now,
         audio_offset,
     };
-    let selected_device = state.selected_device.lock().map_err(|e| e.to_string())?.clone();
+    let selected_device = state.selected_device.blocking_write().clone();
 
     let db_writer_for_run = db_writer.clone();
     let session_id_for_run = session_id.clone();
@@ -900,10 +886,12 @@ pub(crate) fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, App
 
         match join.await {
             Ok(Ok((rec, v))) => {
-                if let Ok(mut r) = recognizer_arc.lock() {
+                {
+                    let mut r = recognizer_arc.blocking_write();
                     *r = Some(rec);
                 }
-                if let Ok(mut va) = vad_arc.lock() {
+                {
+                    let mut va = vad_arc.blocking_write();
                     *va = Some(v);
                 }
             }
@@ -921,7 +909,8 @@ pub(crate) fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, App
                 session_id: session_id.clone(),
             });
         }
-        if let Ok(mut guard) = current_session_id.lock() {
+        {
+            let mut guard = current_session_id.blocking_write();
             *guard = None;
         }
         info!("[recording task] stopped");
@@ -982,7 +971,8 @@ fn run_recording(
                     samples
                 };
 
-                if let Ok(mut audio) = runtime.recorded_audio.lock() {
+                {
+                    let mut audio = runtime.recorded_audio.blocking_write();
                     audio.push_samples(&pcm);
                 }
 
@@ -1046,7 +1036,7 @@ fn run_recording(
         vad.pop();
     }
 
-    let seg_count = runtime.segments.lock().map(|s| s.len()).unwrap_or(0);
+    let seg_count = runtime.segments.blocking_read().len();
     info!("[recording] flushed, total segments: {seg_count}");
 
     Ok((recognizer, vad))
@@ -1063,10 +1053,10 @@ pub(crate) fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), Str
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot clear while recording".to_string());
     }
-    state.segments.lock().map_err(|e| e.to_string())?.clear();
-    state.recorded_audio.lock().map_err(|e| e.to_string())?.clear();
-    *state.start_wall_clock.lock().map_err(|e| e.to_string())? = None;
-    *state.start_instant.lock().map_err(|e| e.to_string())? = None;
+    state.segments.blocking_write().clear();
+    state.recorded_audio.blocking_write().clear();
+    *state.start_wall_clock.blocking_write() = None;
+    *state.start_instant.blocking_write() = None;
     info!("[clear_results] cleared all segments and audio");
     Ok(())
 }
@@ -1074,15 +1064,14 @@ pub(crate) fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), Str
 pub(crate) fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
     info!("[get_recording_state]");
     let recording = state.recording.load(Ordering::Relaxed);
-    let segments = state.segments.lock().map_err(|e| e.to_string())?.clone();
+    let segments = state.segments.blocking_write().clone();
     let elapsed_secs = state
         .start_instant
-        .lock()
-        .map_err(|e| e.to_string())?
+        .blocking_read()
         .map(|i| i.elapsed().as_secs_f32())
         .unwrap_or(0.0);
     let (audio_window_start_sec, audio_window_end_sec) = {
-        let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
+        let audio = state.recorded_audio.blocking_write();
         (
             audio.global_start_sample() as f32 / SAMPLE_RATE as f32,
             audio.global_end_sample() as f32 / SAMPLE_RATE as f32,
@@ -1103,7 +1092,7 @@ pub(crate) fn list_sessions(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<commands::history::DbSessionDto>, String> {
     info!("[list_sessions] page={}, page_size={}", page, page_size);
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::history::list_sessions(db, page, page_size)
 }
@@ -1118,7 +1107,7 @@ pub(crate) fn list_session_segments(
         "[list_session_segments] session_id={}, page={}, page_size={}",
         session_id, page, page_size
     );
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::history::list_session_segments(db, &session_id, page, page_size)
 }
@@ -1133,7 +1122,7 @@ pub(crate) fn tail_session_segments(
         "[tail_session_segments] session_id={}, after_id={}, limit={}",
         session_id, after_id, limit
     );
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::history::tail_session_segments(db, &session_id, after_id, limit)
 }
@@ -1142,7 +1131,7 @@ pub(crate) fn list_correction_rules(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<commands::correction::CorrectionRuleDto>, String> {
     info!("[list_correction_rules]");
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::list_correction_rules(db)
 }
@@ -1158,7 +1147,7 @@ pub(crate) fn create_correction_rule(
         "[create_correction_rule] source={}, target={}, priority={}, enabled={}",
         source, target, priority, enabled
     );
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::create_correction_rule(db, &state.correction_engine, source, target, priority, enabled)
 }
@@ -1175,21 +1164,21 @@ pub(crate) fn update_correction_rule(
         "[update_correction_rule] id={}, source={}, target={}, priority={}, enabled={}",
         id, source, target, priority, enabled
     );
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::update_correction_rule(db, &state.correction_engine, id, source, target, priority, enabled)
 }
 
 pub(crate) fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[delete_correction_rule] id={}", id);
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::delete_correction_rule(db, &state.correction_engine, id)
 }
 
 pub(crate) fn reload_correction_rules(state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[reload_correction_rules]");
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.blocking_lock();
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::reload_correction_rules(db, &state.correction_engine)
 }
@@ -1201,7 +1190,7 @@ pub(crate) fn save_segment_as_wav(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     info!("[save_segment_as_wav] path={}, start={}, end={}", path, start, end);
-    let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
+    let audio = state.recorded_audio.blocking_write();
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
     }
@@ -1220,7 +1209,7 @@ pub(crate) fn save_segment_as_wav(
 
 pub(crate) fn save_all_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[save_all_audio] path={}", path);
-    let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
+    let audio = state.recorded_audio.blocking_write();
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
     }
@@ -1230,7 +1219,7 @@ pub(crate) fn save_all_audio(path: String, state: tauri::State<'_, AppState>) ->
 
 pub(crate) fn get_recorded_audio_path(state: tauri::State<'_, AppState>) -> Result<String, String> {
     info!("[get_recorded_audio_path]");
-    let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
+    let audio = state.recorded_audio.blocking_write();
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
     }
@@ -1254,7 +1243,7 @@ fn format_srt_time(seconds: f32) -> String {
 
 pub(crate) fn export_srt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[export_srt] path={}", path);
-    let segments = state.segments.lock().map_err(|e| e.to_string())?;
+    let segments = state.segments.blocking_write();
     if segments.is_empty() {
         return Err("No results to export".to_string());
     }
@@ -1328,7 +1317,7 @@ pub(crate) struct InitStatus {
 pub(crate) fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
     info!("[get_init_status]");
     let status = state.init_status.load(Ordering::Relaxed);
-    let error = state.init_error.lock().map(|e| e.clone()).unwrap_or_default();
+    let error = state.init_error.blocking_read().clone();
     let num_threads = state.num_threads.load(Ordering::Relaxed);
     InitStatus {
         status,
@@ -1343,8 +1332,8 @@ pub(crate) fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
 
 pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, String> {
     info!("[get_settings]");
-    let vad = state.settings.lock().map_err(|e| e.to_string())?.clone();
-    let llm = state.llm_settings.lock().map_err(|e| e.to_string())?.clone();
+    let vad = state.settings.blocking_write().clone();
+    let llm = state.llm_settings.blocking_write().clone();
     Ok(CombinedSettings {
         threshold: vad.threshold,
         min_silence_duration: vad.min_silence_duration,
@@ -1409,20 +1398,20 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
     validate_llm_settings(&new_llm_settings)?;
 
     {
-        let current_vad = state.settings.lock().map_err(|e| e.to_string())?;
-        let current_llm = state.llm_settings.lock().map_err(|e| e.to_string())?;
+        let current_vad = state.settings.blocking_write();
+        let current_llm = state.llm_settings.blocking_write();
         if *current_vad == new_vad_settings && *current_llm == new_llm_settings {
             return Ok(());
         }
     }
 
     state.init_status.store(0, Ordering::Relaxed);
-    *state.settings.lock().map_err(|e| e.to_string())? = new_vad_settings.clone();
-    *state.llm_settings.lock().map_err(|e| e.to_string())? = new_llm_settings.clone();
-    *state.llm_models_cache.lock().map_err(|e| e.to_string())? = None;
+    *state.settings.blocking_write() = new_vad_settings.clone();
+    *state.llm_settings.blocking_write() = new_llm_settings.clone();
+    *state.llm_models_cache.blocking_write() = None;
 
     {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let db = state.db.blocking_lock();
         let db = db.as_ref().ok_or("Database not initialized")?;
         db.upsert_setting("llm.provider_url", &new_llm_settings.provider_url)
             .map_err(|e| e.to_string())?;
@@ -1463,39 +1452,29 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
         match join.await {
             Ok(Ok((rec, vad, threads))) => {
                 info!("[apply_settings] models rebuilt, num_threads={threads}");
-                let r_ok = recognizer_arc
-                    .lock()
-                    .map(|mut r| {
-                        *r = Some(rec);
-                    })
-                    .is_ok();
-                let v_ok = vad_arc
-                    .lock()
-                    .map(|mut v| {
-                        *v = Some(vad);
-                    })
-                    .is_ok();
-                if r_ok && v_ok {
-                    init_num_threads.store(threads, Ordering::Relaxed);
-                    init_status.store(1, Ordering::Relaxed);
-                } else {
-                    error!("[apply_settings] mutex poisoned, marking as error");
-                    if let Ok(mut err) = init_error.lock() {
-                        *err = "Internal error: mutex poisoned".to_string();
-                    }
-                    init_status.store(2, Ordering::Relaxed);
+                {
+                    let mut r = recognizer_arc.blocking_write();
+                    *r = Some(rec);
                 }
+                {
+                    let mut v = vad_arc.blocking_write();
+                    *v = Some(vad);
+                }
+                init_num_threads.store(threads, Ordering::Relaxed);
+                init_status.store(1, Ordering::Relaxed);
             }
             Ok(Err(err)) => {
                 error!("[apply_settings] rebuild failed: {err}");
-                if let Ok(mut init_err) = init_error.lock() {
+                {
+                    let mut init_err = init_error.blocking_write();
                     *init_err = err;
                 }
                 init_status.store(2, Ordering::Relaxed);
             }
             Err(err) => {
                 error!("[apply_settings] join failed: {err}");
-                if let Ok(mut init_err) = init_error.lock() {
+                {
+                    let mut init_err = init_error.blocking_write();
                     *init_err = "Internal error: settings task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -1508,10 +1487,10 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
 
 pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result<ModelListResponse, String> {
     info!("[list_llm_models]");
-    let settings = state.llm_settings.lock().map_err(|e| e.to_string())?.clone();
+    let settings = state.llm_settings.blocking_write().clone();
     validate_llm_settings(&settings)?;
 
-    if let Some(cache) = state.llm_models_cache.lock().map_err(|e| e.to_string())?.as_ref() {
+    if let Some(cache) = state.llm_models_cache.blocking_write().as_ref() {
         if model_cache_valid(cache) {
             return Ok(ModelListResponse {
                 models: cache.models.clone(),
@@ -1520,7 +1499,7 @@ pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result
     }
 
     let fetched = llm_list_models(&settings).await?;
-    *state.llm_models_cache.lock().map_err(|e| e.to_string())? = Some(CachedModels {
+    *state.llm_models_cache.blocking_write() = Some(CachedModels {
         fetched_at: Instant::now(),
         models: fetched.clone(),
     });
@@ -1674,33 +1653,32 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
 
 fn build_app_state() -> AppState {
     AppState {
-        recognizer: Arc::new(Mutex::new(None)),
-        vad: Arc::new(Mutex::new(None)),
+        recognizer: Arc::new(RwLock::new(None)),
+        vad: Arc::new(RwLock::new(None)),
         recording: Arc::new(AtomicBool::new(false)),
         stop_signal: Arc::new(AtomicBool::new(false)),
-        segments: Arc::new(Mutex::new(Vec::new())),
-        recorded_audio: Arc::new(Mutex::new(RollingAudioBuffer::new())),
+        segments: Arc::new(RwLock::new(Vec::new())),
+        recorded_audio: Arc::new(RwLock::new(RollingAudioBuffer::new())),
         db: Arc::new(Mutex::new(None)),
         db_writer: Arc::new(Mutex::new(None)),
-        current_session_id: Arc::new(Mutex::new(None)),
+        current_session_id: Arc::new(RwLock::new(None)),
         correction_engine: Arc::new(CorrectionEngine::new()),
-        start_wall_clock: Arc::new(Mutex::new(None)),
-        start_instant: Arc::new(Mutex::new(None)),
+        start_wall_clock: Arc::new(RwLock::new(None)),
+        start_instant: Arc::new(RwLock::new(None)),
         init_status: Arc::new(AtomicU8::new(0)),
-        init_error: Arc::new(Mutex::new(String::new())),
+        init_error: Arc::new(RwLock::new(String::new())),
         num_threads: Arc::new(AtomicU32::new(0)),
         next_realtime_segment_id: Arc::new(AtomicU64::new(1)),
         next_revision: Arc::new(AtomicU64::new(1)),
-        settings: Arc::new(Mutex::new(VadSettings::default())),
-        llm_settings: Arc::new(Mutex::new(LlmSettings::default())),
-        llm_models_cache: Arc::new(Mutex::new(None)),
-        selected_device: Arc::new(Mutex::new(None)),
+        settings: Arc::new(RwLock::new(VadSettings::default())),
+        llm_settings: Arc::new(RwLock::new(LlmSettings::default())),
+        llm_models_cache: Arc::new(RwLock::new(None)),
+        selected_device: Arc::new(RwLock::new(None)),
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let workspace = custom_utils::args::workspace(&None, "streaming-speech")?;
     let state = build_app_state();
 
     let init_recognizer = Arc::clone(&state.recognizer);
@@ -1712,47 +1690,38 @@ pub fn run() {
 
     tauri::async_runtime::spawn(async move {
         info!("[init] starting model initialization...");
-        let settings = init_settings.lock().map(|s| s.clone()).unwrap_or_default();
+        let settings = init_settings.blocking_read().clone();
         let join = tauri::async_runtime::spawn_blocking(move || build_models(&settings));
         match join.await {
             Ok(Ok((rec, vad, threads))) => {
                 info!("[init] models ready, num_threads={threads}");
-                let r_ok = init_recognizer
-                    .lock()
-                    .map(|mut r| {
-                        *r = Some(rec);
-                    })
-                    .is_ok();
-                let v_ok = init_vad
-                    .lock()
-                    .map(|mut v| {
-                        *v = Some(vad);
-                    })
-                    .is_ok();
-                if r_ok && v_ok {
-                    init_num_threads.store(threads, Ordering::Relaxed);
-                    if let Ok(mut s) = init_settings.lock() {
-                        s.num_threads = threads as i32;
-                    }
-                    init_status.store(1, Ordering::Relaxed);
-                } else {
-                    error!("[init] mutex poisoned, marking as error");
-                    if let Ok(mut err) = init_error.lock() {
-                        *err = "Internal error: mutex poisoned".to_string();
-                    }
-                    init_status.store(2, Ordering::Relaxed);
+                {
+                    let mut r = init_recognizer.blocking_write();
+                    *r = Some(rec);
                 }
+                {
+                    let mut v = init_vad.blocking_write();
+                    *v = Some(vad);
+                }
+                init_num_threads.store(threads, Ordering::Relaxed);
+                {
+                    let mut s = init_settings.blocking_write();
+                    s.num_threads = threads as i32;
+                }
+                init_status.store(1, Ordering::Relaxed);
             }
             Ok(Err(err)) => {
                 error!("[init] model initialization failed: {err}");
-                if let Ok(mut init_err) = init_error.lock() {
+                {
+                    let mut init_err = init_error.blocking_write();
                     *init_err = err;
                 }
                 init_status.store(2, Ordering::Relaxed);
             }
             Err(err) => {
                 error!("[init] join failed: {err}");
-                if let Ok(mut init_err) = init_error.lock() {
+                {
+                    let mut init_err = init_error.blocking_write();
                     *init_err = "Internal error: init task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -1777,36 +1746,36 @@ pub fn run() {
                             Ok(db) => {
                                 let _ = commands::correction::reload_correction_rules(&db, &correction_engine);
                                 if let Ok(Some(v)) = db.get_setting("llm.provider_url") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.provider_url = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.api_key") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.api_key = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.selected_model") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.selected_model = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.optimize_prompt_template") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.optimize_prompt_template = v;
                                     }
                                 } else if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.optimize_prompt_template = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.translate_prompt_template") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.translate_prompt_template = v;
                                     }
                                 }
                                 if let Ok(Some(v)) = db.get_setting("llm.auto_copy_mode") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.auto_copy_mode = match v.as_str() {
                                             "off" => AutoCopyMode::Off,
                                             "optimized_zh" => AutoCopyMode::OptimizedZh,
@@ -1814,7 +1783,7 @@ pub fn run() {
                                         };
                                     }
                                 } else if let Ok(Some(v)) = db.get_setting("llm.auto_copy") {
-                                    if let Ok(mut s) = llm_settings_state.lock() {
+                                    { let mut s = llm_settings_state.blocking_write();
                                         s.auto_copy_mode = if v == "false" || v == "0" {
                                             AutoCopyMode::Off
                                         } else {
@@ -1969,10 +1938,12 @@ pub fn run() {
                                         error!("[db-worker] join failed: {err}");
                                     }
                                 });
-                                if let Ok(mut guard) = db_state.lock() {
+                                {
+                                    let mut guard = db_state.blocking_lock();
                                     *guard = Some(db);
                                 }
-                                if let Ok(mut guard) = db_writer_state.lock() {
+                                {
+                                    let mut guard = db_writer_state.blocking_lock();
                                     *guard = Some(tx);
                                 }
                             }

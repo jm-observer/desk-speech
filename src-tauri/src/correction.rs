@@ -1,8 +1,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use tokio::sync::RwLock;
 
 use crate::db::repository::CorrectionRule;
 
@@ -22,10 +23,7 @@ impl CorrectionEngine {
     }
 
     pub fn apply(&self, text: &str) -> String {
-        let snapshot = self.snapshot.read().ok();
-        let Some(snapshot) = snapshot else {
-            return text.to_string();
-        };
+        let snapshot = self.snapshot.blocking_read();
 
         let mut output = text.to_string();
         for rule in snapshot.rules.iter().filter(|rule| rule.enabled) {
@@ -42,7 +40,7 @@ impl CorrectionEngine {
         rules.sort_by_key(|rule| (rule.priority, rule.id));
         let checksum = checksum_rules(&rules);
         let snapshot = RuleSnapshot { rules };
-        let mut guard = self.snapshot.write().map_err(|e| anyhow!(e.to_string()))?;
+        let mut guard = self.snapshot.blocking_write();
         *guard = snapshot;
 
         Ok(checksum)
