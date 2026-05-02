@@ -14,6 +14,7 @@ export const useAppStore = () => {
 
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
+    segment_id: typeof row.segment_id === 'number' ? row.segment_id : null,
     revision: typeof row.revision === 'number' ? row.revision : undefined,
     start: typeof row.start_sec === 'number' ? row.start_sec : 0,
     end: typeof row.end_sec === 'number' ? row.end_sec : 0,
@@ -43,8 +44,16 @@ export const useAppStore = () => {
     try {
       const rows = await TauriAPI.listSegments(0, 200);
       const mapped = rows.map(mapDbSegment).filter((seg) => seg.text_raw.trim().length > 0);
+      console.debug('[segments][db-load]', {
+        rowCount: rows.length,
+        mappedCount: mapped.length,
+        firstSegmentId: mapped[0]?.segment_id ?? null,
+        lastSegmentId: mapped[mapped.length - 1]?.segment_id ?? null,
+        firstRevision: mapped[0]?.revision ?? null,
+        lastRevision: mapped[mapped.length - 1]?.revision ?? null,
+      });
       if (mapped.length > 0) {
-        setSegments(mapped);
+        setSegments((prev) => (prev.length === 0 ? mapped : prev));
         setStatus((prev) => (prev === 'initializing' || prev === 'idle' ? 'finished' : prev));
         return true;
       }

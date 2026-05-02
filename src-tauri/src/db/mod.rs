@@ -90,6 +90,16 @@ impl SpeechDatabase {
         repository::list_segments(&conn, page, page_size)
     }
 
+    pub fn get_next_segment_id(&self) -> Result<u64> {
+        let conn = mutex_lock(&self.conn);
+        repository::get_next_segment_id(&conn)
+    }
+
+    pub fn get_next_revision(&self) -> Result<u64> {
+        let conn = mutex_lock(&self.conn);
+        repository::get_next_revision(&conn)
+    }
+
     pub fn tail_segments(&self, after_id: i64, limit: u32) -> Result<Vec<SegmentRow>> {
         let conn = mutex_lock(&self.conn);
         repository::tail_segments(&conn, after_id, limit)
@@ -216,6 +226,74 @@ mod tests {
         db.ensure_global_scope().unwrap();
         let err = db.list_segments(0, 0).unwrap_err();
         assert!(err.to_string().contains("page_size"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn next_segment_id_keeps_growing() {
+        let path = temp_db_path("next-segment-id");
+        let db = SpeechDatabase::init(&path).unwrap();
+        db.ensure_global_scope().unwrap();
+
+        assert_eq!(db.get_next_segment_id().unwrap(), 1);
+
+        db.upsert_segment(NewSegment {
+            segment_id: 1,
+            revision: 1,
+            start_sec: 0.0,
+            end_sec: 0.8,
+            wall_start: "2026-01-01 00:00:00".to_string(),
+            wall_end: "2026-01-01 00:00:01".to_string(),
+            text_raw: "first".to_string(),
+        })
+        .unwrap();
+
+        db.upsert_segment(NewSegment {
+            segment_id: 3,
+            revision: 2,
+            start_sec: 1.0,
+            end_sec: 1.8,
+            wall_start: "2026-01-01 00:00:02".to_string(),
+            wall_end: "2026-01-01 00:00:03".to_string(),
+            text_raw: "third".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(db.get_next_segment_id().unwrap(), 4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn next_revision_keeps_growing() {
+        let path = temp_db_path("next-revision");
+        let db = SpeechDatabase::init(&path).unwrap();
+        db.ensure_global_scope().unwrap();
+
+        assert_eq!(db.get_next_revision().unwrap(), 1);
+
+        db.upsert_segment(NewSegment {
+            segment_id: 10,
+            revision: 1,
+            start_sec: 0.0,
+            end_sec: 0.8,
+            wall_start: "2026-01-01 00:00:00".to_string(),
+            wall_end: "2026-01-01 00:00:01".to_string(),
+            text_raw: "first".to_string(),
+        })
+        .unwrap();
+
+        db.upsert_segment(NewSegment {
+            segment_id: 11,
+            revision: 4,
+            start_sec: 1.0,
+            end_sec: 1.8,
+            wall_start: "2026-01-01 00:00:02".to_string(),
+            wall_end: "2026-01-01 00:00:03".to_string(),
+            text_raw: "fourth".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(db.get_next_revision().unwrap(), 5);
         let _ = std::fs::remove_file(path);
     }
 

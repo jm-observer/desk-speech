@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 export interface Segment {
   id: number | null;
+  segment_id?: number | null;
   revision?: number;
   start: number;
   end: number;

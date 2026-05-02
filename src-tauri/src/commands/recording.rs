@@ -44,6 +44,11 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
 
     state.stop_signal.store(false, Ordering::Relaxed);
 
+    // Reset session state
+    {
+        let mut segs = write_lock(&state.segments);
+        segs.clear();
+    }
     let audio_offset = read_lock(&state.recorded_audio).global_end_sample();
 
     let now = Local::now();
@@ -410,7 +415,10 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 )
         });
 
-        if !text_raw.is_empty() && !has_japanese && !is_meaningless {
+        // Filter out common filler words or hallucinations like "Yeah."
+        let is_filler = matches!(text_raw.to_lowercase().as_str(), "yeah." | "yeah" | "yeah!");
+
+        if !text_raw.is_empty() && !has_japanese && !is_meaningless && !is_filler {
             let text_corrected = ctx.correction_engine.apply(&text_raw);
             let revision = ctx.next_revision.fetch_add(1, Ordering::Relaxed) as i64;
             let wall_start = *ctx.base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);

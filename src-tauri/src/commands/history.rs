@@ -5,6 +5,7 @@ use crate::db::{repository::SegmentRow, SpeechDatabase};
 #[derive(Serialize)]
 pub struct DbSegmentDto {
     pub id: i64,
+    pub segment_id: u64,
     pub revision: i64,
     pub start_sec: f32,
     pub end_sec: f32,
@@ -31,6 +32,7 @@ pub fn tail_segments(db: &SpeechDatabase, after_id: i64, limit: u32) -> Result<V
 fn to_segment_dto(row: SegmentRow) -> DbSegmentDto {
     DbSegmentDto {
         id: row.id,
+        segment_id: row.segment_id,
         revision: row.revision,
         start_sec: row.start_sec,
         end_sec: row.end_sec,

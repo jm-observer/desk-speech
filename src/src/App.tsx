@@ -11,6 +11,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { CorrectionModal } from './components/CorrectionModal';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalSize } from '@tauri-apps/api/dpi';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { Button } from './components/ui/Button';
 
 const SIMPLE_WINDOW_SIZE = { width: 560, height: 280 };
@@ -41,29 +42,101 @@ async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
 function App() {
   const store = useAppStore();
   const pollTimer = useRef<number | null>(null);
+  const previousTranslateStatusRef = useRef<Map<number, Segment['translate_status']>>(new Map());
+  const notificationBaselineReadyRef = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
+
+  const logNotificationDebug = useCallback((message: string, details?: Record<string, unknown>) => {
+    if (details) {
+      console.info('[notification-debug]', message, details);
+      return;
+    }
+    console.info('[notification-debug]', message);
+  }, []);
+
+  const logWindowDebug = useCallback((message: string, details?: Record<string, unknown>) => {
+    if (details) {
+      console.info('[window-debug]', message, details);
+      return;
+    }
+    console.info('[window-debug]', message);
+  }, []);
+
+  const showTranslationNotification = useCallback(async (segment: Segment) => {
+    logNotificationDebug('start notification flow', {
+      revision: segment.revision,
+      segmentId: segment.segment_id,
+      translateStatus: segment.translate_status,
+      hasEnglish: Boolean(segment.text_english?.trim()),
+    });
+
+    let permissionGranted = await isPermissionGranted();
+    logNotificationDebug('checked notification permission', { permissionGranted });
+
+    if (!permissionGranted) {
+      const permission = await requestPermission();
+      permissionGranted = permission === 'granted';
+      logNotificationDebug('requested notification permission', {
+        permission,
+        permissionGranted,
+      });
+    }
+
+    if (!permissionGranted) {
+      logNotificationDebug('notification aborted: permission not granted', {
+        revision: segment.revision,
+      });
+      return;
+    }
+
+    const body = segment.text_english?.trim() || '有新的翻译结果可查看';
+    logNotificationDebug('sending native notification', {
+      revision: segment.revision,
+      bodyPreview: body.slice(0, 60),
+      bodyLength: body.length,
+    });
+    sendNotification({
+      title: '翻译完成',
+      body: body.slice(0, 120),
+    });
+    logNotificationDebug('native notification sent', {
+      revision: segment.revision,
+    });
+  }, [logNotificationDebug]);
+
+  useEffect(() => {
+    logNotificationDebug('checking notification permission on mount');
+    isPermissionGranted().catch((err) => {
+      console.error('Check notification permission failed', err);
+    });
+  }, [logNotificationDebug]);
+
+  const getSegmentKey = useCallback((seg: Segment) => {
+    if (seg.segment_id !== null && seg.segment_id !== undefined) {
+      return `segment-${seg.segment_id}`;
+    }
+    if (seg.id !== null) {
+      return `db-${seg.id}`;
+    }
+    return `start-${seg.start.toFixed(3)}`;
+  }, []);
 
   const mergeSegmentsByRevision = useCallback((incoming: Segment[]) => {
     store.setSegments((prev) => {
       if (prev.length === 0) {
         return incoming;
       }
-      // Use segment ID as the primary key, fallback to start time.
-      // This ensures that when a segment is updated (revision changes), we update the same record
-      // instead of adding a new one.
       const merged = new Map<string, Segment>();
-      
+
       prev.forEach((seg) => {
-        const key = seg.id !== null ? `id-${seg.id}` : `start-${seg.start.toFixed(3)}`;
-        merged.set(key, seg);
+        merged.set(getSegmentKey(seg), seg);
       });
-      
+
       incoming.forEach((seg) => {
-        const key = seg.id !== null ? `id-${seg.id}` : `start-${seg.start.toFixed(3)}`;
+        const key = getSegmentKey(seg);
         const current = merged.get(key);
-        // Update if not exists or if incoming has a newer revision
         if (!current || (seg.revision ?? 0) >= (current.revision ?? 0)) {
           merged.set(key, seg);
         }
@@ -71,7 +144,7 @@ function App() {
       
       return Array.from(merged.values()).sort((a, b) => a.start - b.start);
     });
-  }, [store]);
+  }, [getSegmentKey, store]);
 
   // Recording Logic
   const stopPolling = useCallback(() => {
@@ -89,6 +162,7 @@ function App() {
 
         const mappedSegments: Segment[] = state.segments.map((s: RawSegment) => ({
           id: s.segment_id,
+          segment_id: s.segment_id,
           revision: s.revision,
           start: s.start,
           end: s.end,
@@ -100,6 +174,14 @@ function App() {
           optimize_status: s.optimize_status || 'pending',
           translate_status: s.translate_status || 'blocked',
         }));
+        console.debug('[segments][memory-poll]', {
+          recording: state.recording,
+          segmentCount: mappedSegments.length,
+          firstSegmentId: mappedSegments[0]?.segment_id ?? null,
+          lastSegmentId: mappedSegments[mappedSegments.length - 1]?.segment_id ?? null,
+          firstRevision: mappedSegments[0]?.revision ?? null,
+          lastRevision: mappedSegments[mappedSegments.length - 1]?.revision ?? null,
+        });
         mergeSegmentsByRevision(mappedSegments);
 
         const hasPending = mappedSegments.some(
@@ -131,6 +213,95 @@ function App() {
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
+  useEffect(() => {
+    const currentWindow = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+
+    const bindMinimizeToTray = async () => {
+      logWindowDebug('binding minimize listener');
+      unlisten = await currentWindow.onResized(async () => {
+        try {
+          const minimized = await currentWindow.isMinimized();
+          logWindowDebug('window resized event received', { minimized });
+          if (minimized) {
+            logWindowDebug('window minimized, hiding to tray');
+            await currentWindow.hide();
+            logWindowDebug('window hidden after minimize');
+          }
+        } catch (err) {
+          console.error('Hide minimized window failed', err);
+        }
+      });
+    };
+
+    bindMinimizeToTray().catch((err) => {
+      console.error('Bind minimize listener failed', err);
+    });
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const nextStatuses = new Map<number, Segment['translate_status']>();
+
+    store.segments.forEach((segment) => {
+      if (segment.revision !== undefined) {
+        nextStatuses.set(segment.revision, segment.translate_status);
+      }
+    });
+
+    if (!notificationBaselineReadyRef.current) {
+      previousTranslateStatusRef.current = nextStatuses;
+      notificationBaselineReadyRef.current = true;
+      logNotificationDebug('notification baseline initialized', {
+        trackedRevisionCount: nextStatuses.size,
+      });
+      return;
+    }
+
+    store.segments.forEach((segment) => {
+      const revision = segment.revision;
+      logNotificationDebug('inspect segment notification state', {
+        revision,
+        segmentId: segment.segment_id,
+        translateStatus: segment.translate_status,
+        hasEnglish: Boolean(segment.text_english?.trim()),
+      });
+
+      if (revision === undefined || segment.translate_status !== 'success') {
+        logNotificationDebug('skip notification: not ready', {
+          revision,
+          translateStatus: segment.translate_status,
+        });
+        return;
+      }
+
+      const previousStatus = previousTranslateStatusRef.current.get(revision);
+      if (previousStatus === 'success') {
+        logNotificationDebug('skip notification: revision already successful before', {
+          revision,
+          previousStatus,
+        });
+        return;
+      }
+
+      logNotificationDebug('trigger notification for revision', {
+        revision,
+        previousStatus: previousStatus ?? 'missing',
+        currentStatus: segment.translate_status,
+      });
+      showTranslationNotification(segment).catch((err) => {
+        console.error('Show translation notification failed', err);
+      });
+    });
+
+    previousTranslateStatusRef.current = nextStatuses;
+  }, [logNotificationDebug, showTranslationNotification, store.segments]);
+
   // Sync initial recording state on mount
   useEffect(() => {
     const sync = async () => {
@@ -151,7 +322,6 @@ function App() {
       setIsBusy(true);
       await TauriAPI.startRecording();
       store.setStatus('recording');
-      store.setSegments([]);
       startPolling();
     } catch (err) {
       console.error("Start failed", err);
@@ -286,9 +456,9 @@ function App() {
                 </div>
               )}
 
-              {displaySegments.map((seg, idx) => (
+              {displaySegments.map((seg) => (
                 <SegmentCard
-                  key={idx}
+                  key={getSegmentKey(seg)}
                   segment={seg}
                   showEnglish={store.showEnglish}
                   onCopyChinese={(text) => handleSegmentCopy(text, 'optimized')}

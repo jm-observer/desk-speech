@@ -27,6 +27,8 @@ use crate::lock_utils::{mutex_lock, read_lock, write_lock};
 use crate::settings::VadSettings;
 use chrono::Local;
 use log::{debug, error, info, warn};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, WindowEvent};
 
 const MERGE_MAX_DURATION_SEC: f32 = 30.0;
 const MERGE_MAX_GAP_SEC: f32 = 5.6;
@@ -331,6 +333,8 @@ fn build_app_state(
     db: db::SpeechDatabase,
     db_writer: SyncSender<db_worker::DbEvent>,
     llm_settings: LlmSettings,
+    next_segment_id: u64,
+    next_revision: u64,
 ) -> AppState {
     AppState {
         recognizer: Arc::new(RwLock::new(None)),
@@ -347,8 +351,8 @@ fn build_app_state(
         init_status: Arc::new(AtomicU8::new(0)),
         init_error: Arc::new(RwLock::new(String::new())),
         num_threads: Arc::new(AtomicU32::new(0)),
-        next_realtime_segment_id: Arc::new(AtomicU64::new(1)),
-        next_revision: Arc::new(AtomicU64::new(1)),
+        next_realtime_segment_id: Arc::new(AtomicU64::new(next_segment_id)),
+        next_revision: Arc::new(AtomicU64::new(next_revision)),
         settings: Arc::new(RwLock::new(VadSettings::default())),
         llm_settings: Arc::new(RwLock::new(llm_settings)),
         llm_models_cache: Arc::new(RwLock::new(None)),
@@ -373,8 +377,22 @@ pub fn run() {
     };
 
     let llm_settings = settings::load_llm_settings_from_db(&db);
+    let next_segment_id = match db.get_next_segment_id() {
+        Ok(next_segment_id) => next_segment_id,
+        Err(err) => {
+            error!("[db] query next segment_id failed: {err}");
+            return;
+        }
+    };
+    let next_revision = match db.get_next_revision() {
+        Ok(next_revision) => next_revision,
+        Err(err) => {
+            error!("[db] query next revision failed: {err}");
+            return;
+        }
+    };
     let db_writer = db_worker::start_db_worker(db.clone());
-    let state = build_app_state(db, db_writer, llm_settings);
+    let state = build_app_state(db, db_writer, llm_settings, next_segment_id, next_revision);
     {
         let db_guard = mutex_lock(&state.db);
         if let Some(db) = db_guard.as_ref() {
@@ -434,11 +452,45 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .setup({
             let correction_engine = Arc::clone(&state.correction_engine);
             let db_state = Arc::clone(&state.db);
             move |app| {
-                let _ = app;
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    info!("[tray] creating tray icon");
+                    TrayIconBuilder::new()
+                        .icon(icon)
+                        .tooltip("StreamSpeech")
+                        .on_tray_icon_event(|tray, event| {
+                            if let TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } = event
+                            {
+                                info!("[tray] left click received, restoring window");
+                                let app = tray.app_handle();
+                                if let Some(window) = app.get_webview_window("main") {
+                                    if let Err(err) = window.show() {
+                                        error!("show window from tray failed: {}", err);
+                                        return;
+                                    }
+                                    info!("[tray] window shown from tray click");
+                                    let _ = window.unminimize();
+                                    let _ = window.set_focus();
+                                    info!("[tray] window focus requested after tray click");
+                                } else {
+                                    warn!("[tray] main window not found on tray click");
+                                }
+                            }
+                        })
+                        .build(app)?;
+                    info!("[tray] tray icon created");
+                } else {
+                    warn!("[setup] default window icon missing, tray icon not created");
+                }
+
                 let db_guard = mutex_lock(&db_state);
                 if let Some(db) = db_guard.as_ref() {
                     let _ = commands::correction::reload_correction_rules(db, &correction_engine);
@@ -446,6 +498,17 @@ pub fn run() {
                     error!("[setup] database not initialized");
                 }
                 Ok(())
+            }
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                info!("[window] close requested, hiding instead of closing");
+                api.prevent_close();
+                if let Err(err) = window.hide() {
+                    error!("hide window on close failed: {}", err);
+                } else {
+                    info!("[window] window hidden after close request");
+                }
             }
         })
         .manage(state)

@@ -53,6 +53,7 @@ pub struct CorrectionRule {
 #[derive(Clone, Debug)]
 pub struct SegmentRow {
     pub id: i64,
+    pub segment_id: u64,
     pub revision: i64,
     pub start_sec: f32,
     pub end_sec: f32,
@@ -211,7 +212,7 @@ pub fn upsert_translate_result(conn: &Connection, result: &TranslateResultUpsert
 pub fn get_last_segment(conn: &Connection) -> Result<Option<SegmentRow>> {
     let mut stmt = conn
         .prepare(
-            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
+            "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
                     r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
@@ -227,21 +228,44 @@ pub fn get_last_segment(conn: &Connection) -> Result<Option<SegmentRow>> {
     if let Some(row) = rows.next().context("failed to read last segment row")? {
         Ok(Some(SegmentRow {
             id: row.get(0)?,
-            revision: row.get(2)?,
-            start_sec: row.get(3)?,
-            end_sec: row.get(4)?,
-            wall_start: row.get(5)?,
-            wall_end: row.get(6)?,
-            text_raw: row.get(7)?,
-            optimize_status: row.get(8)?,
-            translate_status: row.get(9)?,
-            text_optimized: row.get(10)?,
-            text_english: row.get(11)?,
-            created_at: row.get(12)?,
+            segment_id: row.get(1)?,
+            revision: row.get(3)?,
+            start_sec: row.get(4)?,
+            end_sec: row.get(5)?,
+            wall_start: row.get(6)?,
+            wall_end: row.get(7)?,
+            text_raw: row.get(8)?,
+            optimize_status: row.get(9)?,
+            translate_status: row.get(10)?,
+            text_optimized: row.get(11)?,
+            text_english: row.get(12)?,
+            created_at: row.get(13)?,
         }))
     } else {
         Ok(None)
     }
+}
+
+pub fn get_next_segment_id(conn: &Connection) -> Result<u64> {
+    let next_segment_id: u64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(segment_id), 0) + 1 FROM asr_raw_records WHERE session_id = ?1",
+            params![GLOBAL_SCOPE_ID],
+            |row| row.get(0),
+        )
+        .context("failed to query next segment_id")?;
+    Ok(next_segment_id)
+}
+
+pub fn get_next_revision(conn: &Connection) -> Result<u64> {
+    let next_revision: u64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM asr_raw_records WHERE session_id = ?1",
+            params![GLOBAL_SCOPE_ID],
+            |row| row.get(0),
+        )
+        .context("failed to query next revision")?;
+    Ok(next_revision)
 }
 
 pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
@@ -252,7 +276,7 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
     let offset = page as u64 * page_size as u64;
     let mut stmt = conn
         .prepare(
-            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
+            "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
                     r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
@@ -266,17 +290,18 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
         .query_map(params![GLOBAL_SCOPE_ID, page_size, offset], |row| {
             Ok(SegmentRow {
                 id: row.get(0)?,
-                revision: row.get(2)?,
-                start_sec: row.get(3)?,
-                end_sec: row.get(4)?,
-                wall_start: row.get(5)?,
-                wall_end: row.get(6)?,
-                text_raw: row.get(7)?,
-                optimize_status: row.get(8)?,
-                translate_status: row.get(9)?,
-                text_optimized: row.get(10)?,
-                text_english: row.get(11)?,
-                created_at: row.get(12)?,
+                segment_id: row.get(1)?,
+                revision: row.get(3)?,
+                start_sec: row.get(4)?,
+                end_sec: row.get(5)?,
+                wall_start: row.get(6)?,
+                wall_end: row.get(7)?,
+                text_raw: row.get(8)?,
+                optimize_status: row.get(9)?,
+                translate_status: row.get(10)?,
+                text_optimized: row.get(11)?,
+                text_english: row.get(12)?,
+                created_at: row.get(13)?,
             })
         })
         .context("failed to query list_segments")?;
@@ -293,7 +318,7 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
     }
     let mut stmt = conn
         .prepare(
-            "SELECT r.id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
+            "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
                     r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
@@ -306,17 +331,18 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
         .query_map(params![GLOBAL_SCOPE_ID, after_id, limit], |row| {
             Ok(SegmentRow {
                 id: row.get(0)?,
-                revision: row.get(2)?,
-                start_sec: row.get(3)?,
-                end_sec: row.get(4)?,
-                wall_start: row.get(5)?,
-                wall_end: row.get(6)?,
-                text_raw: row.get(7)?,
-                optimize_status: row.get(8)?,
-                translate_status: row.get(9)?,
-                text_optimized: row.get(10)?,
-                text_english: row.get(11)?,
-                created_at: row.get(12)?,
+                segment_id: row.get(1)?,
+                revision: row.get(3)?,
+                start_sec: row.get(4)?,
+                end_sec: row.get(5)?,
+                wall_start: row.get(6)?,
+                wall_end: row.get(7)?,
+                text_raw: row.get(8)?,
+                optimize_status: row.get(9)?,
+                translate_status: row.get(10)?,
+                text_optimized: row.get(11)?,
+                text_english: row.get(12)?,
+                created_at: row.get(13)?,
             })
         })
         .context("failed to query tail_segments")?;
