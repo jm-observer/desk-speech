@@ -1,11 +1,12 @@
 use crate::commands::correction::CorrectionRuleDto;
+use crate::lock_utils::mutex_lock;
 use crate::AppState;
 use log::info;
 
 #[tauri::command]
 pub fn list_correction_rules(state: tauri::State<'_, AppState>) -> Result<Vec<CorrectionRuleDto>, String> {
     info!("[list_correction_rules]");
-    let db = state.db.blocking_lock();
+    let db = mutex_lock(&state.db);
     let db = db.as_ref().ok_or("Database not initialized")?;
     crate::commands::correction::list_correction_rules(db)
 }
@@ -22,7 +23,7 @@ pub fn create_correction_rule(
         "[create_correction_rule] source={}, target={}, priority={}, enabled={}",
         source, target, priority, enabled
     );
-    let db = state.db.blocking_lock();
+    let db = mutex_lock(&state.db);
     let db = db.as_ref().ok_or("Database not initialized")?;
     crate::commands::correction::create_correction_rule(db, &state.correction_engine, source, target, priority, enabled)
 }
@@ -40,7 +41,7 @@ pub fn update_correction_rule(
         "[update_correction_rule] id={}, source={}, target={}, priority={}, enabled={}",
         id, source, target, priority, enabled
     );
-    let db = state.db.blocking_lock();
+    let db = mutex_lock(&state.db);
     let db = db.as_ref().ok_or("Database not initialized")?;
     crate::commands::correction::update_correction_rule(
         db,
@@ -56,7 +57,7 @@ pub fn update_correction_rule(
 #[tauri::command]
 pub fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[delete_correction_rule] id={}", id);
-    let db = state.db.blocking_lock();
+    let db = mutex_lock(&state.db);
     let db = db.as_ref().ok_or("Database not initialized")?;
     crate::commands::correction::delete_correction_rule(db, &state.correction_engine, id)
 }
@@ -64,7 +65,7 @@ pub fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Res
 #[tauri::command]
 pub fn reload_correction_rules(state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[reload_correction_rules]");
-    let db = state.db.blocking_lock();
+    let db = mutex_lock(&state.db);
     let db = db.as_ref().ok_or("Database not initialized")?;
     crate::commands::correction::reload_correction_rules(db, &state.correction_engine)
 }

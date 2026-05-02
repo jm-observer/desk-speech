@@ -5,6 +5,7 @@ pub mod db;
 mod db_worker;
 mod llm_client;
 mod llm_settings;
+mod lock_utils;
 mod model_registry;
 mod settings;
 
@@ -16,12 +17,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
+use std::sync::{Mutex, RwLock};
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
 
 use crate::correction::CorrectionEngine;
 use crate::llm_client::CachedModels;
 use crate::llm_settings::LlmSettings;
+use crate::lock_utils::{mutex_lock, read_lock, write_lock};
 use crate::settings::VadSettings;
 use chrono::Local;
 use log::{debug, error, info, warn};
@@ -88,21 +90,19 @@ pub(crate) fn update_segment_llm_state(
     optimized: Option<String>,
     english: Option<String>,
 ) {
-    {
-        let mut segs = segments.blocking_write();
-        if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
-            if let Some(status) = optimize_status {
-                seg.optimize_status = status.to_string();
-            }
-            if let Some(status) = translate_status {
-                seg.translate_status = status.to_string();
-            }
-            if let Some(text) = optimized {
-                seg.text_optimized = Some(text);
-            }
-            if let Some(text) = english {
-                seg.text_english = Some(text);
-            }
+    let mut segs = write_lock(segments);
+    if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
+        if let Some(status) = optimize_status {
+            seg.optimize_status = status.to_string();
+        }
+        if let Some(status) = translate_status {
+            seg.translate_status = status.to_string();
+        }
+        if let Some(text) = optimized {
+            seg.text_optimized = Some(text);
+        }
+        if let Some(text) = english {
+            seg.text_english = Some(text);
         }
     }
 }
@@ -380,7 +380,7 @@ pub fn run() {
     let db_writer = db_worker::start_db_worker(db.clone());
     let state = build_app_state(db, db_writer, llm_settings);
     {
-        let db_guard = state.db.blocking_lock();
+        let db_guard = mutex_lock(&state.db);
         if let Some(db) = db_guard.as_ref() {
             let _ = commands::correction::reload_correction_rules(db, &state.correction_engine);
         }
@@ -395,22 +395,22 @@ pub fn run() {
 
     tauri::async_runtime::spawn(async move {
         info!("[init] starting model initialization...");
-        let settings = init_settings.read().await.clone();
+        let settings = read_lock(&init_settings).clone();
         let join = tauri::async_runtime::spawn_blocking(move || build_models(&settings));
         match join.await {
             Ok(Ok((rec, vad, threads))) => {
                 info!("[init] models ready, num_threads={threads}");
                 {
-                    let mut r = init_recognizer.write().await;
+                    let mut r = write_lock(&init_recognizer);
                     *r = Some(rec);
                 }
                 {
-                    let mut v = init_vad.write().await;
+                    let mut v = write_lock(&init_vad);
                     *v = Some(vad);
                 }
                 init_num_threads.store(threads, Ordering::Relaxed);
                 {
-                    let mut s = init_settings.write().await;
+                    let mut s = write_lock(&init_settings);
                     s.num_threads = threads as i32;
                 }
                 init_status.store(1, Ordering::Relaxed);
@@ -418,7 +418,7 @@ pub fn run() {
             Ok(Err(err)) => {
                 error!("[init] model initialization failed: {err}");
                 {
-                    let mut init_err = init_error.write().await;
+                    let mut init_err = write_lock(&init_error);
                     *init_err = err;
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -426,7 +426,7 @@ pub fn run() {
             Err(err) => {
                 error!("[init] join failed: {err}");
                 {
-                    let mut init_err = init_error.write().await;
+                    let mut init_err = write_lock(&init_error);
                     *init_err = "Internal error: init task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -443,7 +443,7 @@ pub fn run() {
             let db_state = Arc::clone(&state.db);
             move |app| {
                 let _ = app;
-                let db_guard = db_state.blocking_lock();
+                let db_guard = mutex_lock(&db_state);
                 if let Some(db) = db_guard.as_ref() {
                     let _ = commands::correction::reload_correction_rules(db, &correction_engine);
                 } else {

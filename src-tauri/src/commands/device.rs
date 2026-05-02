@@ -1,6 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use log::info;
 
+use crate::lock_utils::{read_lock, write_lock};
 use crate::AppState;
 
 #[derive(serde::Serialize, Clone)]
@@ -39,12 +40,13 @@ pub fn set_input_device(device_name: Option<String>, state: tauri::State<'_, App
     if state.recording.load(std::sync::atomic::Ordering::SeqCst) {
         return Err("Cannot change device while recording".to_string());
     }
-    *state.selected_device.blocking_write() = device_name;
+    *write_lock(&state.selected_device) = device_name;
     Ok(())
 }
 
 #[tauri::command]
 pub fn get_selected_device(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
     info!("[get_selected_device]");
-    Ok(state.selected_device.blocking_read().clone())
+    let device_name = read_lock(&state.selected_device).clone();
+    Ok(device_name)
 }

@@ -1,11 +1,19 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::RwLock;
 
+#[cfg(test)]
+#[path = "lock_utils.rs"]
+mod lock_utils;
+
+#[cfg(test)]
+use self::lock_utils::{read_lock, write_lock};
 use crate::db::repository::CorrectionRule;
+#[cfg(not(test))]
+use crate::lock_utils::{read_lock, write_lock};
 
 #[derive(Clone, Debug, Default)]
 pub struct RuleSnapshot {
@@ -23,7 +31,7 @@ impl CorrectionEngine {
     }
 
     pub fn apply(&self, text: &str) -> String {
-        let snapshot = self.snapshot.blocking_read();
+        let snapshot = read_lock(&self.snapshot);
 
         let mut output = text.to_string();
         for rule in snapshot.rules.iter().filter(|rule| rule.enabled) {
@@ -40,7 +48,7 @@ impl CorrectionEngine {
         rules.sort_by_key(|rule| (rule.priority, rule.id));
         let checksum = checksum_rules(&rules);
         let snapshot = RuleSnapshot { rules };
-        let mut guard = self.snapshot.blocking_write();
+        let mut guard = write_lock(&self.snapshot);
         *guard = snapshot;
 
         Ok(checksum)

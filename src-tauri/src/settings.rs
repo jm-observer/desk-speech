@@ -9,6 +9,7 @@ use crate::build_models;
 use crate::db;
 use crate::llm_client::{list_models as llm_list_models, model_cache_valid, CachedModels};
 use crate::llm_settings::{validate_llm_settings, AutoCopyMode, LlmSettings};
+use crate::lock_utils::{mutex_lock, read_lock, write_lock};
 use crate::AppState;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -54,8 +55,10 @@ pub(crate) struct ModelListResponse {
 
 pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, String> {
     info!("[get_settings]");
-    let vad = state.settings.blocking_write().clone();
-    let llm = state.llm_settings.blocking_write().clone();
+    let settings = Arc::clone(&state.settings);
+    let llm_settings = Arc::clone(&state.llm_settings);
+    let vad = read_lock(&settings).clone();
+    let llm = read_lock(&llm_settings).clone();
     Ok(CombinedSettings {
         threshold: vad.threshold,
         min_silence_duration: vad.min_silence_duration,
@@ -92,6 +95,10 @@ fn validate_settings(s: &VadSettings) -> Result<(), String> {
 
 pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[apply_settings]");
+    let settings_arc = Arc::clone(&state.settings);
+    let llm_settings_arc = Arc::clone(&state.llm_settings);
+    let llm_models_cache_arc = Arc::clone(&state.llm_models_cache);
+    let db_arc = Arc::clone(&state.db);
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change settings while recording".to_string());
     }
@@ -120,20 +127,20 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
     validate_llm_settings(&new_llm_settings)?;
 
     {
-        let current_vad = state.settings.blocking_write();
-        let current_llm = state.llm_settings.blocking_write();
+        let current_vad = read_lock(&settings_arc);
+        let current_llm = read_lock(&llm_settings_arc);
         if *current_vad == new_vad_settings && *current_llm == new_llm_settings {
             return Ok(());
         }
     }
 
     state.init_status.store(0, Ordering::Relaxed);
-    *state.settings.blocking_write() = new_vad_settings.clone();
-    *state.llm_settings.blocking_write() = new_llm_settings.clone();
-    *state.llm_models_cache.blocking_write() = None;
+    *write_lock(&settings_arc) = new_vad_settings.clone();
+    *write_lock(&llm_settings_arc) = new_llm_settings.clone();
+    *write_lock(&llm_models_cache_arc) = None;
 
     {
-        let db = state.db.blocking_lock();
+        let db = mutex_lock(&db_arc);
         let db = db.as_ref().ok_or("Database not initialized")?;
         db.upsert_setting("llm.provider_url", &new_llm_settings.provider_url)
             .map_err(|e| e.to_string())?;
@@ -175,11 +182,11 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
             Ok(Ok((rec, vad, threads))) => {
                 info!("[apply_settings] models rebuilt, num_threads={threads}");
                 {
-                    let mut r = recognizer_arc.write().await;
+                    let mut r = write_lock(&recognizer_arc);
                     *r = Some(rec);
                 }
                 {
-                    let mut v = vad_arc.write().await;
+                    let mut v = write_lock(&vad_arc);
                     *v = Some(vad);
                 }
                 init_num_threads.store(threads, Ordering::Relaxed);
@@ -188,7 +195,7 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
             Ok(Err(err)) => {
                 error!("[apply_settings] rebuild failed: {err}");
                 {
-                    let mut init_err = init_error.write().await;
+                    let mut init_err = write_lock(&init_error);
                     *init_err = err;
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -196,7 +203,7 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
             Err(err) => {
                 error!("[apply_settings] join failed: {err}");
                 {
-                    let mut init_err = init_error.write().await;
+                    let mut init_err = write_lock(&init_error);
                     *init_err = "Internal error: settings task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -209,10 +216,10 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
 
 pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result<ModelListResponse, String> {
     info!("[list_llm_models]");
-    let settings = state.llm_settings.read().await.clone();
+    let settings = read_lock(&state.llm_settings).clone();
     validate_llm_settings(&settings)?;
 
-    if let Some(cache) = state.llm_models_cache.read().await.as_ref() {
+    if let Some(cache) = read_lock(&state.llm_models_cache).as_ref() {
         if model_cache_valid(cache) {
             return Ok(ModelListResponse {
                 models: cache.models.clone(),
@@ -221,7 +228,7 @@ pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result
     }
 
     let fetched = llm_list_models(&settings).await?;
-    *state.llm_models_cache.write().await = Some(CachedModels {
+    *write_lock(&state.llm_models_cache) = Some(CachedModels {
         fetched_at: Instant::now(),
         models: fetched.clone(),
     });

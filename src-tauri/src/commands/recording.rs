@@ -16,8 +16,8 @@ use crate::db_worker::DbEvent;
 use crate::llm_client::{list_models as llm_list_models, optimize_text, translate_text};
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::{
-    merge_segment_in_place, update_segment_llm_state, AppState, RecognizeContext, RecordingAnchor, RecordingRuntime,
-    RecordingState, SegmentResult,
+    merge_segment_in_place, mutex_lock, read_lock, update_segment_llm_state, write_lock, AppState, RecognizeContext,
+    RecordingAnchor, RecordingRuntime, RecordingState, SegmentResult,
 };
 
 #[tauri::command]
@@ -34,30 +34,30 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
     }
 
     let recognizer = {
-        let mut guard = state.recognizer.blocking_write();
+        let mut guard = write_lock(&state.recognizer);
         guard.take().ok_or("Recognizer not available")?
     };
     let vad = {
-        let mut guard = state.vad.blocking_write();
+        let mut guard = write_lock(&state.vad);
         guard.take().ok_or("VAD not available")?
     };
 
     state.stop_signal.store(false, Ordering::Relaxed);
 
-    let audio_offset = state.recorded_audio.blocking_read().global_end_sample();
+    let audio_offset = read_lock(&state.recorded_audio).global_end_sample();
 
     let now = Local::now();
-    *state.start_wall_clock.blocking_write() = Some(now);
-    *state.start_instant.blocking_write() = Some(Instant::now());
+    *write_lock(&state.start_wall_clock) = Some(now);
+    *write_lock(&state.start_instant) = Some(Instant::now());
 
     info!("[start_recording] starting at {now}");
 
     let session_id = {
-        let db_guard = state.db.blocking_lock();
+        let db_guard = mutex_lock(&state.db);
         let db = db_guard.as_ref().ok_or("Database not initialized")?;
         db.create_session().map_err(|e| e.to_string())?
     };
-    *state.current_session_id.blocking_write() = Some(session_id.clone());
+    *write_lock(&state.current_session_id) = Some(session_id.clone());
     let stop_signal = Arc::clone(&state.stop_signal);
     let recording = Arc::clone(&state.recording);
     let segments = Arc::clone(&state.segments);
@@ -88,7 +88,7 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
         llm_models_cache: Arc::clone(&state.llm_models_cache),
         selected_device: Arc::clone(&state.selected_device),
     });
-    let db_writer = state.db_writer.blocking_lock().as_ref().cloned();
+    let db_writer = mutex_lock(&state.db_writer).as_ref().cloned();
     info!(
         "[start_recording] created session_id={}, db_writer_ready={}",
         session_id,
@@ -101,7 +101,7 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
         base_wall: now,
         audio_offset,
     };
-    let selected_device = state.selected_device.blocking_write().clone();
+    let selected_device = read_lock(&state.selected_device).clone();
 
     let db_writer_for_run = db_writer.clone();
     let session_id_for_run = session_id.clone();
@@ -130,11 +130,11 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
         match join.await {
             Ok(Ok((rec, v))) => {
                 {
-                    let mut r = recognizer_arc.write().await;
+                    let mut r = write_lock(&recognizer_arc);
                     *r = Some(rec);
                 }
                 {
-                    let mut va = vad_arc.write().await;
+                    let mut va = write_lock(&vad_arc);
                     *va = Some(v);
                 }
             }
@@ -153,7 +153,7 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
             });
         }
         {
-            let mut guard = current_session_id.write().await;
+            let mut guard = write_lock(&current_session_id);
             *guard = None;
         }
         info!("[recording task] stopped");
@@ -215,7 +215,7 @@ fn run_recording(
                 };
 
                 {
-                    let mut audio = runtime.recorded_audio.blocking_write();
+                    let mut audio = write_lock(runtime.recorded_audio);
                     audio.push_samples(&pcm);
                 }
 
@@ -276,7 +276,7 @@ fn run_recording(
         vad.pop();
     }
 
-    let seg_count = runtime.segments.blocking_read().len();
+    let seg_count = read_lock(runtime.segments).len();
     info!("[recording] flushed, total segments: {seg_count}");
 
     Ok((recognizer, vad))
@@ -416,7 +416,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
             };
 
             let db_segment_id = {
-                let mut segs = ctx.segments.blocking_write();
+                let mut segs = write_lock(ctx.segments);
                 if merge_segment_in_place(&mut segs, &new_segment) {
                     segs.last().map(|s| s.segment_id).unwrap_or(new_segment.segment_id)
                 } else {
@@ -428,9 +428,9 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
 
             let llm_input_text = ctx
                 .segments
-                .blocking_read()
-                .last()
-                .map(|seg| seg.text.clone())
+                .read()
+                .map(|guard| guard.last().map(|seg| seg.text.clone()))
+                .unwrap_or_else(|poisoned| poisoned.into_inner().last().map(|seg| seg.text.clone()))
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| text_corrected.clone());
 
@@ -465,7 +465,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
             } else {
                 warn!("[db-worker] writer not ready, fallback to direct upsert");
                 {
-                    let db_guard = ctx.state.db.blocking_lock();
+                    let db_guard = mutex_lock(&ctx.state.db);
                     if let Some(db) = db_guard.as_ref() {
                         let result = db.upsert_segment(NewSegment {
                             session_id: ctx.session_id.to_string(),
@@ -530,7 +530,7 @@ fn spawn_llm_postprocess_task_v2(
             revision,
         });
 
-        let settings = state.llm_settings.read().await.clone();
+        let settings = read_lock(&state.llm_settings).clone();
 
         if settings.selected_model.trim().is_empty() {
             match llm_list_models(&settings).await {
@@ -740,10 +740,10 @@ pub fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot clear while recording".to_string());
     }
-    state.segments.blocking_write().clear();
-    state.recorded_audio.blocking_write().clear();
-    *state.start_wall_clock.blocking_write() = None;
-    *state.start_instant.blocking_write() = None;
+    write_lock(&state.segments).clear();
+    write_lock(&state.recorded_audio).clear();
+    *write_lock(&state.start_wall_clock) = None;
+    *write_lock(&state.start_instant) = None;
     info!("[clear_results] cleared all segments and audio");
     Ok(())
 }
@@ -752,14 +752,12 @@ pub fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
 pub fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
     info!("[get_recording_state]");
     let recording = state.recording.load(Ordering::Relaxed);
-    let segments = state.segments.blocking_write().clone();
-    let elapsed_secs = state
-        .start_instant
-        .blocking_read()
-        .map(|i| i.elapsed().as_secs_f32())
+    let segments = read_lock(&state.segments).clone();
+    let elapsed_secs = read_lock(&state.start_instant)
+        .map(|instant| instant.elapsed().as_secs_f32())
         .unwrap_or(0.0);
     let (audio_window_start_sec, audio_window_end_sec) = {
-        let audio = state.recorded_audio.blocking_write();
+        let audio = read_lock(&state.recorded_audio);
         (
             audio.global_start_sample() as f32 / SAMPLE_RATE as f32,
             audio.global_end_sample() as f32 / SAMPLE_RATE as f32,

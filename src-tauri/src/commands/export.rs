@@ -1,4 +1,5 @@
 use crate::audio_buffer::SAMPLE_RATE;
+use crate::lock_utils::read_lock;
 use crate::AppState;
 use log::info;
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -11,7 +12,7 @@ pub fn save_segment_as_wav(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     info!("[save_segment_as_wav] path={}, start={}, end={}", path, start, end);
-    let audio = state.recorded_audio.blocking_write();
+    let audio = read_lock(&state.recorded_audio);
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
     }
@@ -31,7 +32,7 @@ pub fn save_segment_as_wav(
 #[tauri::command]
 pub fn save_all_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[save_all_audio] path={}", path);
-    let audio = state.recorded_audio.blocking_write();
+    let audio = read_lock(&state.recorded_audio);
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
     }
@@ -42,7 +43,7 @@ pub fn save_all_audio(path: String, state: tauri::State<'_, AppState>) -> Result
 #[tauri::command]
 pub fn get_recorded_audio_path(state: tauri::State<'_, AppState>) -> Result<String, String> {
     info!("[get_recorded_audio_path]");
-    let audio = state.recorded_audio.blocking_write();
+    let audio = read_lock(&state.recorded_audio);
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
     }
@@ -58,7 +59,7 @@ pub fn get_recorded_audio_path(state: tauri::State<'_, AppState>) -> Result<Stri
 #[tauri::command]
 pub fn export_srt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[export_srt] path={}", path);
-    let segments = state.segments.blocking_write();
+    let segments = read_lock(&state.segments);
     if segments.is_empty() {
         return Err("No results to export".to_string());
     }
