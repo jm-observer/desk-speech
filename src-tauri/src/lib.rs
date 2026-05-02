@@ -1,8 +1,5 @@
 mod audio_buffer;
-mod commands {
-    pub mod correction;
-    pub mod history;
-}
+mod commands;
 mod correction;
 pub mod db;
 mod llm_client;
@@ -188,7 +185,7 @@ fn update_segment_llm_state(
 }
 
 #[derive(Serialize, Clone)]
-struct RecordingState {
+pub(crate) struct RecordingState {
     recording: bool,
     segments: Vec<SegmentResult>,
     elapsed_secs: f32,
@@ -196,7 +193,7 @@ struct RecordingState {
     audio_window_end_sec: f32,
 }
 
-struct AppState {
+pub(crate) struct AppState {
     recognizer: Arc<Mutex<Option<OfflineRecognizer>>>,
     vad: Arc<Mutex<Option<VoiceActivityDetector>>>,
     recording: Arc<AtomicBool>,
@@ -221,7 +218,7 @@ struct AppState {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct CombinedSettings {
+pub(crate) struct CombinedSettings {
     threshold: f32,
     min_silence_duration: f32,
     min_speech_duration: f32,
@@ -236,7 +233,7 @@ struct CombinedSettings {
 }
 
 #[derive(Serialize)]
-struct ModelListResponse {
+pub(crate) struct ModelListResponse {
     models: Vec<String>,
 }
 
@@ -739,13 +736,13 @@ async fn perform_postprocess_and_copy(
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
-struct InputDevice {
+pub(crate) struct InputDevice {
     name: String,
     is_default: bool,
 }
 
-#[tauri::command]
-fn list_input_devices() -> Result<Vec<InputDevice>, String> {
+pub(crate) fn list_input_devices() -> Result<Vec<InputDevice>, String> {
+    info!("[list_input_devices]");
     let host = cpal::default_host();
     let default_name = host
         .default_input_device()
@@ -767,8 +764,8 @@ fn list_input_devices() -> Result<Vec<InputDevice>, String> {
     Ok(devices)
 }
 
-#[tauri::command]
-fn set_input_device(device_name: Option<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn set_input_device(device_name: Option<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[set_input_device] device_name={:?}", device_name);
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change device while recording".to_string());
     }
@@ -776,8 +773,8 @@ fn set_input_device(device_name: Option<String>, state: tauri::State<'_, AppStat
     Ok(())
 }
 
-#[tauri::command]
-fn get_selected_device(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
+pub(crate) fn get_selected_device(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
+    info!("[get_selected_device]");
     state
         .selected_device
         .lock()
@@ -789,8 +786,8 @@ fn get_selected_device(state: tauri::State<'_, AppState>) -> Result<Option<Strin
 // Tauri commands
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[start_recording]");
     if state.recording.swap(true, Ordering::SeqCst) {
         return Err("Already recording".to_string());
     }
@@ -1055,14 +1052,14 @@ fn run_recording(
     Ok((recognizer, vad))
 }
 
-#[tauri::command]
-fn stop_recording(state: tauri::State<'_, AppState>) {
+pub(crate) fn stop_recording(state: tauri::State<'_, AppState>) {
+    info!("[stop_recording]");
     info!("[stop_recording] signalling stop");
     state.stop_signal.store(true, Ordering::Relaxed);
 }
 
-#[tauri::command]
-fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[clear_results]");
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot clear while recording".to_string());
     }
@@ -1074,8 +1071,8 @@ fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
+pub(crate) fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
+    info!("[get_recording_state]");
     let recording = state.recording.load(Ordering::Relaxed);
     let segments = state.segments.lock().map_err(|e| e.to_string())?.clone();
     let elapsed_secs = state
@@ -1100,65 +1097,73 @@ fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingSta
     })
 }
 
-#[tauri::command]
-fn list_sessions(
+pub(crate) fn list_sessions(
     page: u32,
     page_size: u32,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<commands::history::DbSessionDto>, String> {
+    info!("[list_sessions] page={}, page_size={}", page, page_size);
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::history::list_sessions(db, page, page_size)
 }
 
-#[tauri::command]
-fn list_session_segments(
+pub(crate) fn list_session_segments(
     session_id: String,
     page: u32,
     page_size: u32,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<commands::history::DbSegmentDto>, String> {
+    info!(
+        "[list_session_segments] session_id={}, page={}, page_size={}",
+        session_id, page, page_size
+    );
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::history::list_session_segments(db, &session_id, page, page_size)
 }
 
-#[tauri::command]
-fn tail_session_segments(
+pub(crate) fn tail_session_segments(
     session_id: String,
     after_id: i64,
     limit: u32,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<commands::history::DbSegmentDto>, String> {
+    info!(
+        "[tail_session_segments] session_id={}, after_id={}, limit={}",
+        session_id, after_id, limit
+    );
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::history::tail_session_segments(db, &session_id, after_id, limit)
 }
 
-#[tauri::command]
-fn list_correction_rules(
+pub(crate) fn list_correction_rules(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<commands::correction::CorrectionRuleDto>, String> {
+    info!("[list_correction_rules]");
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::list_correction_rules(db)
 }
 
-#[tauri::command]
-fn create_correction_rule(
+pub(crate) fn create_correction_rule(
     source: String,
     target: String,
     priority: i32,
     enabled: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    info!(
+        "[create_correction_rule] source={}, target={}, priority={}, enabled={}",
+        source, target, priority, enabled
+    );
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::create_correction_rule(db, &state.correction_engine, source, target, priority, enabled)
 }
 
-#[tauri::command]
-fn update_correction_rule(
+pub(crate) fn update_correction_rule(
     id: i64,
     source: String,
     target: String,
@@ -1166,27 +1171,36 @@ fn update_correction_rule(
     enabled: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    info!(
+        "[update_correction_rule] id={}, source={}, target={}, priority={}, enabled={}",
+        id, source, target, priority, enabled
+    );
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::update_correction_rule(db, &state.correction_engine, id, source, target, priority, enabled)
 }
 
-#[tauri::command]
-fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[delete_correction_rule] id={}", id);
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::delete_correction_rule(db, &state.correction_engine, id)
 }
 
-#[tauri::command]
-fn reload_correction_rules(state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn reload_correction_rules(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[reload_correction_rules]");
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let db = db.as_ref().ok_or("Database not initialized")?;
     commands::correction::reload_correction_rules(db, &state.correction_engine)
 }
 
-#[tauri::command]
-fn save_segment_as_wav(path: String, start: f32, end: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn save_segment_as_wav(
+    path: String,
+    start: f32,
+    end: f32,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    info!("[save_segment_as_wav] path={}, start={}, end={}", path, start, end);
     let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
@@ -1204,8 +1218,8 @@ fn save_segment_as_wav(path: String, start: f32, end: f32, state: tauri::State<'
     write_wav(&path, &segment)
 }
 
-#[tauri::command]
-fn save_all_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn save_all_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[save_all_audio] path={}", path);
     let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
@@ -1214,8 +1228,8 @@ fn save_all_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(),
     write_wav(&path, &samples)
 }
 
-#[tauri::command]
-fn get_recorded_audio_path(state: tauri::State<'_, AppState>) -> Result<String, String> {
+pub(crate) fn get_recorded_audio_path(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    info!("[get_recorded_audio_path]");
     let audio = state.recorded_audio.lock().map_err(|e| e.to_string())?;
     if audio.len() == 0 {
         return Err("No recorded audio".to_string());
@@ -1238,8 +1252,8 @@ fn format_srt_time(seconds: f32) -> String {
     format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
-#[tauri::command]
-fn export_srt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn export_srt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[export_srt] path={}", path);
     let segments = state.segments.lock().map_err(|e| e.to_string())?;
     if segments.is_empty() {
         return Err("No results to export".to_string());
@@ -1261,8 +1275,8 @@ fn export_srt(path: String, state: tauri::State<'_, AppState>) -> Result<(), Str
     Ok(())
 }
 
-#[tauri::command]
-fn copy_text_to_clipboard(app: tauri::AppHandle, text: String) -> Result<(), String> {
+pub(crate) fn copy_text_to_clipboard(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    info!("[copy_text_to_clipboard] text_len={}", text.len());
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
@@ -1305,14 +1319,14 @@ fn write_wav(path: &str, samples: &[f32]) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
-struct InitStatus {
+pub(crate) struct InitStatus {
     status: u8,
     error: String,
     num_threads: u32,
 }
 
-#[tauri::command]
-fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
+pub(crate) fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
+    info!("[get_init_status]");
     let status = state.init_status.load(Ordering::Relaxed);
     let error = state.init_error.lock().map(|e| e.clone()).unwrap_or_default();
     let num_threads = state.num_threads.load(Ordering::Relaxed);
@@ -1327,8 +1341,8 @@ fn get_init_status(state: tauri::State<'_, AppState>) -> InitStatus {
 // Settings
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, String> {
+pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, String> {
+    info!("[get_settings]");
     let vad = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let llm = state.llm_settings.lock().map_err(|e| e.to_string())?.clone();
     Ok(CombinedSettings {
@@ -1365,8 +1379,8 @@ fn validate_settings(s: &VadSettings) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[apply_settings]");
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change settings while recording".to_string());
     }
@@ -1492,8 +1506,8 @@ fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppSta
     Ok(())
 }
 
-#[tauri::command]
-async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result<ModelListResponse, String> {
+pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result<ModelListResponse, String> {
+    info!("[list_llm_models]");
     let settings = state.llm_settings.lock().map_err(|e| e.to_string())?.clone();
     validate_llm_settings(&settings)?;
 
@@ -1686,6 +1700,7 @@ fn build_app_state() -> AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let workspace = custom_utils::args::workspace(&None, "streaming-speech")?;
     let state = build_app_state();
 
     let init_recognizer = Arc::clone(&state.recognizer);
@@ -1975,30 +1990,30 @@ pub fn run() {
         })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
-            list_input_devices,
-            set_input_device,
-            get_selected_device,
-            start_recording,
-            stop_recording,
-            clear_results,
-            get_recording_state,
-            list_sessions,
-            list_session_segments,
-            tail_session_segments,
-            save_segment_as_wav,
-            save_all_audio,
-            get_recorded_audio_path,
-            export_srt,
-            copy_text_to_clipboard,
-            get_init_status,
-            get_settings,
-            apply_settings,
-            list_llm_models,
-            list_correction_rules,
-            create_correction_rule,
-            update_correction_rule,
-            delete_correction_rule,
-            reload_correction_rules,
+            commands::device::list_input_devices,
+            commands::device::set_input_device,
+            commands::device::get_selected_device,
+            commands::recording::start_recording,
+            commands::recording::stop_recording,
+            commands::recording::clear_results,
+            commands::recording::get_recording_state,
+            commands::history_api::list_sessions,
+            commands::history_api::list_session_segments,
+            commands::history_api::tail_session_segments,
+            commands::export::save_segment_as_wav,
+            commands::export::save_all_audio,
+            commands::export::get_recorded_audio_path,
+            commands::export::export_srt,
+            commands::export::copy_text_to_clipboard,
+            commands::init::get_init_status,
+            commands::settings::get_settings,
+            commands::settings::apply_settings,
+            commands::settings::list_llm_models,
+            commands::correction_api::list_correction_rules,
+            commands::correction_api::create_correction_rule,
+            commands::correction_api::update_correction_rule,
+            commands::correction_api::delete_correction_rule,
+            commands::correction_api::reload_correction_rules,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

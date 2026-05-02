@@ -7,24 +7,20 @@ import { Icon } from './ui/Icon';
 interface SegmentCardProps {
   segment: Segment;
   showEnglish?: boolean;
-  onCopy: (text: string, source: 'english' | 'optimized' | 'raw') => void;
+  onCopyChinese: (text: string) => void;
+  onCopyEnglish: (text: string) => void;
 }
 
 export const SegmentCard: React.FC<SegmentCardProps> = ({
   segment,
   showEnglish,
-  onCopy,
+  onCopyChinese,
+  onCopyEnglish,
 }) => {
   const optimizeRunning = segment.optimize_status === 'running' || segment.optimize_status === 'pending';
   const translateRunning = segment.translate_status === 'running' || segment.translate_status === 'pending';
   const isProcessing = optimizeRunning || translateRunning;
   const duration = segment.end - segment.start;
-  const preferredCopyText = segment.text_english || segment.text_optimized || segment.text_raw;
-  const copySource: 'english' | 'optimized' | 'raw' = segment.text_english
-    ? 'english'
-    : segment.text_optimized
-      ? 'optimized'
-      : 'raw';
 
   return (
     <div className={cn(
@@ -40,8 +36,27 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
         <div className="flex-1" />
         
         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <Button variant="ghost" size="icon" className="w-7 h-7" onClick={() => onCopy(preferredCopyText, copySource)}>
-            <Icon name="copy" size={14} />
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-[11px] gap-1.5"
+            disabled={!segment.text_optimized && !segment.text_raw}
+            onClick={() => onCopyChinese(segment.text_optimized || segment.text_raw)}
+            title="复制中文"
+          >
+            <Icon name="copy" size={12} />
+            复制中文
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-[11px] gap-1.5"
+            disabled={!segment.text_english}
+            onClick={() => onCopyEnglish(segment.text_english || '')}
+            title="复制英文"
+          >
+            <Icon name="languages" size={12} />
+            复制英文
           </Button>
           <Button variant="ghost" size="icon" className="w-7 h-7">
             <Icon name="download" size={14} />
