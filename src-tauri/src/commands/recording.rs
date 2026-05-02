@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,11 +91,7 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         llm_models_cache: Arc::clone(&state.llm_models_cache),
         selected_device: Arc::clone(&state.selected_device),
     });
-    let db_writer = mutex_lock(&state.db_writer).as_ref().cloned();
-    info!(
-        "[start_recording] global scope ready, db_writer_ready={}",
-        db_writer.is_some()
-    );
+    let db_writer = state.db_writer.as_ref().clone();
     let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
     let next_revision = Arc::clone(&state.next_revision);
     let anchor = RecordingAnchor {
@@ -113,8 +109,8 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
                 RecordingRuntime {
                     stop_signal: &stop_signal,
                     segments: &segments,
-                    next_realtime_segment_id: next_realtime_segment_id,
-                    next_revision: next_revision,
+                    next_realtime_segment_id,
+                    next_revision,
                     correction_engine: &correction_engine,
                     app_state: &app_state,
                     app_handle: &app,
@@ -146,9 +142,7 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         }
 
         recording.store(false, Ordering::SeqCst);
-        if let Some(writer) = db_writer.as_ref() {
-            let _ = writer.try_send(DbEvent::TouchGlobalScopeEnd);
-        }
+        let _ = db_writer.try_send(DbEvent::TouchGlobalScopeEnd);
         info!("[recording task] stopped");
     });
 
@@ -227,7 +221,7 @@ fn run_recording(
                             state: runtime.app_state.clone(),
                             app_handle: runtime.app_handle.clone(),
                             db_writer: runtime.db_writer.clone(),
-                            base_wall: runtime.anchor.base_wall.clone(),
+                            base_wall: runtime.anchor.base_wall,
                             audio_offset_samples: runtime.anchor.audio_offset,
                         };
                         recognize_segment(&recognizer, &segment, recognize_ctx);
@@ -260,7 +254,7 @@ fn run_recording(
             state: runtime.app_state.clone(),
             app_handle: runtime.app_handle.clone(),
             db_writer: runtime.db_writer.clone(),
-            base_wall: runtime.anchor.base_wall.clone(),
+            base_wall: runtime.anchor.base_wall,
             audio_offset_samples: runtime.anchor.audio_offset,
         };
         recognize_segment(&recognizer, &segment, recognize_ctx);
@@ -375,8 +369,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
         recognize_segment_task(stream, vad_start, duration, ctx).await;
     });
 }
-async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration: f32,
-                                ctx: RecognizeContext) {
+async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration: f32, ctx: RecognizeContext) {
     let offset_secs = ctx.audio_offset_samples as f32 / SAMPLE_RATE as f32;
     let rel_start = offset_secs + vad_start;
     let rel_end = rel_start + duration;
@@ -396,7 +389,8 @@ async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration:
                 || c.is_ascii_whitespace()
                 || matches!(
                     c,
-                    '.' | '。' | '，'
+                    '.' | '。'
+                        | '，'
                         | '？'
                         | '！'
                         | '…'
@@ -444,89 +438,61 @@ async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration:
                 translate_status: "blocked".to_string(),
             };
 
-            let db_segment_id = {
+            let (db_segment_id, llm_input_text) = {
                 let mut segs = write_lock(&ctx.segments);
                 if merge_segment_in_place(&mut segs, &new_segment) {
-                    segs.last().map(|s| s.segment_id).unwrap_or(new_segment.segment_id)
+                    segs.last()
+                        .map(|s| (s.segment_id, s.text.clone()))
+                        .unwrap_or((new_segment.segment_id, new_segment.text.clone()))
                 } else {
-                    let id = new_segment.segment_id;
+                    let id = (new_segment.segment_id, new_segment.text.clone());
                     segs.push(new_segment);
                     id
                 }
             };
 
-            let llm_input_text = ctx
-                .segments
-                .read()
-                .map(|guard| guard.last().map(|seg| seg.text.clone()))
-                .unwrap_or_else(|poisoned| poisoned.into_inner().last().map(|seg| seg.text.clone()))
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| text_corrected.clone());
+            // let llm_input_text = ctx
+            //     .segments
+            //     .read()
+            //     .map(|guard| guard.last().map(|seg| seg.text.clone()))
+            //     .unwrap_or_else(|poisoned| poisoned.into_inner().last().map(|seg| seg.text.clone()))
+            //     .filter(|t| !t.trim().is_empty())
+            //     .unwrap_or_else(|| text_corrected.clone());
 
-            if let Some(writer) = &ctx.db_writer {
-                let event = DbEvent::InsertSegment {
-                    segment: NewSegment {
-                        segment_id: db_segment_id,
-                        revision,
-                        start_sec: rel_start,
-                        end_sec: rel_end,
-                        wall_start: wall_start_fmt,
-                        wall_end: wall_end_fmt,
-                        text_raw,
-                    },
-                };
-                if let Err(err) = writer.try_send(event) {
-                    if matches!(err, TrySendError::Full(_)) {
-                        warn!("[db-worker] queue full, dropping segment event");
-                    } else {
-                        warn!(
-                            "[db-worker] failed to enqueue segment segment_id={}, revision={}, err={}",
-                            db_segment_id, revision, err
-                        );
-                    }
+            let event = DbEvent::InsertSegment {
+                segment: NewSegment {
+                    segment_id: db_segment_id,
+                    revision,
+                    start_sec: rel_start,
+                    end_sec: rel_end,
+                    wall_start: wall_start_fmt,
+                    wall_end: wall_end_fmt,
+                    text_raw,
+                },
+            };
+            if let Err(err) = ctx.db_writer.try_send(event) {
+                if matches!(err, TrySendError::Full(_)) {
+                    warn!("[db-worker] queue full, dropping segment event");
                 } else {
-                    debug!(
-                        "[db-worker] enqueued segment segment_id={}, revision={}",
-                        db_segment_id, revision
+                    warn!(
+                        "[db-worker] failed to enqueue segment segment_id={}, revision={}, err={}",
+                        db_segment_id, revision, err
                     );
                 }
             } else {
-                warn!("[db-worker] writer not ready, fallback to direct upsert");
-                {
-                    let db_guard = mutex_lock(&ctx.state.db);
-                    if let Some(db) = db_guard.as_ref() {
-                        let result = tauri::async_runtime::block_on(db.upsert_segment(NewSegment {
-                            segment_id: db_segment_id,
-                            revision,
-                            start_sec: rel_start,
-                            end_sec: rel_end,
-                            wall_start: wall_start_fmt.clone(),
-                            wall_end: wall_end_fmt.clone(),
-                            text_raw: text_raw.clone(),
-                        }));
-                        match result {
-                            Ok(()) => info!(
-                                "[db-direct] upsert ok segment_id={}, revision={}",
-                                db_segment_id, revision
-                            ),
-                            Err(err) => error!(
-                                "[db-direct] upsert failed segment_id={}, revision={}, err={}",
-                                db_segment_id, revision, err
-                            ),
-                        }
-                    }
-                }
-            }
-
-            if let Some(writer) = &ctx.db_writer {
-                spawn_llm_postprocess_task_v2(
-                    writer.clone(),
-                    ctx.state.clone(),
-                    ctx.app_handle.clone(),
-                    revision,
-                    llm_input_text,
+                debug!(
+                    "[db-worker] enqueued segment segment_id={}, revision={}",
+                    db_segment_id, revision
                 );
             }
+
+            spawn_llm_postprocess_task_v2(
+                ctx.db_writer.clone(),
+                ctx.state.clone(),
+                ctx.app_handle.clone(),
+                revision,
+                llm_input_text,
+            );
         }
     }
 }
