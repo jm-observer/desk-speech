@@ -9,7 +9,7 @@ import { Icon } from './components/ui/Icon';
 import { RecordCard } from './components/RecordCard';
 import { SettingsModal } from './components/SettingsModal';
 import { CorrectionModal } from './components/CorrectionModal';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { Button } from './components/ui/Button';
@@ -42,8 +42,9 @@ async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
 function App() {
   const store = useAppStore();
   const pollTimer = useRef<number | null>(null);
-  const previousTranslateStatusRef = useRef<Map<number, Segment['translate_status']>>(new Map());
+  const notifiedRevisionsRef = useRef<Set<string>>(new Set());
   const notificationBaselineReadyRef = useRef(false);
+  const autoStartTriggeredRef = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
@@ -98,10 +99,18 @@ function App() {
       bodyLength: body.length,
     });
     sendNotification({
-      title: '翻译完成',
+      title: '识别完成',
       body: body.slice(0, 120),
     });
-    logNotificationDebug('native notification sent', {
+    
+    try {
+      logNotificationDebug('requesting window attention (jumping)');
+      await getCurrentWindow().requestUserAttention(UserAttentionType.Critical);
+    } catch (err) {
+      console.error('Request window attention failed', err);
+    }
+
+    logNotificationDebug('notification sequence completed', {
       revision: segment.revision,
     });
   }, [logNotificationDebug]);
@@ -252,60 +261,42 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const nextStatuses = new Map<number, Segment['translate_status']>();
-
-    store.segments.forEach((segment) => {
-      if (segment.revision !== undefined) {
-        nextStatuses.set(segment.revision, segment.translate_status);
-      }
-    });
-
     if (!notificationBaselineReadyRef.current) {
-      previousTranslateStatusRef.current = nextStatuses;
+      store.segments.forEach((seg) => {
+        if (seg.revision !== undefined) {
+          const optKey = `opt-${seg.revision}`;
+          const transKey = `trans-${seg.revision}`;
+          if (seg.optimize_status === 'success') notifiedRevisionsRef.current.add(optKey);
+          if (seg.translate_status === 'success') notifiedRevisionsRef.current.add(transKey);
+        }
+      });
       notificationBaselineReadyRef.current = true;
       logNotificationDebug('notification baseline initialized', {
-        trackedRevisionCount: nextStatuses.size,
+        initialTrackedCount: notifiedRevisionsRef.current.size,
       });
       return;
     }
 
     store.segments.forEach((segment) => {
       const revision = segment.revision;
-      logNotificationDebug('inspect segment notification state', {
-        revision,
-        segmentId: segment.segment_id,
-        translateStatus: segment.translate_status,
-        hasEnglish: Boolean(segment.text_english?.trim()),
-      });
+      if (revision === undefined) return;
 
-      if (revision === undefined || segment.translate_status !== 'success') {
-        logNotificationDebug('skip notification: not ready', {
-          revision,
-          translateStatus: segment.translate_status,
-        });
-        return;
+      // Check optimization status
+      const optKey = `opt-${revision}`;
+      if (segment.optimize_status === 'success' && !notifiedRevisionsRef.current.has(optKey)) {
+        logNotificationDebug('triggering notification: optimization success', { revision });
+        notifiedRevisionsRef.current.add(optKey);
+        showTranslationNotification(segment).catch(console.error);
       }
 
-      const previousStatus = previousTranslateStatusRef.current.get(revision);
-      if (previousStatus === 'success') {
-        logNotificationDebug('skip notification: revision already successful before', {
-          revision,
-          previousStatus,
-        });
-        return;
+      // Check translation status
+      const transKey = `trans-${revision}`;
+      if (segment.translate_status === 'success' && !notifiedRevisionsRef.current.has(transKey)) {
+        logNotificationDebug('triggering notification: translation success', { revision });
+        notifiedRevisionsRef.current.add(transKey);
+        showTranslationNotification(segment).catch(console.error);
       }
-
-      logNotificationDebug('trigger notification for revision', {
-        revision,
-        previousStatus: previousStatus ?? 'missing',
-        currentStatus: segment.translate_status,
-      });
-      showTranslationNotification(segment).catch((err) => {
-        console.error('Show translation notification failed', err);
-      });
     });
-
-    previousTranslateStatusRef.current = nextStatuses;
   }, [logNotificationDebug, showTranslationNotification, store.segments]);
 
   // Sync initial recording state on mount
@@ -336,6 +327,23 @@ function App() {
       setIsBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (autoStartTriggeredRef.current) {
+      return;
+    }
+    if (store.status !== 'idle' && store.status !== 'finished') {
+      return;
+    }
+    if (store.devices.length === 0) {
+      return;
+    }
+
+    autoStartTriggeredRef.current = true;
+    startRecording().catch((err) => {
+      console.error('Auto start recording failed', err);
+    });
+  }, [startRecording, store.devices.length, store.status]);
 
   const stopRecording = async () => {
     try {
