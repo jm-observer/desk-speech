@@ -86,7 +86,6 @@ function App() {
     pollTimer.current = window.setInterval(async () => {
       try {
         const state = await TauriAPI.getRecordingState();
-        store.setElapsedTime(state.elapsed_secs);
 
         const mappedSegments: Segment[] = state.segments.map((s: RawSegment) => ({
           id: s.segment_id,
@@ -127,7 +126,7 @@ function App() {
         stopPolling();
         store.setStatus('error');
       }
-    }, 500);
+    }, 1000);
   }, [mergeSegmentsByRevision, store, stopPolling]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
@@ -153,7 +152,6 @@ function App() {
       await TauriAPI.startRecording();
       store.setStatus('recording');
       store.setSegments([]);
-      store.setElapsedTime(0);
       startPolling();
     } catch (err) {
       console.error("Start failed", err);
@@ -249,7 +247,6 @@ function App() {
 
             <RecordCard
               status={store.status}
-              elapsedTime={store.elapsedTime}
               onStart={startRecording}
               onStop={stopRecording}
               disabled={store.devices.length === 0 || isBusy}
@@ -262,7 +259,6 @@ function App() {
         <div className="shrink-0 h-full">
           <ControlPanel
             status={store.status}
-            elapsedTime={store.elapsedTime}
             devices={store.devices}
             selectedDevice={store.selectedDevice}
             onDeviceChange={handleDeviceChange}

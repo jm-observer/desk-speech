@@ -8,7 +8,6 @@ import { StatusChip } from './StatusChip';
 
 interface ControlPanelProps {
   status: string;
-  elapsedTime: number;
   devices: { label: string; value: string }[];
   selectedDevice: string;
   onDeviceChange: (val: string) => void;
@@ -25,7 +24,6 @@ interface ControlPanelProps {
 
 export const ControlPanel: React.FC<ControlPanelProps> = ({
   status,
-  elapsedTime,
   devices,
   selectedDevice,
   onDeviceChange,
@@ -70,7 +68,6 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
 
       <RecordCard
         status={status}
-        elapsedTime={elapsedTime}
         onStart={onStart}
         onStop={onStop}
         disabled={devices.length === 0 || disabled}

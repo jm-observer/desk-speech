@@ -9,7 +9,6 @@ export const useAppStore = () => {
   const [segments, setSegments] = useState<Segment[]>([]);
   const [devices, setDevices] = useState<{ label: string; value: string }[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>('');
-  const [elapsedTime, setElapsedTime] = useState(0);
   const [showEnglish, setShowEnglish] = useState(true);
   const [uiMode, setUiMode] = useState<'detailed' | 'simple'>('detailed');
 
@@ -110,7 +109,6 @@ export const useAppStore = () => {
     segments, setSegments,
     devices, setDevices,
     selectedDevice, setSelectedDevice,
-    elapsedTime, setElapsedTime,
     showEnglish, setShowEnglish,
     uiMode, setUiMode
   };

@@ -1,12 +1,11 @@
 import React from 'react';
-import { cn, formatTimer } from '../utils';
+import { cn } from '../utils';
 import { Waveform } from './Waveform';
 import { Button } from './ui/Button';
 import { Icon } from './ui/Icon';
 
 interface RecordCardProps {
   status: string;
-  elapsedTime: number;
   onStart: () => void;
   onStop: () => void;
   disabled?: boolean;
@@ -14,7 +13,6 @@ interface RecordCardProps {
 
 export const RecordCard: React.FC<RecordCardProps> = ({ 
   status, 
-  elapsedTime, 
   onStart, 
   onStop,
   disabled 
@@ -28,16 +26,13 @@ export const RecordCard: React.FC<RecordCardProps> = ({
     )}>
       <Waveform active={isRecording} intensity={0.8} className="h-16" />
       
-      <div className="flex items-center gap-2.5">
+      <div className="flex items-center gap-2.5 h-10">
         {isRecording && (
-          <div className="w-2.5 h-2.5 rounded-full bg-[var(--danger)] animate-pulse-dot" />
+          <div className="flex items-center gap-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-[var(--danger)] animate-pulse-dot" />
+            <span className="text-sm font-medium text-[var(--danger)]">正在录制...</span>
+          </div>
         )}
-        <span className={cn(
-          "font-mono text-3xl font-medium tabular-nums tracking-tight",
-          isRecording ? "text-[var(--primary-deep)]" : "text-[var(--ink-3)]"
-        )}>
-          {formatTimer(elapsedTime)}
-        </span>
       </div>
 
       <div className="w-full flex flex-col items-center gap-3">

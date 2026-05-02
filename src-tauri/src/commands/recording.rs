@@ -712,12 +712,9 @@ pub fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
-    debug!("[get_recording_state]");
     let recording = state.recording.load(Ordering::Relaxed);
     let segments = read_lock(&state.segments).clone();
-    let elapsed_secs = read_lock(&state.start_instant)
-        .map(|instant| instant.elapsed().as_secs_f32())
-        .unwrap_or(0.0);
+    let elapsed_secs = 0.0;
     let (audio_window_start_sec, audio_window_end_sec) = {
         let audio = read_lock(&state.recorded_audio);
         (
