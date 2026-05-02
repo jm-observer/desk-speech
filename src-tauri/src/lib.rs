@@ -5,6 +5,7 @@ pub mod db;
 mod llm_client;
 mod llm_settings;
 mod model_registry;
+mod settings;
 
 use audio_buffer::{RollingAudioBuffer, SAMPLE_RATE};
 use model_registry::get_model_config;
@@ -16,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use anyhow::Context;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::correction::CorrectionEngine;
@@ -28,8 +30,9 @@ use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use log::{debug, error, info, warn};
-use tauri::Manager;
+use rusqlite::Connection;
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use crate::db::schema;
 
 const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
 const MERGE_MAX_DURATION_SEC: f32 = 30.0;
@@ -1647,11 +1650,151 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
     Ok((recognizer, vad, num_threads))
 }
 
-// ---------------------------------------------------------------------------
-// App startup
-// ---------------------------------------------------------------------------
+fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSettings {
+    let mut settings = LlmSettings::default();
 
-fn build_app_state() -> AppState {
+    if let Ok(Some(v)) = db.get_setting("llm.provider_url") {
+        settings.provider_url = v;
+    }
+    if let Ok(Some(v)) = db.get_setting("llm.api_key") {
+        settings.api_key = v;
+    }
+    if let Ok(Some(v)) = db.get_setting("llm.selected_model") {
+        settings.selected_model = v;
+    }
+    if let Ok(Some(v)) = db.get_setting("llm.optimize_prompt_template") {
+        settings.optimize_prompt_template = v;
+    } else if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
+        settings.optimize_prompt_template = v;
+    }
+    if let Ok(Some(v)) = db.get_setting("llm.translate_prompt_template") {
+        settings.translate_prompt_template = v;
+    }
+    if let Ok(Some(v)) = db.get_setting("llm.auto_copy_mode") {
+        settings.auto_copy_mode = match v.as_str() {
+            "off" => AutoCopyMode::Off,
+            "optimized_zh" => AutoCopyMode::OptimizedZh,
+            _ => AutoCopyMode::English,
+        };
+    } else if let Ok(Some(v)) = db.get_setting("llm.auto_copy") {
+        settings.auto_copy_mode = if v == "false" || v == "0" {
+            AutoCopyMode::Off
+        } else {
+            AutoCopyMode::English
+        };
+    }
+
+    settings
+}
+
+fn start_db_worker(db: db::SpeechDatabase) -> SyncSender<DbEvent> {
+    let (tx, rx) = mpsc::sync_channel::<DbEvent>(DB_EVENT_QUEUE_CAPACITY);
+    tauri::async_runtime::spawn(async move {
+        let join = tauri::async_runtime::spawn_blocking(move || {
+            while let Ok(event) = rx.recv() {
+                match event {
+                    DbEvent::InsertSegment { segment } => {
+                        debug!(
+                            "[db-worker] upsert segment session_id={}, segment_id={}, revision={}",
+                            segment.session_id, segment.segment_id, segment.revision
+                        );
+                        if let Err(err) = db.upsert_segment(segment.clone()) {
+                            error!(
+                                "[db-worker] upsert failed session_id={}, segment_id={}, revision={}, err={}",
+                                segment.session_id, segment.segment_id, segment.revision, err
+                            );
+                        } else {
+                            debug!(
+                                "[db-worker] upsert ok session_id={}, segment_id={}, revision={}",
+                                segment.session_id, segment.segment_id, segment.revision
+                            );
+                        }
+                    }
+                    DbEvent::MarkOptimizeRunning { session_id, revision } => {
+                        debug!(
+                            "[db-worker] mark running session_id={}, revision={}",
+                            session_id, revision
+                        );
+                        let _ = db.update_optimize_status(&session_id, revision, "running");
+                    }
+                    DbEvent::MarkSkippedBefore { session_id, revision } => {
+                        debug!(
+                            "[db-worker] mark skipped before session_id={}, revision={}",
+                            session_id, revision
+                        );
+                        let _ = db.mark_old_revisions_skipped(&session_id, revision);
+                    }
+                    DbEvent::MarkSkipped { session_id, revision } => {
+                        debug!(
+                            "[db-worker] mark skipped session_id={}, revision={}",
+                            session_id, revision
+                        );
+                        let _ = db.update_optimize_status(&session_id, revision, "failed");
+                        let _ = db.update_translate_status(&session_id, revision, "blocked");
+                    }
+                    DbEvent::MarkOptimizeFailed { session_id, revision } => {
+                        warn!(
+                            "[db-worker] mark failed session_id={}, revision={}",
+                            session_id, revision
+                        );
+                        let _ = db.update_optimize_status(&session_id, revision, "failed");
+                        let _ = db.update_translate_status(&session_id, revision, "blocked");
+                    }
+                    DbEvent::MarkOptimizeSuccess { session_id, revision } => {
+                        let _ = db.update_optimize_status(&session_id, revision, "success");
+                    }
+                    DbEvent::MarkTranslatePending { session_id, revision } => {
+                        let _ = db.update_translate_status(&session_id, revision, "pending");
+                    }
+                    DbEvent::MarkTranslateRunning { session_id, revision } => {
+                        let _ = db.update_translate_status(&session_id, revision, "running");
+                    }
+                    DbEvent::MarkTranslateFailed { session_id, revision } => {
+                        let _ = db.update_translate_status(&session_id, revision, "failed");
+                    }
+                    DbEvent::SaveOptimizeResult {
+                        session_id,
+                        revision,
+                        text_optimized,
+                    } => {
+                        let _ = db.upsert_optimize_result(OptimizeResultUpsert {
+                            session_id,
+                            revision,
+                            text_optimized: Some(text_optimized),
+                            optimize_error: None,
+                            optimize_started_at: None,
+                            optimize_finished_at: None,
+                        });
+                    }
+                    DbEvent::SaveTranslateResult {
+                        session_id,
+                        revision,
+                        text_english,
+                    } => {
+                        let _ = db.upsert_translate_result(TranslateResultUpsert {
+                            session_id: session_id.clone(),
+                            revision,
+                            text_english: Some(text_english),
+                            translate_error: None,
+                            translate_started_at: None,
+                            translate_finished_at: None,
+                        });
+                        let _ = db.update_translate_status(&session_id, revision, "success");
+                    }
+                    DbEvent::CloseSession { session_id } => {
+                        let _ = db.close_session(&session_id);
+                    }
+                }
+            }
+        });
+        if let Err(err) = join.await {
+            error!("[db-worker] join failed: {err}");
+        }
+    });
+    tx
+}
+
+fn build_app_state(db: db::SpeechDatabase, db_writer: SyncSender<DbEvent>, llm_settings: LlmSettings) -> AppState {
     AppState {
         recognizer: Arc::new(RwLock::new(None)),
         vad: Arc::new(RwLock::new(None)),
@@ -1659,8 +1802,8 @@ fn build_app_state() -> AppState {
         stop_signal: Arc::new(AtomicBool::new(false)),
         segments: Arc::new(RwLock::new(Vec::new())),
         recorded_audio: Arc::new(RwLock::new(RollingAudioBuffer::new())),
-        db: Arc::new(Mutex::new(None)),
-        db_writer: Arc::new(Mutex::new(None)),
+        db: Arc::new(Mutex::new(Some(db))),
+        db_writer: Arc::new(Mutex::new(Some(db_writer))),
         current_session_id: Arc::new(RwLock::new(None)),
         correction_engine: Arc::new(CorrectionEngine::new()),
         start_wall_clock: Arc::new(RwLock::new(None)),
@@ -1671,7 +1814,7 @@ fn build_app_state() -> AppState {
         next_realtime_segment_id: Arc::new(AtomicU64::new(1)),
         next_revision: Arc::new(AtomicU64::new(1)),
         settings: Arc::new(RwLock::new(VadSettings::default())),
-        llm_settings: Arc::new(RwLock::new(LlmSettings::default())),
+        llm_settings: Arc::new(RwLock::new(llm_settings)),
         llm_models_cache: Arc::new(RwLock::new(None)),
         selected_device: Arc::new(RwLock::new(None)),
     }
@@ -1679,7 +1822,29 @@ fn build_app_state() -> AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let state = build_app_state();
+    let workspace = custom_utils::args::workspace(&None, "streaming-speech").unwrap();
+    let db_path = workspace.join("speech_history.db");
+    if let Err(err) = std::fs::create_dir_all(&workspace) {
+        error!("[db] cannot create parent dir {}: {err}", workspace.display());
+        return;
+    }
+    let db = match db::SpeechDatabase::init(&db_path) {
+        Ok(db) => db,
+        Err(err) => {
+            error!("[db] init failed at {}: {err}", db_path.display());
+            return;
+        }
+    };
+
+    let llm_settings = load_llm_settings_from_db(&db);
+    let db_writer = start_db_worker(db.clone());
+    let state = build_app_state(db, db_writer, llm_settings);
+    {
+        let db_guard = state.db.blocking_lock();
+        if let Some(db) = db_guard.as_ref() {
+            let _ = commands::correction::reload_correction_rules(db, &state.correction_engine);
+        }
+    }
 
     let init_recognizer = Arc::clone(&state.recognizer);
     let init_vad = Arc::clone(&state.vad);
@@ -1734,227 +1899,15 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
         .setup({
-            let db_state = Arc::clone(&state.db);
-            let db_writer_state = Arc::clone(&state.db_writer);
             let correction_engine = Arc::clone(&state.correction_engine);
-            let llm_settings_state = Arc::clone(&state.llm_settings);
+            let db_state = Arc::clone(&state.db);
             move |app| {
-                match app.path().app_data_dir() {
-                    Ok(app_dir) => {
-                        let db_path = app_dir.join("speech_history.db");
-                        match db::SpeechDatabase::init(&db_path) {
-                            Ok(db) => {
-                                let _ = commands::correction::reload_correction_rules(&db, &correction_engine);
-                                if let Ok(Some(v)) = db.get_setting("llm.provider_url") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.provider_url = v;
-                                    }
-                                }
-                                if let Ok(Some(v)) = db.get_setting("llm.api_key") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.api_key = v;
-                                    }
-                                }
-                                if let Ok(Some(v)) = db.get_setting("llm.selected_model") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.selected_model = v;
-                                    }
-                                }
-                                if let Ok(Some(v)) = db.get_setting("llm.optimize_prompt_template") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.optimize_prompt_template = v;
-                                    }
-                                } else if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.optimize_prompt_template = v;
-                                    }
-                                }
-                                if let Ok(Some(v)) = db.get_setting("llm.translate_prompt_template") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.translate_prompt_template = v;
-                                    }
-                                }
-                                if let Ok(Some(v)) = db.get_setting("llm.auto_copy_mode") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.auto_copy_mode = match v.as_str() {
-                                            "off" => AutoCopyMode::Off,
-                                            "optimized_zh" => AutoCopyMode::OptimizedZh,
-                                            _ => AutoCopyMode::English,
-                                        };
-                                    }
-                                } else if let Ok(Some(v)) = db.get_setting("llm.auto_copy") {
-                                    { let mut s = llm_settings_state.blocking_write();
-                                        s.auto_copy_mode = if v == "false" || v == "0" {
-                                            AutoCopyMode::Off
-                                        } else {
-                                            AutoCopyMode::English
-                                        };
-                                    }
-                                }
-                                let (tx, rx) = mpsc::sync_channel::<DbEvent>(DB_EVENT_QUEUE_CAPACITY);
-                                let db_for_worker = db.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    let join = tauri::async_runtime::spawn_blocking(move || {
-                                        while let Ok(event) = rx.recv() {
-                                            match event {
-                                                DbEvent::InsertSegment { segment } => {
-                                                    debug!(
-                                                        "[db-worker] upsert segment session_id={}, segment_id={}, revision={}",
-                                                        segment.session_id, segment.segment_id, segment.revision
-                                                    );
-                                                    if let Err(err) = db_for_worker.upsert_segment(segment.clone()) {
-                                                        error!(
-                                                            "[db-worker] upsert failed session_id={}, segment_id={}, revision={}, err={}",
-                                                            segment.session_id, segment.segment_id, segment.revision, err
-                                                        );
-                                                    } else {
-                                                        debug!(
-                                                            "[db-worker] upsert ok session_id={}, segment_id={}, revision={}",
-                                                            segment.session_id, segment.segment_id, segment.revision
-                                                        );
-                                                    }
-                                                }
-                                                DbEvent::MarkOptimizeRunning { session_id, revision } => {
-                                                    debug!(
-                                                        "[db-worker] mark running session_id={}, revision={}",
-                                                        session_id, revision
-                                                    );
-                                                    let _ = db_for_worker.update_optimize_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "running",
-                                                    );
-                                                }
-                                                DbEvent::MarkSkippedBefore { session_id, revision } => {
-                                                    debug!(
-                                                        "[db-worker] mark skipped before session_id={}, revision={}",
-                                                        session_id, revision
-                                                    );
-                                                    let _ =
-                                                        db_for_worker.mark_old_revisions_skipped(&session_id, revision);
-                                                }
-                                                DbEvent::MarkSkipped { session_id, revision } => {
-                                                    debug!(
-                                                        "[db-worker] mark skipped session_id={}, revision={}",
-                                                        session_id, revision
-                                                    );
-                                                    let _ = db_for_worker.update_optimize_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "failed",
-                                                    );
-                                                    let _ = db_for_worker.update_translate_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "blocked",
-                                                    );
-                                                }
-                                                DbEvent::MarkOptimizeFailed { session_id, revision } => {
-                                                    warn!(
-                                                        "[db-worker] mark failed session_id={}, revision={}",
-                                                        session_id, revision
-                                                    );
-                                                    let _ = db_for_worker.update_optimize_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "failed",
-                                                    );
-                                                    let _ = db_for_worker.update_translate_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "blocked",
-                                                    );
-                                                }
-                                                DbEvent::MarkOptimizeSuccess { session_id, revision } => {
-                                                    let _ = db_for_worker.update_optimize_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "success",
-                                                    );
-                                                }
-                                                DbEvent::MarkTranslatePending { session_id, revision } => {
-                                                    let _ = db_for_worker.update_translate_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "pending",
-                                                    );
-                                                }
-                                                DbEvent::MarkTranslateRunning { session_id, revision } => {
-                                                    let _ = db_for_worker.update_translate_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "running",
-                                                    );
-                                                }
-                                                DbEvent::MarkTranslateFailed { session_id, revision } => {
-                                                    let _ = db_for_worker.update_translate_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "failed",
-                                                    );
-                                                }
-                                                DbEvent::SaveOptimizeResult {
-                                                    session_id,
-                                                    revision,
-                                                    text_optimized,
-                                                } => {
-                                                    let _ =
-                                                        db_for_worker.upsert_optimize_result(OptimizeResultUpsert {
-                                                            session_id,
-                                                            revision,
-                                                            text_optimized: Some(text_optimized),
-                                                            optimize_error: None,
-                                                            optimize_started_at: None,
-                                                            optimize_finished_at: None,
-                                                        });
-                                                }
-                                                DbEvent::SaveTranslateResult {
-                                                    session_id,
-                                                    revision,
-                                                    text_english,
-                                                } => {
-                                                    let _ =
-                                                        db_for_worker.upsert_translate_result(TranslateResultUpsert {
-                                                            session_id: session_id.clone(),
-                                                            revision,
-                                                            text_english: Some(text_english),
-                                                            translate_error: None,
-                                                            translate_started_at: None,
-                                                            translate_finished_at: None,
-                                                        });
-                                                    let _ = db_for_worker.update_translate_status(
-                                                        &session_id,
-                                                        revision,
-                                                        "success",
-                                                    );
-                                                }
-                                                DbEvent::CloseSession { session_id } => {
-                                                    let _ = db_for_worker.close_session(&session_id);
-                                                }
-                                            }
-                                        }
-                                    });
-                                    if let Err(err) = join.await {
-                                        error!("[db-worker] join failed: {err}");
-                                    }
-                                });
-                                {
-                                    let mut guard = db_state.blocking_lock();
-                                    *guard = Some(db);
-                                }
-                                {
-                                    let mut guard = db_writer_state.blocking_lock();
-                                    *guard = Some(tx);
-                                }
-                            }
-                            Err(err) => {
-                                error!("[db] init failed at {}: {err}", db_path.display());
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        error!("[db] cannot resolve app_data_dir: {err}");
-                    }
+                let _ = app;
+                let db_guard = db_state.blocking_lock();
+                if let Some(db) = db_guard.as_ref() {
+                    let _ = commands::correction::reload_correction_rules(db, &correction_engine);
+                } else {
+                    error!("[setup] database not initialized");
                 }
                 Ok(())
             }
