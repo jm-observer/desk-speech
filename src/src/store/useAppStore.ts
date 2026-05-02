@@ -46,7 +46,7 @@ export const useAppStore = () => {
       const mapped = rows.map(mapDbSegment).filter((seg) => seg.text_raw.trim().length > 0);
       if (mapped.length > 0) {
         setSegments(mapped);
-        setStatus('finished');
+        setStatus((prev) => (prev === 'initializing' || prev === 'idle' ? 'finished' : prev));
         return true;
       }
     } catch (err) {
@@ -86,7 +86,7 @@ export const useAppStore = () => {
       if (res.status === 1) {
         const loaded = await loadSegments();
         if (!loaded) {
-          setStatus('idle');
+          setStatus((prev) => (prev === 'initializing' ? 'idle' : prev));
         }
       } else if (res.status === 2) {
         setStatus('error');

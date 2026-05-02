@@ -132,6 +132,21 @@ function App() {
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
+  // Sync initial recording state on mount
+  useEffect(() => {
+    const sync = async () => {
+      try {
+        const state = await TauriAPI.getRecordingState();
+        if (state.recording) {
+          startPolling();
+        }
+      } catch (err) {
+        console.error("Initial sync recording state failed", err);
+      }
+    };
+    sync();
+  }, []);
+
   const startRecording = async () => {
     try {
       setIsBusy(true);

@@ -374,11 +374,43 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
 
     if let Some(r) = stream.get_result() {
         let text_raw = r.text.trim().to_string();
-        if !text_raw.is_empty()
-            && !text_raw
-                .chars()
-                .all(|c| c.is_ascii_punctuation() || c.is_ascii_whitespace())
-        {
+
+        // Filter out results that contain Japanese Hiragana or Katakana,
+        // as the model often misidentifies silence/noise as Japanese.
+        let has_japanese = text_raw.chars().any(|c| {
+            ('\u{3040}'..='\u{309f}').contains(&c) || // Hiragana
+            ('\u{30a0}'..='\u{30ff}').contains(&c) // Katakana
+        });
+
+        // Filter out results that consist only of punctuation or whitespace (including CJK punctuation).
+        let is_meaningless = text_raw.chars().all(|c| {
+            c.is_ascii_punctuation()
+                || c.is_ascii_whitespace()
+                || matches!(
+                    c,
+                    '。' | '，'
+                        | '？'
+                        | '！'
+                        | '…'
+                        | '—'
+                        | '·'
+                        | '、'
+                        | '；'
+                        | '：'
+                        | '“'
+                        | '”'
+                        | '‘'
+                        | '’'
+                        | '（'
+                        | '）'
+                        | '【'
+                        | '】'
+                        | '《'
+                        | '》'
+                )
+        });
+
+        if !text_raw.is_empty() && !has_japanese && !is_meaningless {
             let text_corrected = ctx.correction_engine.apply(&text_raw);
             let revision = ctx.next_revision.fetch_add(1, Ordering::Relaxed) as i64;
             let wall_start = *ctx.base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
@@ -680,7 +712,7 @@ pub fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
-    info!("[get_recording_state]");
+    debug!("[get_recording_state]");
     let recording = state.recording.load(Ordering::Relaxed);
     let segments = read_lock(&state.segments).clone();
     let elapsed_secs = read_lock(&state.start_instant)
