@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,7 +7,7 @@ use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use log::{debug, error, info, warn};
-use sherpa_onnx::{LinearResampler, OfflineRecognizer, VoiceActivityDetector};
+use sherpa_onnx::{LinearResampler, OfflineRecognizer, OfflineStream, VoiceActivityDetector};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::audio_buffer::SAMPLE_RATE;
@@ -113,12 +113,12 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
                 RecordingRuntime {
                     stop_signal: &stop_signal,
                     segments: &segments,
-                    next_realtime_segment_id: &next_realtime_segment_id,
-                    next_revision: &next_revision,
+                    next_realtime_segment_id: next_realtime_segment_id,
+                    next_revision: next_revision,
                     correction_engine: &correction_engine,
                     app_state: &app_state,
                     app_handle: &app,
-                    db_writer: db_writer_for_run.as_ref(),
+                    db_writer: db_writer_for_run.clone(),
                     recorded_audio: &recorded_audio,
                     anchor: &anchor,
                     selected_device: selected_device.as_deref(),
@@ -220,17 +220,17 @@ fn run_recording(
 
                     while let Some(segment) = vad.front() {
                         let recognize_ctx = RecognizeContext {
-                            segments: runtime.segments,
-                            next_realtime_segment_id: runtime.next_realtime_segment_id,
-                            next_revision: runtime.next_revision,
-                            correction_engine: runtime.correction_engine,
-                            state: runtime.app_state,
-                            app_handle: runtime.app_handle,
-                            db_writer: runtime.db_writer,
-                            base_wall: &runtime.anchor.base_wall,
+                            segments: runtime.segments.clone(),
+                            next_realtime_segment_id: runtime.next_realtime_segment_id.clone(),
+                            next_revision: runtime.next_revision.clone(),
+                            correction_engine: runtime.correction_engine.clone(),
+                            state: runtime.app_state.clone(),
+                            app_handle: runtime.app_handle.clone(),
+                            db_writer: runtime.db_writer.clone(),
+                            base_wall: runtime.anchor.base_wall.clone(),
                             audio_offset_samples: runtime.anchor.audio_offset,
                         };
-                        recognize_segment(&recognizer, &segment, &recognize_ctx);
+                        recognize_segment(&recognizer, &segment, recognize_ctx);
                         vad.pop();
                     }
                 }
@@ -253,17 +253,17 @@ fn run_recording(
     vad.flush();
     while let Some(segment) = vad.front() {
         let recognize_ctx = RecognizeContext {
-            segments: runtime.segments,
-            next_realtime_segment_id: runtime.next_realtime_segment_id,
-            next_revision: runtime.next_revision,
-            correction_engine: runtime.correction_engine,
-            state: runtime.app_state,
-            app_handle: runtime.app_handle,
-            db_writer: runtime.db_writer,
-            base_wall: &runtime.anchor.base_wall,
+            segments: runtime.segments.clone(),
+            next_realtime_segment_id: runtime.next_realtime_segment_id.clone(),
+            next_revision: runtime.next_revision.clone(),
+            correction_engine: runtime.correction_engine.clone(),
+            state: runtime.app_state.clone(),
+            app_handle: runtime.app_handle.clone(),
+            db_writer: runtime.db_writer.clone(),
+            base_wall: runtime.anchor.base_wall.clone(),
             audio_offset_samples: runtime.anchor.audio_offset,
         };
-        recognize_segment(&recognizer, &segment, &recognize_ctx);
+        recognize_segment(&recognizer, &segment, recognize_ctx);
         vad.pop();
     }
 
@@ -361,22 +361,25 @@ fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Resu
     Ok(stream)
 }
 
-fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::SpeechSegment, ctx: &RecognizeContext<'_>) {
+fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::SpeechSegment, ctx: RecognizeContext) {
     let samples = segment.samples();
     let duration = samples.len() as f32 / SAMPLE_RATE as f32;
     if duration < 0.1 {
         return;
     }
-
     let vad_start = segment.start() as f32 / SAMPLE_RATE as f32;
-    let offset_secs = ctx.audio_offset_samples as f32 / SAMPLE_RATE as f32;
-    let rel_start = offset_secs + vad_start;
-    let rel_end = rel_start + duration;
-
     let stream = recognizer.create_stream();
     stream.accept_waveform(16000, samples);
     recognizer.decode(&stream);
-
+    tokio::spawn(async move {
+        recognize_segment_task(stream, vad_start, duration, ctx).await;
+    });
+}
+async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration: f32,
+                                ctx: RecognizeContext) {
+    let offset_secs = ctx.audio_offset_samples as f32 / SAMPLE_RATE as f32;
+    let rel_start = offset_secs + vad_start;
+    let rel_end = rel_start + duration;
     if let Some(r) = stream.get_result() {
         let text_raw = r.text.trim().to_string();
 
@@ -393,7 +396,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 || c.is_ascii_whitespace()
                 || matches!(
                     c,
-                    '。' | '，'
+                    '.' | '。' | '，'
                         | '？'
                         | '！'
                         | '…'
@@ -421,8 +424,8 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
         if !text_raw.is_empty() && !has_japanese && !is_meaningless && !is_filler {
             let text_corrected = ctx.correction_engine.apply(&text_raw);
             let revision = ctx.next_revision.fetch_add(1, Ordering::Relaxed) as i64;
-            let wall_start = *ctx.base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
-            let wall_end = *ctx.base_wall + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
+            let wall_start = ctx.base_wall + chrono::Duration::milliseconds((vad_start * 1000.0) as i64);
+            let wall_end = ctx.base_wall + chrono::Duration::milliseconds(((vad_start + duration) * 1000.0) as i64);
 
             let wall_start_fmt = wall_start.format("%Y-%m-%d %H:%M:%S").to_string();
             let wall_end_fmt = wall_end.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -442,7 +445,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
             };
 
             let db_segment_id = {
-                let mut segs = write_lock(ctx.segments);
+                let mut segs = write_lock(&ctx.segments);
                 if merge_segment_in_place(&mut segs, &new_segment) {
                     segs.last().map(|s| s.segment_id).unwrap_or(new_segment.segment_id)
                 } else {
@@ -460,7 +463,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| text_corrected.clone());
 
-            if let Some(writer) = ctx.db_writer {
+            if let Some(writer) = &ctx.db_writer {
                 let event = DbEvent::InsertSegment {
                     segment: NewSegment {
                         segment_id: db_segment_id,
@@ -515,10 +518,10 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 }
             }
 
-            if let Some(writer) = ctx.db_writer {
+            if let Some(writer) = &ctx.db_writer {
                 spawn_llm_postprocess_task_v2(
                     writer.clone(),
-                    Arc::clone(ctx.state),
+                    ctx.state.clone(),
                     ctx.app_handle.clone(),
                     revision,
                     llm_input_text,

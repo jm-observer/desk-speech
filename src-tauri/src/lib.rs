@@ -149,26 +149,26 @@ pub(crate) struct RecordingAnchor {
 pub(crate) struct RecordingRuntime<'a> {
     stop_signal: &'a AtomicBool,
     segments: &'a Arc<RwLock<Vec<SegmentResult>>>,
-    next_realtime_segment_id: &'a AtomicU64,
-    next_revision: &'a AtomicU64,
+    next_realtime_segment_id: Arc<AtomicU64>,
+    next_revision: Arc<AtomicU64>,
     correction_engine: &'a CorrectionEngine,
     app_state: &'a Arc<AppState>,
     app_handle: &'a tauri::AppHandle,
-    db_writer: Option<&'a SyncSender<db_worker::DbEvent>>,
+    db_writer: Option<SyncSender<db_worker::DbEvent>>,
     recorded_audio: &'a Arc<RwLock<RollingAudioBuffer>>,
     anchor: &'a RecordingAnchor,
     selected_device: Option<&'a str>,
 }
 
-pub(crate) struct RecognizeContext<'a> {
-    segments: &'a Arc<RwLock<Vec<SegmentResult>>>,
-    next_realtime_segment_id: &'a AtomicU64,
-    next_revision: &'a AtomicU64,
-    correction_engine: &'a CorrectionEngine,
-    state: &'a Arc<AppState>,
-    app_handle: &'a tauri::AppHandle,
-    db_writer: Option<&'a SyncSender<db_worker::DbEvent>>,
-    base_wall: &'a chrono::DateTime<Local>,
+pub(crate) struct RecognizeContext {
+    segments: Arc<RwLock<Vec<SegmentResult>>>,
+    next_realtime_segment_id: Arc<AtomicU64>,
+    next_revision: Arc<AtomicU64>,
+    correction_engine: CorrectionEngine,
+    state: Arc<AppState>,
+    app_handle: tauri::AppHandle,
+    db_writer: Option<SyncSender<db_worker::DbEvent>>,
+    base_wall: chrono::DateTime<Local>,
     audio_offset_samples: u64,
 }
 
