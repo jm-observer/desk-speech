@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Connection};
+use deadpool_sqlite::rusqlite::{params, Connection};
+use std::convert::TryFrom;
 
 pub(crate) const GLOBAL_SCOPE_ID: &str = "global";
 
@@ -67,6 +68,14 @@ pub struct SegmentRow {
     pub created_at: String,
 }
 
+fn to_db_i64(value: u64) -> Result<i64> {
+    i64::try_from(value).context("u64 value exceeds sqlite i64 range")
+}
+
+fn to_u64(value: i64) -> Result<u64> {
+    u64::try_from(value).context("sqlite value is negative, cannot convert to u64")
+}
+
 pub fn ensure_global_scope(conn: &Connection, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions(id, started_at, created_at)
@@ -113,7 +122,7 @@ pub fn upsert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
         sql,
         params![
             GLOBAL_SCOPE_ID,
-            segment.segment_id,
+            to_db_i64(segment.segment_id)?,
             segment.revision,
             segment.start_sec,
             segment.end_sec,
@@ -226,9 +235,10 @@ pub fn get_last_segment(conn: &Connection) -> Result<Option<SegmentRow>> {
         .query(params![GLOBAL_SCOPE_ID])
         .context("failed to query last segment")?;
     if let Some(row) = rows.next().context("failed to read last segment row")? {
+        let segment_id = to_u64(row.get::<_, i64>(1)?).context("invalid segment_id in last segment row")?;
         Ok(Some(SegmentRow {
             id: row.get(0)?,
-            segment_id: row.get(1)?,
+            segment_id,
             revision: row.get(3)?,
             start_sec: row.get(4)?,
             end_sec: row.get(5)?,
@@ -247,25 +257,25 @@ pub fn get_last_segment(conn: &Connection) -> Result<Option<SegmentRow>> {
 }
 
 pub fn get_next_segment_id(conn: &Connection) -> Result<u64> {
-    let next_segment_id: u64 = conn
+    let next_segment_id: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(segment_id), 0) + 1 FROM asr_raw_records WHERE session_id = ?1",
             params![GLOBAL_SCOPE_ID],
             |row| row.get(0),
         )
         .context("failed to query next segment_id")?;
-    Ok(next_segment_id)
+    to_u64(next_segment_id)
 }
 
 pub fn get_next_revision(conn: &Connection) -> Result<u64> {
-    let next_revision: u64 = conn
+    let next_revision: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(revision), 0) + 1 FROM asr_raw_records WHERE session_id = ?1",
             params![GLOBAL_SCOPE_ID],
             |row| row.get(0),
         )
         .context("failed to query next revision")?;
-    Ok(next_revision)
+    to_u64(next_revision)
 }
 
 pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec<SegmentRow>> {
@@ -273,7 +283,7 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
         return Err(anyhow!("page_size must be greater than 0"));
     }
 
-    let offset = page as u64 * page_size as u64;
+    let offset = i64::from(page) * i64::from(page_size);
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
@@ -287,10 +297,21 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
         .context("failed to prepare list_segments statement")?;
 
     let mapped = stmt
-        .query_map(params![GLOBAL_SCOPE_ID, page_size, offset], |row| {
+        .query_map(params![GLOBAL_SCOPE_ID, i64::from(page_size), offset], |row| {
+            let segment_id_i64: i64 = row.get(1)?;
+            let segment_id = u64::try_from(segment_id_i64).map_err(|_| {
+                deadpool_sqlite::rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    deadpool_sqlite::rusqlite::types::Type::Integer,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "negative segment_id from sqlite",
+                    )),
+                )
+            })?;
             Ok(SegmentRow {
                 id: row.get(0)?,
-                segment_id: row.get(1)?,
+                segment_id,
                 revision: row.get(3)?,
                 start_sec: row.get(4)?,
                 end_sec: row.get(5)?,
@@ -307,7 +328,7 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
         .context("failed to query list_segments")?;
 
     let rows = mapped
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<deadpool_sqlite::rusqlite::Result<Vec<_>>>()
         .context("failed to collect segments")?;
     Ok(rows)
 }
@@ -328,10 +349,21 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
         )
         .context("failed to prepare tail_segments statement")?;
     let mapped = stmt
-        .query_map(params![GLOBAL_SCOPE_ID, after_id, limit], |row| {
+        .query_map(params![GLOBAL_SCOPE_ID, after_id, i64::from(limit)], |row| {
+            let segment_id_i64: i64 = row.get(1)?;
+            let segment_id = u64::try_from(segment_id_i64).map_err(|_| {
+                deadpool_sqlite::rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    deadpool_sqlite::rusqlite::types::Type::Integer,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "negative segment_id from sqlite",
+                    )),
+                )
+            })?;
             Ok(SegmentRow {
                 id: row.get(0)?,
-                segment_id: row.get(1)?,
+                segment_id,
                 revision: row.get(3)?,
                 start_sec: row.get(4)?,
                 end_sec: row.get(5)?,
@@ -348,7 +380,7 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
         .context("failed to query tail_segments")?;
 
     let rows = mapped
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<deadpool_sqlite::rusqlite::Result<Vec<_>>>()
         .context("failed to collect tail segments")?;
     Ok(rows)
 }
@@ -412,7 +444,7 @@ pub fn list_rules(conn: &Connection) -> Result<Vec<CorrectionRule>> {
         .context("failed to query rules")?;
 
     let rows = mapped
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<deadpool_sqlite::rusqlite::Result<Vec<_>>>()
         .context("failed to collect rules")?;
     Ok(rows)
 }

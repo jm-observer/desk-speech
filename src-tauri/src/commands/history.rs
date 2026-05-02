@@ -19,13 +19,13 @@ pub struct DbSegmentDto {
     pub created_at: String,
 }
 
-pub fn list_segments(db: &SpeechDatabase, page: u32, page_size: u32) -> Result<Vec<DbSegmentDto>, String> {
-    let rows = db.list_segments(page, page_size).map_err(|e| e.to_string())?;
+pub async fn list_segments(db: &SpeechDatabase, page: u32, page_size: u32) -> Result<Vec<DbSegmentDto>, String> {
+    let rows = db.list_segments(page, page_size).await.map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(to_segment_dto).collect())
 }
 
-pub fn tail_segments(db: &SpeechDatabase, after_id: i64, limit: u32) -> Result<Vec<DbSegmentDto>, String> {
-    let rows = db.tail_segments(after_id, limit).map_err(|e| e.to_string())?;
+pub async fn tail_segments(db: &SpeechDatabase, after_id: i64, limit: u32) -> Result<Vec<DbSegmentDto>, String> {
+    let rows = db.tail_segments(after_id, limit).await.map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(to_segment_dto).collect())
 }
 

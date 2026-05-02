@@ -4,15 +4,17 @@ use crate::AppState;
 use log::info;
 
 #[tauri::command]
-pub fn list_correction_rules(state: tauri::State<'_, AppState>) -> Result<Vec<CorrectionRuleDto>, String> {
+pub async fn list_correction_rules(state: tauri::State<'_, AppState>) -> Result<Vec<CorrectionRuleDto>, String> {
     info!("[list_correction_rules]");
-    let db = mutex_lock(&state.db);
-    let db = db.as_ref().ok_or("Database not initialized")?;
-    crate::commands::correction::list_correction_rules(db)
+    let db = {
+        let guard = mutex_lock(&state.db);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
+    };
+    crate::commands::correction::list_correction_rules(&db).await
 }
 
 #[tauri::command]
-pub fn create_correction_rule(
+pub async fn create_correction_rule(
     source: String,
     target: String,
     priority: i32,
@@ -23,13 +25,23 @@ pub fn create_correction_rule(
         "[create_correction_rule] source={}, target={}, priority={}, enabled={}",
         source, target, priority, enabled
     );
-    let db = mutex_lock(&state.db);
-    let db = db.as_ref().ok_or("Database not initialized")?;
-    crate::commands::correction::create_correction_rule(db, &state.correction_engine, source, target, priority, enabled)
+    let db = {
+        let guard = mutex_lock(&state.db);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
+    };
+    crate::commands::correction::create_correction_rule(
+        &db,
+        &state.correction_engine,
+        source,
+        target,
+        priority,
+        enabled,
+    )
+    .await
 }
 
 #[tauri::command]
-pub fn update_correction_rule(
+pub async fn update_correction_rule(
     id: i64,
     source: String,
     target: String,
@@ -41,10 +53,12 @@ pub fn update_correction_rule(
         "[update_correction_rule] id={}, source={}, target={}, priority={}, enabled={}",
         id, source, target, priority, enabled
     );
-    let db = mutex_lock(&state.db);
-    let db = db.as_ref().ok_or("Database not initialized")?;
+    let db = {
+        let guard = mutex_lock(&state.db);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
+    };
     crate::commands::correction::update_correction_rule(
-        db,
+        &db,
         &state.correction_engine,
         id,
         source,
@@ -52,20 +66,25 @@ pub fn update_correction_rule(
         priority,
         enabled,
     )
+    .await
 }
 
 #[tauri::command]
-pub fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn delete_correction_rule(id: i64, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[delete_correction_rule] id={}", id);
-    let db = mutex_lock(&state.db);
-    let db = db.as_ref().ok_or("Database not initialized")?;
-    crate::commands::correction::delete_correction_rule(db, &state.correction_engine, id)
+    let db = {
+        let guard = mutex_lock(&state.db);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
+    };
+    crate::commands::correction::delete_correction_rule(&db, &state.correction_engine, id).await
 }
 
 #[tauri::command]
-pub fn reload_correction_rules(state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn reload_correction_rules(state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[reload_correction_rules]");
-    let db = mutex_lock(&state.db);
-    let db = db.as_ref().ok_or("Database not initialized")?;
-    crate::commands::correction::reload_correction_rules(db, &state.correction_engine)
+    let db = {
+        let guard = mutex_lock(&state.db);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
+    };
+    crate::commands::correction::reload_correction_rules(&db, &state.correction_engine).await
 }

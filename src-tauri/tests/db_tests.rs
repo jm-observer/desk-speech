@@ -11,11 +11,11 @@ fn temp_db_path(name: &str) -> std::path::PathBuf {
     path
 }
 
-#[test]
-fn initializes_and_migrates_schema() {
+#[tokio::test]
+async fn initializes_and_migrates_schema() {
     let path = temp_db_path("db-migrate");
-    let db = SpeechDatabase::init(&path).unwrap();
-    db.ensure_global_scope().unwrap();
+    let db = SpeechDatabase::init(&path).await.unwrap();
+    db.ensure_global_scope().await.unwrap();
 
     db.upsert_segment(NewSegment {
         segment_id: 1,
@@ -26,19 +26,20 @@ fn initializes_and_migrates_schema() {
         wall_end: "2026-04-29 10:00:01".to_string(),
         text_raw: "hello".to_string(),
     })
+    .await
     .unwrap();
 
-    let segments = db.list_segments(0, 10).unwrap();
+    let segments = db.list_segments(0, 10).await.unwrap();
     assert_eq!(segments.len(), 1);
 
     let _ = std::fs::remove_file(path);
 }
 
-#[test]
-fn supports_rule_version_and_tail_query() {
+#[tokio::test]
+async fn supports_rule_version_and_tail_query() {
     let path = temp_db_path("db-tail");
-    let db = SpeechDatabase::init(&path).unwrap();
-    db.ensure_global_scope().unwrap();
+    let db = SpeechDatabase::init(&path).await.unwrap();
+    db.ensure_global_scope().await.unwrap();
 
     for i in 0..3 {
         db.upsert_segment(NewSegment {
@@ -50,6 +51,7 @@ fn supports_rule_version_and_tail_query() {
             wall_end: format!("2026-04-29 10:00:0{}", i + 1),
             text_raw: format!("raw-{i}"),
         })
+        .await
         .unwrap();
     }
 
@@ -59,11 +61,12 @@ fn supports_rule_version_and_tail_query() {
         enabled: true,
         priority: 1,
     })
+    .await
     .unwrap();
 
-    let first_ver = db.bump_rule_version("v1").unwrap();
-    let latest = db.get_latest_rule_version().unwrap();
-    let tails = db.tail_segments(1, 10).unwrap();
+    let first_ver = db.bump_rule_version("v1".to_string()).await.unwrap();
+    let latest = db.get_latest_rule_version().await.unwrap();
+    let tails = db.tail_segments(1, 10).await.unwrap();
 
     assert_eq!(first_ver, 1);
     assert_eq!(latest.unwrap().0, 1);
@@ -72,11 +75,11 @@ fn supports_rule_version_and_tail_query() {
     let _ = std::fs::remove_file(path);
 }
 
-#[test]
-fn split_stage_status_and_latest_only_constraints_hold() {
+#[tokio::test]
+async fn split_stage_status_and_latest_only_constraints_hold() {
     let path = temp_db_path("db-split-stages");
-    let db = SpeechDatabase::init(&path).unwrap();
-    db.ensure_global_scope().unwrap();
+    let db = SpeechDatabase::init(&path).await.unwrap();
+    db.ensure_global_scope().await.unwrap();
 
     db.upsert_segment(NewSegment {
         segment_id: 1,
@@ -87,6 +90,7 @@ fn split_stage_status_and_latest_only_constraints_hold() {
         wall_end: "2026-05-01 10:00:01".to_string(),
         text_raw: "raw-1".to_string(),
     })
+    .await
     .unwrap();
     db.upsert_segment(NewSegment {
         segment_id: 2,
@@ -97,15 +101,16 @@ fn split_stage_status_and_latest_only_constraints_hold() {
         wall_end: "2026-05-01 10:00:02".to_string(),
         text_raw: "raw-2".to_string(),
     })
+    .await
     .unwrap();
 
-    db.update_optimize_status(1, "running").unwrap();
-    db.update_optimize_status(2, "running").unwrap();
-    db.mark_old_revisions_skipped(2).unwrap();
-    db.update_optimize_status(2, "success").unwrap();
-    db.update_translate_status(2, "failed").unwrap();
+    db.update_optimize_status(1, "running".to_string()).await.unwrap();
+    db.update_optimize_status(2, "running".to_string()).await.unwrap();
+    db.mark_old_revisions_skipped(2).await.unwrap();
+    db.update_optimize_status(2, "success".to_string()).await.unwrap();
+    db.update_translate_status(2, "failed".to_string()).await.unwrap();
 
-    let segments = db.list_segments(0, 10).unwrap();
+    let segments = db.list_segments(0, 10).await.unwrap();
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0].revision, 1);
     assert_eq!(segments[0].optimize_status, "failed");

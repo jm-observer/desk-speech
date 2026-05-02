@@ -7,8 +7,8 @@ pub fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSetting
 }
 
 #[tauri::command]
-pub fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    crate::settings::apply_settings(new_settings, state)
+pub async fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    crate::settings::apply_settings(new_settings, state).await
 }
 
 #[tauri::command]

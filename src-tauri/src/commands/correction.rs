@@ -13,12 +13,12 @@ pub struct CorrectionRuleDto {
     pub updated_at: String,
 }
 
-pub fn list_correction_rules(db: &SpeechDatabase) -> Result<Vec<CorrectionRuleDto>, String> {
-    let rows = db.list_rules().map_err(|e| e.to_string())?;
+pub async fn list_correction_rules(db: &SpeechDatabase) -> Result<Vec<CorrectionRuleDto>, String> {
+    let rows = db.list_rules().await.map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(to_dto).collect())
 }
 
-pub fn create_correction_rule(
+pub async fn create_correction_rule(
     db: &SpeechDatabase,
     engine: &CorrectionEngine,
     source: String,
@@ -33,11 +33,12 @@ pub fn create_correction_rule(
         priority,
         enabled,
     })
+    .await
     .map_err(|e| e.to_string())?;
-    reload_correction_rules(db, engine)
+    reload_correction_rules(db, engine).await
 }
 
-pub fn update_correction_rule(
+pub async fn update_correction_rule(
     db: &SpeechDatabase,
     engine: &CorrectionEngine,
     id: i64,
@@ -56,21 +57,22 @@ pub fn update_correction_rule(
             enabled,
         },
     )
+    .await
     .map_err(|e| e.to_string())?;
-    reload_correction_rules(db, engine)
+    reload_correction_rules(db, engine).await
 }
 
-pub fn delete_correction_rule(db: &SpeechDatabase, engine: &CorrectionEngine, id: i64) -> Result<(), String> {
-    db.delete_rule(id).map_err(|e| e.to_string())?;
-    reload_correction_rules(db, engine)
+pub async fn delete_correction_rule(db: &SpeechDatabase, engine: &CorrectionEngine, id: i64) -> Result<(), String> {
+    db.delete_rule(id).await.map_err(|e| e.to_string())?;
+    reload_correction_rules(db, engine).await
 }
 
-pub fn reload_correction_rules(db: &SpeechDatabase, engine: &CorrectionEngine) -> Result<(), String> {
-    let rules = db.list_rules().map_err(|e| e.to_string())?;
+pub async fn reload_correction_rules(db: &SpeechDatabase, engine: &CorrectionEngine) -> Result<(), String> {
+    let rules = db.list_rules().await.map_err(|e| e.to_string())?;
     let checksum = engine.reload(rules.clone()).map_err(|e| e.to_string())?;
-    let latest = db.get_latest_rule_version().map_err(|e| e.to_string())?;
+    let latest = db.get_latest_rule_version().await.map_err(|e| e.to_string())?;
     if latest.as_ref().map(|(_, c)| c != &checksum).unwrap_or(true) {
-        db.bump_rule_version(&checksum).map_err(|e| e.to_string())?;
+        db.bump_rule_version(checksum).await.map_err(|e| e.to_string())?;
     }
     Ok(())
 }

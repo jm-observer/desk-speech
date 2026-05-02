@@ -20,7 +20,7 @@ tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 sherpa-onnx = { version = "1.13.0", default-features = false }
 anyhow = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+deadpool-sqlite = { version = "0.13.0", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 # sherpa-onnx = { path = "../../../sherpa-onnx/rust/sherpa-onnx", default-features = false }
 

@@ -26,86 +26,85 @@ pub(crate) enum DbEvent {
 pub(crate) fn start_db_worker(db: db::SpeechDatabase) -> SyncSender<DbEvent> {
     let (tx, rx) = mpsc::sync_channel::<DbEvent>(DB_EVENT_QUEUE_CAPACITY);
     tauri::async_runtime::spawn(async move {
-        let join = tauri::async_runtime::spawn_blocking(move || {
-            while let Ok(event) = rx.recv() {
-                match event {
-                    DbEvent::InsertSegment { segment } => {
+        while let Ok(event) = rx.recv() {
+            match event {
+                DbEvent::InsertSegment { segment } => {
+                    debug!(
+                        "[db-worker] upsert segment segment_id={}, revision={}",
+                        segment.segment_id, segment.revision
+                    );
+                    if let Err(err) = db.upsert_segment(segment.clone()).await {
+                        error!(
+                            "[db-worker] upsert failed segment_id={}, revision={}, err={}",
+                            segment.segment_id, segment.revision, err
+                        );
+                    } else {
                         debug!(
-                            "[db-worker] upsert segment segment_id={}, revision={}",
+                            "[db-worker] upsert ok segment_id={}, revision={}",
                             segment.segment_id, segment.revision
                         );
-                        if let Err(err) = db.upsert_segment(segment.clone()) {
-                            error!(
-                                "[db-worker] upsert failed segment_id={}, revision={}, err={}",
-                                segment.segment_id, segment.revision, err
-                            );
-                        } else {
-                            debug!(
-                                "[db-worker] upsert ok segment_id={}, revision={}",
-                                segment.segment_id, segment.revision
-                            );
-                        }
                     }
-                    DbEvent::MarkOptimizeRunning { revision } => {
-                        debug!("[db-worker] mark running revision={}", revision);
-                        let _ = db.update_optimize_status(revision, "running");
-                    }
-                    DbEvent::MarkSkippedBefore { revision } => {
-                        debug!("[db-worker] mark skipped before revision={}", revision);
-                        let _ = db.mark_old_revisions_skipped(revision);
-                    }
-                    DbEvent::MarkSkipped { revision } => {
-                        debug!("[db-worker] mark skipped revision={}", revision);
-                        let _ = db.update_optimize_status(revision, "failed");
-                        let _ = db.update_translate_status(revision, "blocked");
-                    }
-                    DbEvent::MarkOptimizeFailed { revision } => {
-                        warn!("[db-worker] mark failed revision={}", revision);
-                        let _ = db.update_optimize_status(revision, "failed");
-                        let _ = db.update_translate_status(revision, "blocked");
-                    }
-                    DbEvent::MarkOptimizeSuccess { revision } => {
-                        let _ = db.update_optimize_status(revision, "success");
-                    }
-                    DbEvent::MarkTranslatePending { revision } => {
-                        let _ = db.update_translate_status(revision, "pending");
-                    }
-                    DbEvent::MarkTranslateRunning { revision } => {
-                        let _ = db.update_translate_status(revision, "running");
-                    }
-                    DbEvent::MarkTranslateFailed { revision } => {
-                        let _ = db.update_translate_status(revision, "failed");
-                    }
-                    DbEvent::SaveOptimizeResult {
-                        revision,
-                        text_optimized,
-                    } => {
-                        let _ = db.upsert_optimize_result(OptimizeResultUpsert {
+                }
+                DbEvent::MarkOptimizeRunning { revision } => {
+                    debug!("[db-worker] mark running revision={}", revision);
+                    let _ = db.update_optimize_status(revision, "running".to_string()).await;
+                }
+                DbEvent::MarkSkippedBefore { revision } => {
+                    debug!("[db-worker] mark skipped before revision={}", revision);
+                    let _ = db.mark_old_revisions_skipped(revision).await;
+                }
+                DbEvent::MarkSkipped { revision } => {
+                    debug!("[db-worker] mark skipped revision={}", revision);
+                    let _ = db.update_optimize_status(revision, "failed".to_string()).await;
+                    let _ = db.update_translate_status(revision, "blocked".to_string()).await;
+                }
+                DbEvent::MarkOptimizeFailed { revision } => {
+                    warn!("[db-worker] mark failed revision={}", revision);
+                    let _ = db.update_optimize_status(revision, "failed".to_string()).await;
+                    let _ = db.update_translate_status(revision, "blocked".to_string()).await;
+                }
+                DbEvent::MarkOptimizeSuccess { revision } => {
+                    let _ = db.update_optimize_status(revision, "success".to_string()).await;
+                }
+                DbEvent::MarkTranslatePending { revision } => {
+                    let _ = db.update_translate_status(revision, "pending".to_string()).await;
+                }
+                DbEvent::MarkTranslateRunning { revision } => {
+                    let _ = db.update_translate_status(revision, "running".to_string()).await;
+                }
+                DbEvent::MarkTranslateFailed { revision } => {
+                    let _ = db.update_translate_status(revision, "failed".to_string()).await;
+                }
+                DbEvent::SaveOptimizeResult {
+                    revision,
+                    text_optimized,
+                } => {
+                    let _ = db
+                        .upsert_optimize_result(OptimizeResultUpsert {
                             revision,
                             text_optimized: Some(text_optimized),
                             optimize_error: None,
                             optimize_started_at: None,
                             optimize_finished_at: None,
-                        });
-                    }
-                    DbEvent::SaveTranslateResult { revision, text_english } => {
-                        let _ = db.upsert_translate_result(TranslateResultUpsert {
+                        })
+                        .await;
+                }
+                DbEvent::SaveTranslateResult { revision, text_english } => {
+                    let _ = db
+                        .upsert_translate_result(TranslateResultUpsert {
                             revision,
                             text_english: Some(text_english),
                             translate_error: None,
                             translate_started_at: None,
                             translate_finished_at: None,
-                        });
-                        let _ = db.update_translate_status(revision, "success");
-                    }
-                    DbEvent::TouchGlobalScopeEnd => {
-                        let _ = db.touch_global_scope_end();
-                    }
+                        })
+                        .await;
+                    let _ = db.update_translate_status(revision, "success".to_string()).await;
+                }
+                DbEvent::TouchGlobalScopeEnd => {
+                    let _ = db.touch_global_scope_end().await;
                 }
             }
-        });
-        if let Err(err) = join.await {
-            error!("[db-worker] join failed: {err}");
         }
     });
     tx

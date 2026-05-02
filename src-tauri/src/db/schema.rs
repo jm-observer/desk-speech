@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use deadpool_sqlite::rusqlite::Connection;
 
 pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     let sql_0001 = include_str!("../../migrations/0001_init.sql");

@@ -93,7 +93,10 @@ fn validate_settings(s: &VadSettings) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) async fn apply_settings(
+    new_settings: CombinedSettings,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     info!("[apply_settings]");
     let settings_arc = Arc::clone(&state.settings);
     let llm_settings_arc = Arc::clone(&state.llm_settings);
@@ -139,33 +142,45 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
     *write_lock(&llm_settings_arc) = new_llm_settings.clone();
     *write_lock(&llm_models_cache_arc) = None;
 
+    let db = {
+        let guard = mutex_lock(&db_arc);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
+    };
     {
-        let db = mutex_lock(&db_arc);
-        let db = db.as_ref().ok_or("Database not initialized")?;
-        db.upsert_setting("llm.provider_url", &new_llm_settings.provider_url)
+        db.upsert_setting("llm.provider_url".to_string(), new_llm_settings.provider_url.clone())
+            .await
             .map_err(|e| e.to_string())?;
-        db.upsert_setting("llm.api_key", &new_llm_settings.api_key)
-            .map_err(|e| e.to_string())?;
-        db.upsert_setting("llm.selected_model", &new_llm_settings.selected_model)
+        db.upsert_setting("llm.api_key".to_string(), new_llm_settings.api_key.clone())
+            .await
             .map_err(|e| e.to_string())?;
         db.upsert_setting(
-            "llm.optimize_prompt_template",
-            &new_llm_settings.optimize_prompt_template,
+            "llm.selected_model".to_string(),
+            new_llm_settings.selected_model.clone(),
         )
+        .await
         .map_err(|e| e.to_string())?;
         db.upsert_setting(
-            "llm.translate_prompt_template",
-            &new_llm_settings.translate_prompt_template,
+            "llm.optimize_prompt_template".to_string(),
+            new_llm_settings.optimize_prompt_template.clone(),
         )
+        .await
         .map_err(|e| e.to_string())?;
         db.upsert_setting(
-            "llm.auto_copy_mode",
+            "llm.translate_prompt_template".to_string(),
+            new_llm_settings.translate_prompt_template.clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        db.upsert_setting(
+            "llm.auto_copy_mode".to_string(),
             match new_llm_settings.auto_copy_mode {
                 AutoCopyMode::Off => "off",
                 AutoCopyMode::English => "english",
                 AutoCopyMode::OptimizedZh => "optimized_zh",
-            },
+            }
+            .to_string(),
         )
+        .await
         .map_err(|e| e.to_string())?;
     }
 
@@ -235,33 +250,33 @@ pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result
     Ok(ModelListResponse { models: fetched })
 }
 
-pub(crate) fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSettings {
+pub(crate) async fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSettings {
     let mut settings = LlmSettings::default();
 
-    if let Ok(Some(v)) = db.get_setting("llm.provider_url") {
+    if let Ok(Some(v)) = db.get_setting("llm.provider_url".to_string()).await {
         settings.provider_url = v;
     }
-    if let Ok(Some(v)) = db.get_setting("llm.api_key") {
+    if let Ok(Some(v)) = db.get_setting("llm.api_key".to_string()).await {
         settings.api_key = v;
     }
-    if let Ok(Some(v)) = db.get_setting("llm.selected_model") {
+    if let Ok(Some(v)) = db.get_setting("llm.selected_model".to_string()).await {
         settings.selected_model = v;
     }
-    if let Ok(Some(v)) = db.get_setting("llm.optimize_prompt_template") {
+    if let Ok(Some(v)) = db.get_setting("llm.optimize_prompt_template".to_string()).await {
         settings.optimize_prompt_template = v;
-    } else if let Ok(Some(v)) = db.get_setting("llm.prompt_template") {
+    } else if let Ok(Some(v)) = db.get_setting("llm.prompt_template".to_string()).await {
         settings.optimize_prompt_template = v;
     }
-    if let Ok(Some(v)) = db.get_setting("llm.translate_prompt_template") {
+    if let Ok(Some(v)) = db.get_setting("llm.translate_prompt_template".to_string()).await {
         settings.translate_prompt_template = v;
     }
-    if let Ok(Some(v)) = db.get_setting("llm.auto_copy_mode") {
+    if let Ok(Some(v)) = db.get_setting("llm.auto_copy_mode".to_string()).await {
         settings.auto_copy_mode = match v.as_str() {
             "off" => AutoCopyMode::Off,
             "optimized_zh" => AutoCopyMode::OptimizedZh,
             _ => AutoCopyMode::English,
         };
-    } else if let Ok(Some(v)) = db.get_setting("llm.auto_copy") {
+    } else if let Ok(Some(v)) = db.get_setting("llm.auto_copy".to_string()).await {
         settings.auto_copy_mode = if v == "false" || v == "0" {
             AutoCopyMode::Off
         } else {

@@ -368,7 +368,7 @@ pub fn run() {
         error!("[db] cannot create parent dir {}: {err}", workspace.display());
         return;
     }
-    let db = match db::SpeechDatabase::init(&db_path) {
+    let db = match tauri::async_runtime::block_on(db::SpeechDatabase::init(&db_path)) {
         Ok(db) => db,
         Err(err) => {
             error!("[db] init failed at {}: {err}", db_path.display());
@@ -376,15 +376,15 @@ pub fn run() {
         }
     };
 
-    let llm_settings = settings::load_llm_settings_from_db(&db);
-    let next_segment_id = match db.get_next_segment_id() {
+    let llm_settings = tauri::async_runtime::block_on(settings::load_llm_settings_from_db(&db));
+    let next_segment_id = match tauri::async_runtime::block_on(db.get_next_segment_id()) {
         Ok(next_segment_id) => next_segment_id,
         Err(err) => {
             error!("[db] query next segment_id failed: {err}");
             return;
         }
     };
-    let next_revision = match db.get_next_revision() {
+    let next_revision = match tauri::async_runtime::block_on(db.get_next_revision()) {
         Ok(next_revision) => next_revision,
         Err(err) => {
             error!("[db] query next revision failed: {err}");
@@ -396,7 +396,10 @@ pub fn run() {
     {
         let db_guard = mutex_lock(&state.db);
         if let Some(db) = db_guard.as_ref() {
-            let _ = commands::correction::reload_correction_rules(db, &state.correction_engine);
+            let _ = tauri::async_runtime::block_on(commands::correction::reload_correction_rules(
+                db,
+                &state.correction_engine,
+            ));
         }
     }
 
@@ -493,7 +496,10 @@ pub fn run() {
 
                 let db_guard = mutex_lock(&db_state);
                 if let Some(db) = db_guard.as_ref() {
-                    let _ = commands::correction::reload_correction_rules(db, &correction_engine);
+                    let _ = tauri::async_runtime::block_on(commands::correction::reload_correction_rules(
+                        db,
+                        &correction_engine,
+                    ));
                 } else {
                     error!("[setup] database not initialized");
                 }

@@ -13,7 +13,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use crate::audio_buffer::SAMPLE_RATE;
 use crate::db::repository::NewSegment;
 use crate::db_worker::DbEvent;
-use crate::llm_client::{list_models as llm_list_models, optimize_text, translate_text};
+use crate::llm_client::{optimize_text, translate_text};
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::{
     merge_segment_in_place, mutex_lock, read_lock, update_segment_llm_state, write_lock, AppState, RecognizeContext,
@@ -21,7 +21,7 @@ use crate::{
 };
 
 #[tauri::command]
-pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[start_recording]");
     if state.recording.swap(true, Ordering::SeqCst) {
         return Err("Already recording".to_string());
@@ -57,11 +57,11 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
 
     info!("[start_recording] starting at {now}");
 
-    {
-        let db_guard = mutex_lock(&state.db);
-        let db = db_guard.as_ref().ok_or("Database not initialized")?;
-        db.ensure_global_scope().map_err(|e| e.to_string())?
+    let db = {
+        let guard = mutex_lock(&state.db);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
     };
+    db.ensure_global_scope().await.map_err(|e| e.to_string())?;
     let stop_signal = Arc::clone(&state.stop_signal);
     let recording = Arc::clone(&state.recording);
     let segments = Arc::clone(&state.segments);
@@ -492,7 +492,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                 {
                     let db_guard = mutex_lock(&ctx.state.db);
                     if let Some(db) = db_guard.as_ref() {
-                        let result = db.upsert_segment(NewSegment {
+                        let result = tauri::async_runtime::block_on(db.upsert_segment(NewSegment {
                             segment_id: db_segment_id,
                             revision,
                             start_sec: rel_start,
@@ -500,7 +500,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
                             wall_start: wall_start_fmt.clone(),
                             wall_end: wall_end_fmt.clone(),
                             text_raw: text_raw.clone(),
-                        });
+                        }));
                         match result {
                             Ok(()) => info!(
                                 "[db-direct] upsert ok segment_id={}, revision={}",
@@ -548,43 +548,46 @@ fn spawn_llm_postprocess_task_v2(
         let settings = read_lock(&state.llm_settings).clone();
 
         if settings.selected_model.trim().is_empty() {
-            match llm_list_models(&settings).await {
-                Ok(models) => {
-                    if let Some(first) = models.into_iter().find(|m| !m.trim().is_empty()) {
-                        warn!(
-                            "[llm] selected_model is empty, fallback to first model={}, revision={}",
-                            first, revision
-                        );
-                        let mut fallback_settings = settings.clone();
-                        fallback_settings.selected_model = first;
-                        perform_postprocess_and_copy(
-                            &writer,
-                            &state,
-                            &app_handle,
-                            revision,
-                            &llm_input_text,
-                            fallback_settings,
-                        )
-                        .await;
-                        return;
-                    } else {
-                        warn!("[llm] skip due to empty model list, revision={}", revision);
-                        update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-                        let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
-                        return;
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        "[llm] skip due to empty model and list_models failed, revision={}, err={}",
-                        revision, err
-                    );
-                    update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-                    let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
-                    return;
-                }
-            }
+            error!("");
         }
+        // if settings.selected_model.trim().is_empty() {
+        //     match llm_list_models(&settings).await {
+        //         Ok(models) => {
+        //             if let Some(first) = models.into_iter().find(|m| !m.trim().is_empty()) {
+        //                 warn!(
+        //                     "[llm] selected_model is empty, fallback to first model={}, revision={}",
+        //                     first, revision
+        //                 );
+        //                 let mut fallback_settings = settings.clone();
+        //                 fallback_settings.selected_model = first;
+        //                 perform_postprocess_and_copy(
+        //                     &writer,
+        //                     &state,
+        //                     &app_handle,
+        //                     revision,
+        //                     &llm_input_text,
+        //                     fallback_settings,
+        //                 )
+        //                 .await;
+        //                 return;
+        //             } else {
+        //                 warn!("[llm] skip due to empty model list, revision={}", revision);
+        //                 update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+        //                 let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
+        //                 return;
+        //             }
+        //         }
+        //         Err(err) => {
+        //             warn!(
+        //                 "[llm] skip due to empty model and list_models failed, revision={}, err={}",
+        //                 revision, err
+        //             );
+        //             update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+        //             let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
+        //             return;
+        //         }
+        //     }
+        // }
 
         perform_postprocess_and_copy(&writer, &state, &app_handle, revision, &llm_input_text, settings).await;
     });
