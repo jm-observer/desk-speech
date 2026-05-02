@@ -395,22 +395,22 @@ pub fn run() {
 
     tauri::async_runtime::spawn(async move {
         info!("[init] starting model initialization...");
-        let settings = init_settings.blocking_read().clone();
+        let settings = init_settings.read().await.clone();
         let join = tauri::async_runtime::spawn_blocking(move || build_models(&settings));
         match join.await {
             Ok(Ok((rec, vad, threads))) => {
                 info!("[init] models ready, num_threads={threads}");
                 {
-                    let mut r = init_recognizer.blocking_write();
+                    let mut r = init_recognizer.write().await;
                     *r = Some(rec);
                 }
                 {
-                    let mut v = init_vad.blocking_write();
+                    let mut v = init_vad.write().await;
                     *v = Some(vad);
                 }
                 init_num_threads.store(threads, Ordering::Relaxed);
                 {
-                    let mut s = init_settings.blocking_write();
+                    let mut s = init_settings.write().await;
                     s.num_threads = threads as i32;
                 }
                 init_status.store(1, Ordering::Relaxed);
@@ -418,7 +418,7 @@ pub fn run() {
             Ok(Err(err)) => {
                 error!("[init] model initialization failed: {err}");
                 {
-                    let mut init_err = init_error.blocking_write();
+                    let mut init_err = init_error.write().await;
                     *init_err = err;
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -426,7 +426,7 @@ pub fn run() {
             Err(err) => {
                 error!("[init] join failed: {err}");
                 {
-                    let mut init_err = init_error.blocking_write();
+                    let mut init_err = init_error.write().await;
                     *init_err = "Internal error: init task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);

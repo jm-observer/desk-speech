@@ -130,11 +130,11 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
         match join.await {
             Ok(Ok((rec, v))) => {
                 {
-                    let mut r = recognizer_arc.blocking_write();
+                    let mut r = recognizer_arc.write().await;
                     *r = Some(rec);
                 }
                 {
-                    let mut va = vad_arc.blocking_write();
+                    let mut va = vad_arc.write().await;
                     *va = Some(v);
                 }
             }
@@ -153,7 +153,7 @@ pub fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>)
             });
         }
         {
-            let mut guard = current_session_id.blocking_write();
+            let mut guard = current_session_id.write().await;
             *guard = None;
         }
         info!("[recording task] stopped");
@@ -530,7 +530,7 @@ fn spawn_llm_postprocess_task_v2(
             revision,
         });
 
-        let settings = state.llm_settings.blocking_read().clone();
+        let settings = state.llm_settings.read().await.clone();
 
         if settings.selected_model.trim().is_empty() {
             match llm_list_models(&settings).await {

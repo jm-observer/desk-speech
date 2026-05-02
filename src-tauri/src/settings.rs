@@ -175,11 +175,11 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
             Ok(Ok((rec, vad, threads))) => {
                 info!("[apply_settings] models rebuilt, num_threads={threads}");
                 {
-                    let mut r = recognizer_arc.blocking_write();
+                    let mut r = recognizer_arc.write().await;
                     *r = Some(rec);
                 }
                 {
-                    let mut v = vad_arc.blocking_write();
+                    let mut v = vad_arc.write().await;
                     *v = Some(vad);
                 }
                 init_num_threads.store(threads, Ordering::Relaxed);
@@ -188,7 +188,7 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
             Ok(Err(err)) => {
                 error!("[apply_settings] rebuild failed: {err}");
                 {
-                    let mut init_err = init_error.blocking_write();
+                    let mut init_err = init_error.write().await;
                     *init_err = err;
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -196,7 +196,7 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
             Err(err) => {
                 error!("[apply_settings] join failed: {err}");
                 {
-                    let mut init_err = init_error.blocking_write();
+                    let mut init_err = init_error.write().await;
                     *init_err = "Internal error: settings task join failed".to_string();
                 }
                 init_status.store(2, Ordering::Relaxed);
@@ -209,10 +209,10 @@ pub(crate) fn apply_settings(new_settings: CombinedSettings, state: tauri::State
 
 pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result<ModelListResponse, String> {
     info!("[list_llm_models]");
-    let settings = state.llm_settings.blocking_write().clone();
+    let settings = state.llm_settings.read().await.clone();
     validate_llm_settings(&settings)?;
 
-    if let Some(cache) = state.llm_models_cache.blocking_write().as_ref() {
+    if let Some(cache) = state.llm_models_cache.read().await.as_ref() {
         if model_cache_valid(cache) {
             return Ok(ModelListResponse {
                 models: cache.models.clone(),
@@ -221,7 +221,7 @@ pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result
     }
 
     let fetched = llm_list_models(&settings).await?;
-    *state.llm_models_cache.blocking_write() = Some(CachedModels {
+    *state.llm_models_cache.write().await = Some(CachedModels {
         fetched_at: Instant::now(),
         models: fetched.clone(),
     });
