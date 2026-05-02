@@ -1,6 +1,7 @@
 use crate::commands::history::DbSegmentDto;
 use crate::commands::history::DbSessionDto;
 use crate::AppState;
+use log::info;
 
 #[tauri::command]
 pub fn list_sessions(
@@ -8,7 +9,10 @@ pub fn list_sessions(
     page_size: u32,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<DbSessionDto>, String> {
-    crate::list_sessions(page, page_size, state)
+    info!("[list_sessions] page={}, page_size={}", page, page_size);
+    let db = state.db.blocking_lock();
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    crate::commands::history::list_sessions(db, page, page_size)
 }
 
 #[tauri::command]
@@ -18,7 +22,13 @@ pub fn list_session_segments(
     page_size: u32,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<DbSegmentDto>, String> {
-    crate::list_session_segments(session_id, page, page_size, state)
+    info!(
+        "[list_session_segments] session_id={}, page={}, page_size={}",
+        session_id, page, page_size
+    );
+    let db = state.db.blocking_lock();
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    crate::commands::history::list_session_segments(db, &session_id, page, page_size)
 }
 
 #[tauri::command]
@@ -28,5 +38,11 @@ pub fn tail_session_segments(
     limit: u32,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<DbSegmentDto>, String> {
-    crate::tail_session_segments(session_id, after_id, limit, state)
+    info!(
+        "[tail_session_segments] session_id={}, after_id={}, limit={}",
+        session_id, after_id, limit
+    );
+    let db = state.db.blocking_lock();
+    let db = db.as_ref().ok_or("Database not initialized")?;
+    crate::commands::history::tail_session_segments(db, &session_id, after_id, limit)
 }
