@@ -53,7 +53,35 @@ export const useAppStore = () => {
         lastRevision: mapped[mapped.length - 1]?.revision ?? null,
       });
       if (mapped.length > 0) {
-        setSegments((prev) => (prev.length === 0 ? mapped : prev));
+        setSegments((prev) => {
+          const merged = new Map<string, Segment>();
+          // Helper to get key consistent with App.tsx
+          const getInternalKey = (s: Segment) => {
+            const wallPart = s.wall_start ? `${s.wall_start}_` : '';
+            if (s.segment_id !== null && s.segment_id !== undefined) {
+              return `${wallPart}segment-${s.segment_id}`;
+            }
+            if (s.id !== null) {
+              return `db-${s.id}`;
+            }
+            return `${wallPart}start-${s.start.toFixed(3)}`;
+          };
+
+          prev.forEach(s => merged.set(getInternalKey(s), s));
+          mapped.forEach(s => {
+            const key = getInternalKey(s);
+            if (!merged.has(key)) {
+              merged.set(key, s);
+            }
+          });
+
+          return Array.from(merged.values()).sort((a, b) => {
+            if (a.wall_start !== b.wall_start) {
+              return a.wall_start.localeCompare(b.wall_start);
+            }
+            return a.start - b.start;
+          });
+        });
         setStatus((prev) => (prev === 'initializing' || prev === 'idle' ? 'finished' : prev));
         return true;
       }

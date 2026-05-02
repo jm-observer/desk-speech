@@ -114,13 +114,14 @@ function App() {
   }, [logNotificationDebug]);
 
   const getSegmentKey = useCallback((seg: Segment) => {
+    const wallPart = seg.wall_start ? `${seg.wall_start}_` : '';
     if (seg.segment_id !== null && seg.segment_id !== undefined) {
-      return `segment-${seg.segment_id}`;
+      return `${wallPart}segment-${seg.segment_id}`;
     }
     if (seg.id !== null) {
       return `db-${seg.id}`;
     }
-    return `start-${seg.start.toFixed(3)}`;
+    return `${wallPart}start-${seg.start.toFixed(3)}`;
   }, []);
 
   const mergeSegmentsByRevision = useCallback((incoming: Segment[]) => {
@@ -142,7 +143,12 @@ function App() {
         }
       });
       
-      return Array.from(merged.values()).sort((a, b) => a.start - b.start);
+      return Array.from(merged.values()).sort((a, b) => {
+        if (a.wall_start !== b.wall_start) {
+          return a.wall_start.localeCompare(b.wall_start);
+        }
+        return a.start - b.start;
+      });
     });
   }, [getSegmentKey, store]);
 
