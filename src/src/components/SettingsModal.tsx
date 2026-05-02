@@ -15,28 +15,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const [models, setModels] = useState<string[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(false); // Core settings loading
+  const [loadingModels, setLoadingModels] = useState(false); // LLM models list loading
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('vad');
 
   useEffect(() => {
     if (!open) return;
-    const load = async () => {
+
+    const loadSettings = async () => {
       setLoading(true);
       setLoadError(null);
       try {
-        const [s, m] = await Promise.allSettled([TauriAPI.getSettings(), TauriAPI.listLlmModels()]);
-        if (s.status === 'fulfilled') {
-          setSettings(s.value);
-        } else {
-          throw new Error('配置加载失败');
-        }
-        if (m.status === 'fulfilled') {
-          setModels(m.value.models);
-        } else {
-          console.warn('Load llm models failed', m.reason);
-          setModels([]);
-        }
+        const s = await TauriAPI.getSettings();
+        setSettings(s);
       } catch (err) {
         console.error('Load settings failed', err);
         setLoadError('配置加载失败，请重试');
@@ -44,7 +36,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
         setLoading(false);
       }
     };
-    load().catch((err) => console.error('Load settings failed unexpectedly', err));
+
+    const loadModels = async () => {
+      setLoadingModels(true);
+      try {
+        const m = await TauriAPI.listLlmModels();
+        setModels(m.models);
+      } catch (err) {
+        console.warn('Load llm models failed', err);
+        // Don't set global error, just log it
+      } finally {
+        setLoadingModels(false);
+      }
+    };
+
+    loadSettings();
+    loadModels();
   }, [open]);
 
   if (!open) return null;
@@ -128,8 +135,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
             </select>
             <input className="border rounded px-3 py-2 col-span-2" value={settings.provider_url} onChange={(e) => patch('provider_url', e.target.value)} placeholder="Provider URL" />
             <input className="border rounded px-3 py-2 col-span-2" value={settings.api_key} onChange={(e) => patch('api_key', e.target.value)} placeholder="API Key" />
-            <select className="border rounded px-3 py-2 col-span-2" value={settings.selected_model} onChange={(e) => patch('selected_model', e.target.value)}>
-              {models.map((m) => <option key={m} value={m}>{m}</option>)}
+            <select
+              className="border rounded px-3 py-2 col-span-2 disabled:bg-gray-100"
+              value={settings.selected_model}
+              onChange={(e) => patch('selected_model', e.target.value)}
+              disabled={loadingModels && models.length === 0}
+            >
+              {loadingModels && models.length === 0 && (
+                <option value={settings.selected_model}>正在加载模型列表...</option>
+              )}
+              {models.length > 0 && models.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+              {!loadingModels && models.length > 0 && !models.includes(settings.selected_model) && (
+                <option value={settings.selected_model}>{settings.selected_model} (当前已存)</option>
+              )}
             </select>
             <div className="col-span-2 space-y-1">
               <label className="text-[12px] text-[var(--ink-3)]">优化系统提示词</label>

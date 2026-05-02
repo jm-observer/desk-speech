@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { cn, stripYear } from '../utils';
 import type { Segment } from '../api/tauri-client';
 import { Button } from './ui/Button';
@@ -17,6 +17,20 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   onCopyChinese,
   onCopyEnglish,
 }) => {
+  const [copiedZh, setCopiedZh] = useState(false);
+  const [copiedEn, setCopiedEn] = useState(false);
+
+  const handleCopyZh = () => {
+    onCopyChinese(segment.text_optimized || segment.text_raw);
+    setCopiedZh(true);
+    setTimeout(() => setCopiedZh(false), 2000);
+  };
+
+  const handleCopyEn = () => {
+    onCopyEnglish(segment.text_english || '');
+    setCopiedEn(true);
+    setTimeout(() => setCopiedEn(false), 2000);
+  };
   const optimizeRunning = segment.optimize_status === 'running' || segment.optimize_status === 'pending';
   const translateRunning = segment.translate_status === 'running' || segment.translate_status === 'pending';
   const isProcessing = optimizeRunning || translateRunning;
@@ -39,24 +53,24 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 px-2 text-[11px] gap-1.5"
+            className={cn("h-7 px-2 text-[11px] gap-1.5 transition-colors", copiedZh && "text-green-600 bg-green-50")}
             disabled={!segment.text_optimized && !segment.text_raw}
-            onClick={() => onCopyChinese(segment.text_optimized || segment.text_raw)}
+            onClick={handleCopyZh}
             title="复制中文"
           >
-            <Icon name="copy" size={12} />
-            复制中文
+            <Icon name={copiedZh ? "check" : "copy"} size={12} />
+            {copiedZh ? "已复制" : "复制中文"}
           </Button>
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 px-2 text-[11px] gap-1.5"
+            className={cn("h-7 px-2 text-[11px] gap-1.5 transition-colors", copiedEn && "text-green-600 bg-green-50")}
             disabled={!segment.text_english}
-            onClick={() => onCopyEnglish(segment.text_english || '')}
+            onClick={handleCopyEn}
             title="复制英文"
           >
-            <Icon name="languages" size={12} />
-            复制英文
+            <Icon name={copiedEn ? "check" : "languages"} size={12} />
+            {copiedEn ? "已复制" : "复制英文"}
           </Button>
           <Button variant="ghost" size="icon" className="w-7 h-7">
             <Icon name="download" size={14} />

@@ -11,6 +11,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { CorrectionModal } from './components/CorrectionModal';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalSize } from '@tauri-apps/api/dpi';
+import { Button } from './components/ui/Button';
 
 const SIMPLE_WINDOW_SIZE = { width: 560, height: 280 };
 const DETAILED_WINDOW_MIN_SIZE = { width: 900, height: 600 };
@@ -164,15 +165,8 @@ function App() {
     await TauriAPI.copyToClipboard(text);
   };
 
-  const handleSegmentCopy = (text: string, source: 'english' | 'optimized' | 'raw') => {
+  const handleSegmentCopy = (text: string, _source: 'english' | 'optimized' | 'raw') => {
     handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
-    if (source === 'raw') {
-      window.alert('当前仅有原始文本，已复制原始文本');
-      return;
-    }
-    if (source === 'optimized') {
-      window.alert('翻译缺失，已复制优化文本');
-    }
   };
 
   const handleClear = async () => {
@@ -286,7 +280,8 @@ function App() {
                   key={idx}
                   segment={seg}
                   showEnglish={store.showEnglish}
-                  onCopy={handleSegmentCopy}
+                  onCopyChinese={(text) => handleSegmentCopy(text, 'optimized')}
+                  onCopyEnglish={(text) => handleSegmentCopy(text, 'english')}
                 />
               ))}
             </div>
