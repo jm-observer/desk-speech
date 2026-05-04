@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::{Duration, Instant};
 
 use async_openai::config::OpenAIConfig;
@@ -6,13 +7,43 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs, ResponseFormat,
 };
 use async_openai::Client;
-use log::info;
+use log::{info, warn};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::llm_settings::LlmSettings;
+use tokio::time::sleep;
 
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
+const LLM_RETRY_MAX_ATTEMPTS: u32 = 3;
+const LLM_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+async fn retry_task<T, F, Fut>(task_name: &str, max_attempts: u32, delay: Duration, mut task: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let attempts = std::cmp::max(max_attempts, 1);
+    let mut last_error = String::new();
+
+    for attempt in 1..=attempts {
+        match task().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = e;
+                if attempt < attempts {
+                    warn!(
+                        "[{}] attempt {}/{} failed: {}. Retrying in {:?}...",
+                        task_name, attempt, attempts, last_error, delay
+                    );
+                    sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error)
+}
 
 pub struct CachedModels {
     pub fetched_at: Instant,
@@ -42,19 +73,31 @@ pub fn model_cache_valid(cache: &CachedModels) -> bool {
 }
 
 pub async fn optimize_text(settings: &LlmSettings, input_text: &str) -> Result<String, String> {
-    let content = chat_json_completion(settings, &settings.optimize_prompt_template, input_text).await?;
-    let json = extract_json(&content)?;
-    let parsed: LlmOptimizeOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
-    info!("optimize output: {parsed:?}");
-    Ok(parsed.text_optimized)
+    retry_task("optimize_text", LLM_RETRY_MAX_ATTEMPTS, LLM_RETRY_DELAY, || async {
+        let content = chat_json_completion(settings, &settings.optimize_prompt_template, input_text).await?;
+        let json = extract_json(&content)?;
+        let parsed: LlmOptimizeOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
+        Ok(parsed.text_optimized)
+    })
+    .await
+    .map(|text| {
+        info!("optimize output: {text}");
+        text
+    })
 }
 
 pub async fn translate_text(settings: &LlmSettings, optimized_text: &str) -> Result<String, String> {
-    let content = chat_json_completion(settings, &settings.translate_prompt_template, optimized_text).await?;
-    let json = extract_json(&content)?;
-    let parsed: LlmTranslateOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
-    info!("translate output: {parsed:?}");
-    Ok(parsed.text_english)
+    retry_task("translate_text", LLM_RETRY_MAX_ATTEMPTS, LLM_RETRY_DELAY, || async {
+        let content = chat_json_completion(settings, &settings.translate_prompt_template, optimized_text).await?;
+        let json = extract_json(&content)?;
+        let parsed: LlmTranslateOutput = serde_json::from_value(json).map_err(|e| e.to_string())?;
+        Ok(parsed.text_english)
+    })
+    .await
+    .map(|text| {
+        info!("translate output: {text}");
+        text
+    })
 }
 
 async fn chat_json_completion(settings: &LlmSettings, system_prompt: &str, input_text: &str) -> Result<String, String> {
@@ -126,6 +169,57 @@ mod tests {
         let content = "no json here";
         let err = extract_json(content).unwrap_err();
         assert!(err.contains("missing JSON object start"));
+    }
+
+    #[test]
+    fn retry_task_success_first_time() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(retry_task("test", 3, Duration::from_millis(1), || async {
+            Ok::<&str, String>("success")
+        }));
+        assert_eq!(result.unwrap(), "success");
+    }
+
+    #[test]
+    fn retry_task_success_after_retries() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut count = 0;
+        let result = rt.block_on(retry_task("test", 3, Duration::from_millis(1), || {
+            count += 1;
+            async move {
+                if count < 3 {
+                    Err("fail".to_string())
+                } else {
+                    Ok("recovered")
+                }
+            }
+        }));
+        assert_eq!(result.unwrap(), "recovered");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn retry_task_exhaust_attempts() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut count = 0;
+        let result = rt.block_on(retry_task("test", 3, Duration::from_millis(1), || {
+            count += 1;
+            async move { Err::<&str, String>(format!("error {}", count)) }
+        }));
+        assert_eq!(result.unwrap_err(), "error 3");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn retry_task_zero_attempts_handles_gracefully() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut count = 0;
+        let result = rt.block_on(retry_task("test", 0, Duration::from_millis(1), || {
+            count += 1;
+            async move { Ok::<&str, String>("one_shot") }
+        }));
+        assert_eq!(result.unwrap(), "one_shot");
+        assert_eq!(count, 1);
     }
 
     #[test]
