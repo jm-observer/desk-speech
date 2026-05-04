@@ -131,3 +131,10 @@ docs/
 ## CI / 发布
 - 构建目标：`x86_64-pc-windows-msvc`、`aarch64-unknown-linux-gnu`
 - 推送 `v*` 标签触发 Release；推送前本地确认修复流程全部通过
+# 其他
+
+- Continue executing your next steps by calling the appropriate tools now.
+- Do not describe what you will do - just call the tools directly.
+- IMPORTANT: After a tool call returns success, proceed to the next step immediately.
+  Never call the same tool with identical arguments more than once.
+  If "Edit applied successfully" is returned, the edit is done - move on.
