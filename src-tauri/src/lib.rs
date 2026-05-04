@@ -28,7 +28,7 @@ use crate::settings::VadSettings;
 use chrono::Local;
 use log::{debug, error, info, warn};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::Manager;
 
 const MERGE_MAX_DURATION_SEC: f32 = 30.0;
 const MERGE_MAX_GAP_SEC: f32 = 5.6;
@@ -504,17 +504,6 @@ pub fn run() {
                     error!("[setup] database not initialized");
                 }
                 Ok(())
-            }
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                info!("[window] close requested, hiding instead of closing");
-                api.prevent_close();
-                if let Err(err) = window.hide() {
-                    error!("hide window on close failed: {}", err);
-                } else {
-                    info!("[window] window hidden after close request");
-                }
             }
         })
         .manage(state)
