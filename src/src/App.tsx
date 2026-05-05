@@ -320,6 +320,8 @@ function App() {
 
   // Sync initial recording state on mount
   useEffect(() => {
+    if (!store.isInitialized) return;
+    
     const sync = async () => {
       try {
         const state = await TauriAPI.getRecordingState();
@@ -331,7 +333,7 @@ function App() {
       }
     };
     sync();
-  }, []);
+  }, [store.isInitialized, startPolling]);
 
   const startRecording = async () => {
     try {
@@ -349,9 +351,13 @@ function App() {
   const isSimpleMode = store.uiMode === 'simple';
 
   useEffect(() => {
+    if (!store.isInitialized) {
+      return;
+    }
     if (autoStartTriggeredRef.current) {
       return;
     }
+    // 只有在空闲或刚结束，且确认后端没有正在录音时才尝试自动启动
     if (store.status !== 'idle' && store.status !== 'finished') {
       return;
     }
@@ -366,7 +372,7 @@ function App() {
     startRecording().catch((err) => {
       console.error('Auto start recording failed', err);
     });
-  }, [autoRecordingEnabled, startRecording, store.devices.length, store.status]);
+  }, [autoRecordingEnabled, startRecording, store.devices.length, store.status, store.isInitialized]);
 
   useEffect(() => {
     window.localStorage.setItem(AUTO_RECORDING_STORAGE_KEY, String(autoRecordingEnabled));

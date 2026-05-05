@@ -11,6 +11,7 @@ export const useAppStore = () => {
   const [selectedDevice, setSelectedDevice] = useState<string>('');
   const [showEnglish, setShowEnglish] = useState(true);
   const [uiMode, setUiMode] = useState<'detailed' | 'simple'>('detailed');
+  const [isInitialized, setIsInitialized] = useState(false);
 
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
@@ -57,14 +58,13 @@ export const useAppStore = () => {
           const merged = new Map<string, Segment>();
           // Helper to get key consistent with App.tsx
           const getInternalKey = (s: Segment) => {
-            const wallPart = s.wall_start ? `${s.wall_start}_` : '';
             if (s.segment_id !== null && s.segment_id !== undefined) {
-              return `${wallPart}segment-${s.segment_id}`;
+              return `seg-${s.segment_id}`;
             }
-            if (s.id !== null) {
+            if (s.id !== null && s.id !== undefined) {
               return `db-${s.id}`;
             }
-            return `${wallPart}start-${s.start.toFixed(3)}`;
+            return `ts-${s.start.toFixed(3)}`;
           };
 
           prev.forEach(s => merged.set(getInternalKey(s), s));
@@ -131,7 +131,11 @@ export const useAppStore = () => {
       }
     };
 
-    init();
+    const runInit = async () => {
+      await init();
+      setIsInitialized(true);
+    };
+    runInit();
 
     return () => {
       canceled = true;
@@ -147,6 +151,7 @@ export const useAppStore = () => {
     devices, setDevices,
     selectedDevice, setSelectedDevice,
     showEnglish, setShowEnglish,
-    uiMode, setUiMode
+    uiMode, setUiMode,
+    isInitialized
   };
 };
