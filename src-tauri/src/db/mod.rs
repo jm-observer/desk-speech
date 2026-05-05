@@ -157,6 +157,29 @@ impl SpeechDatabase {
     pub async fn get_setting(&self, key: String) -> Result<Option<String>> {
         self.with_conn(move |conn| repository::get_setting(conn, &key)).await
     }
+
+    pub async fn update_discard_result(
+        &self,
+        revision: i64,
+        is_discarded: bool,
+        discard_reason: Option<String>,
+        discard_source: Option<String>,
+        discard_confidence: Option<f32>,
+        quality_check_status: String,
+    ) -> Result<()> {
+        self.with_conn(move |conn| {
+            repository::update_discard_result(
+                conn,
+                revision,
+                is_discarded,
+                discard_reason,
+                discard_source,
+                discard_confidence,
+                &quality_check_status,
+            )
+        })
+        .await
+    }
 }
 
 fn now_str() -> String {

@@ -66,6 +66,11 @@ pub struct SegmentRow {
     pub text_optimized: Option<String>,
     pub text_english: Option<String>,
     pub created_at: String,
+    pub is_discarded: bool,
+    pub discard_reason: Option<String>,
+    pub discard_source: Option<String>,
+    pub discard_confidence: Option<f32>,
+    pub quality_check_status: String,
 }
 
 fn to_db_i64(value: u64) -> Result<i64> {
@@ -108,8 +113,8 @@ pub fn global_scope_exists(conn: &Connection) -> Result<bool> {
 }
 
 pub fn upsert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Result<()> {
-    let sql = "INSERT INTO asr_raw_records(session_id, segment_id, revision, start_sec, end_sec, wall_start, wall_end, text_raw, opt_status, optimize_status, translate_status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 'pending', 'blocked', ?9)
+    let sql = "INSERT INTO asr_raw_records(session_id, segment_id, revision, start_sec, end_sec, wall_start, wall_end, text_raw, opt_status, optimize_status, translate_status, is_discarded, discard_reason, discard_source, discard_confidence, quality_check_status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 'pending', 'blocked', 0, NULL, NULL, NULL, 'pending', ?9)
          ON CONFLICT(session_id, segment_id) DO UPDATE SET
             revision = excluded.revision,
             start_sec = MIN(asr_raw_records.start_sec, excluded.start_sec),
@@ -229,7 +234,8 @@ pub fn get_last_segment(conn: &Connection) -> Result<Option<SegmentRow>> {
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
-                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at,
+                    r.is_discarded, r.discard_reason, r.discard_source, r.discard_confidence, r.quality_check_status
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE session_id = ?1
@@ -257,6 +263,11 @@ pub fn get_last_segment(conn: &Connection) -> Result<Option<SegmentRow>> {
             text_optimized: row.get(11)?,
             text_english: row.get(12)?,
             created_at: row.get(13)?,
+            is_discarded: row.get(14)?,
+            discard_reason: row.get(15)?,
+            discard_source: row.get(16)?,
+            discard_confidence: row.get(17)?,
+            quality_check_status: row.get(18)?,
         }))
     } else {
         Ok(None)
@@ -294,7 +305,8 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
-                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at,
+                    r.is_discarded, r.discard_reason, r.discard_source, r.discard_confidence, r.quality_check_status
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE r.session_id = ?1
@@ -330,6 +342,11 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
                 text_optimized: row.get(11)?,
                 text_english: row.get(12)?,
                 created_at: row.get(13)?,
+                is_discarded: row.get(14)?,
+                discard_reason: row.get(15)?,
+                discard_source: row.get(16)?,
+                discard_confidence: row.get(17)?,
+                quality_check_status: row.get(18)?,
             })
         })
         .context("failed to query list_segments")?;
@@ -347,7 +364,8 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
-                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at,
+                    r.is_discarded, r.discard_reason, r.discard_source, r.discard_confidence, r.quality_check_status
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE r.session_id = ?1 AND r.id > ?2
@@ -382,6 +400,11 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
                 text_optimized: row.get(11)?,
                 text_english: row.get(12)?,
                 created_at: row.get(13)?,
+                is_discarded: row.get(14)?,
+                discard_reason: row.get(15)?,
+                discard_source: row.get(16)?,
+                discard_confidence: row.get(17)?,
+                quality_check_status: row.get(18)?,
             })
         })
         .context("failed to query tail_segments")?;
@@ -396,7 +419,8 @@ pub fn get_segment_by_revision(conn: &Connection, revision: i64) -> Result<Optio
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
-                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at,
+                    r.is_discarded, r.discard_reason, r.discard_source, r.discard_confidence, r.quality_check_status
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
              WHERE r.session_id = ?1 AND r.revision = ?2
@@ -424,6 +448,11 @@ pub fn get_segment_by_revision(conn: &Connection, revision: i64) -> Result<Optio
             text_optimized: row.get(11)?,
             text_english: row.get(12)?,
             created_at: row.get(13)?,
+            is_discarded: row.get(14)?,
+            discard_reason: row.get(15)?,
+            discard_source: row.get(16)?,
+            discard_confidence: row.get(17)?,
+            quality_check_status: row.get(18)?,
         }))
     } else {
         Ok(None)
@@ -548,4 +577,32 @@ pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+pub fn update_discard_result(
+    conn: &Connection,
+    revision: i64,
+    is_discarded: bool,
+    discard_reason: Option<String>,
+    discard_source: Option<String>,
+    discard_confidence: Option<f32>,
+    quality_check_status: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE asr_raw_records
+         SET is_discarded = ?1, discard_reason = ?2, discard_source = ?3,
+             discard_confidence = ?4, quality_check_status = ?5
+         WHERE session_id = ?6 AND revision = ?7",
+        params![
+            is_discarded as i32,
+            discard_reason,
+            discard_source,
+            discard_confidence,
+            quality_check_status,
+            GLOBAL_SCOPE_ID,
+            revision,
+        ],
+    )
+    .with_context(|| format!("failed to update discard result for revision {revision}"))?;
+    Ok(())
 }

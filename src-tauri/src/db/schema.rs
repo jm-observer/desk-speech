@@ -15,6 +15,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(sql_0003)
             .context("failed to run sqlite migration 0003_add_segment_id.sql")?;
     }
+    if !column_exists(conn, "asr_raw_records", "is_discarded")? {
+        let sql_0004 = include_str!("../../migrations/0004_add_discard_fields.sql");
+        conn.execute_batch(sql_0004)
+            .context("failed to run sqlite migration 0004_add_discard_fields.sql")?;
+    }
     // Backfill legacy rows that were introduced with default segment_id=0.
     // Using row id makes (session_id, segment_id) unique and unblocks unique index creation.
     conn.execute_batch(

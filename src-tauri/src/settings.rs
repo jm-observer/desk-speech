@@ -123,6 +123,7 @@ pub(crate) async fn apply_settings(
         selected_model: new_settings.selected_model,
         optimize_prompt_template: new_settings.optimize_prompt_template,
         translate_prompt_template: new_settings.translate_prompt_template,
+        discard_prompt_template: String::new(),
         auto_copy_mode: new_settings.auto_copy_mode,
     };
 

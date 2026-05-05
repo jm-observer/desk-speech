@@ -20,6 +20,14 @@ pub(crate) enum DbEvent {
     MarkOptimizeFailed { revision: i64 },
     SaveOptimizeResult { revision: i64, text_optimized: String },
     SaveTranslateResult { revision: i64, text_english: String },
+    UpdateDiscardResult {
+        revision: i64,
+        is_discarded: bool,
+        discard_reason: Option<String>,
+        discard_source: Option<String>,
+        discard_confidence: Option<f32>,
+        quality_check_status: String,
+    },
     TouchGlobalScopeEnd,
 }
 
@@ -103,6 +111,23 @@ pub(crate) fn start_db_worker(db: db::SpeechDatabase) -> SyncSender<DbEvent> {
                 }
                 DbEvent::TouchGlobalScopeEnd => {
                     let _ = db.touch_global_scope_end().await;
+                }
+                DbEvent::UpdateDiscardResult {
+                    revision,
+                    is_discarded,
+                    discard_reason,
+                    discard_source,
+                    discard_confidence,
+                    quality_check_status,
+                } => {
+                    let _ = db.update_discard_result(
+                        revision,
+                        is_discarded,
+                        discard_reason,
+                        discard_source,
+                        discard_confidence,
+                        quality_check_status,
+                    ).await;
                 }
             }
         }

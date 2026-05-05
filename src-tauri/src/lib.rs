@@ -76,6 +76,12 @@ mod tests {
             optimize_status: "success".to_string(),
             translate_status: "success".to_string(),
             finalization_check_state: "not_ready".to_string(),
+            is_discarded: false,
+            discard_reason: None,
+            discard_source: None,
+            discard_confidence: None,
+            quality_check_status: "pending".to_string(),
+            text_raw: text.to_string(),
         }
     }
 
@@ -134,6 +140,14 @@ pub(crate) struct SegmentResult {
     optimize_status: String,
     translate_status: String,
     finalization_check_state: String,
+    // Plan 2: discard judgment fields
+    is_discarded: bool,
+    discard_reason: Option<String>,
+    discard_source: Option<String>,
+    discard_confidence: Option<f32>,
+    quality_check_status: String,
+    // Raw ASR text for judgment
+    text_raw: String,
 }
 
 pub(crate) fn update_segment_llm_state(

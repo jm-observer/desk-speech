@@ -8,11 +8,34 @@ use async_openai::types::chat::{
 };
 use async_openai::Client;
 use log::{info, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::llm_settings::LlmSettings;
 use tokio::time::sleep;
+
+#[derive(Deserialize, Debug, Serialize)]
+struct LlmJudgmentOutput {
+    decision: String, // KEEP or DISCARD
+    confidence: f32,
+    reason: String,
+}
+
+#[derive(Debug)]
+pub struct JudgmentInput {
+    pub text_raw: String,
+    pub text_optimized: Option<String>,
+    pub text_english: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct JudgmentResult {
+    pub decision: String, // KEEP or DISCARD
+    pub confidence: f32,
+    pub reason: String,
+}
+
+const JUDGMENT_CONFIDENCE_THRESHOLD: f32 = 0.65;
 
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 const LLM_RETRY_MAX_ATTEMPTS: u32 = 3;
@@ -142,6 +165,137 @@ fn extract_json(content: &str) -> Result<Value, String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Rule-based discard (lightweight, no LLM call)
+// ---------------------------------------------------------------------------
+
+/// Check if text is composed only of filler words / interjections.
+fn is_pure_filler(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    const FILLERS: &[&str] = &[
+        "ok", "okay", "嗯", "啊", "呃", "嗯嗯", "嗯嗯", "哦", "哎", "唉",
+        "对", "对对", "是", "是的", "好", "好好", "嗯哼", "嘛",
+    ];
+    FILLERS.contains(&t.as_str())
+}
+
+/// Check if text matches a single name/title pattern (no verbs/real meaning).
+fn is_single_name(text: &str) -> bool {
+    let t = text.trim();
+    // Heuristic: 2-4 Chinese characters, no verbs commonly found in speech.
+    let char_count = t.chars().count();
+    if !(2..=4).contains(&char_count) {
+        return false;
+    }
+    // Check if all chars are CJK unified ideographs (simplified name check).
+    let all_cjk = t.chars().all(|c| {
+        ('\u{4e00}'..='\u{9fff}').contains(&c)
+            || ('\u{3400}'..='\u{4dbf}').contains(&c)
+    });
+    // Exclude common non-name words.
+    let non_names = ["老师", "同学", "朋友", "大家", "我们", "你们", "他们", "这个", "那个"];
+    if non_names.iter().any(|n| t.contains(*n)) {
+        return false;
+    }
+    all_cjk
+}
+
+/// Check if text has high repetition of the same token.
+fn is_high_repetition(text: &str) -> bool {
+    let t = text.trim();
+    let len = t.len();
+    if len == 0 || len > 8 {
+        return false;
+    }
+    // Count most frequent character.
+    let mut freq: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+    for c in t.chars() {
+        *freq.entry(c).or_insert(0) += 1;
+    }
+    if let Some(&max_count) = freq.values().max() {
+        // Same token repetition >= 0.8
+        return (max_count as f32 / len as f32) >= 0.8;
+    }
+    false
+}
+
+/// Run lightweight rules. Returns `Some(true)` if text should be discarded by rule.
+pub fn check_discard_rules(text: &str) -> bool {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return true;
+    }
+    // Rule 1: Character length < 3
+    if normalized.chars().count() < 3 {
+        return true;
+    }
+    // Rule 2: Pure filler
+    if is_pure_filler(normalized) {
+        return true;
+    }
+    // Rule 3: Single name/title
+    if is_single_name(normalized) {
+        return true;
+    }
+    // Rule 4: High repetition
+    if is_high_repetition(normalized) {
+        return true;
+    }
+    false
+}
+
+/// Call LLM to perform judgment. Returns (decision, confidence, reason).
+/// On failure, returns ("FAILED", 0.0, "llm_error").
+pub async fn judge_discard(settings: &LlmSettings, input: &JudgmentInput) -> Result<JudgmentResult, String> {
+    let system_prompt = settings.discard_prompt_template
+        .replace("{text_optimized}", input.text_optimized.as_deref().unwrap_or(""))
+        .replace("{text_raw}", &input.text_raw)
+        .replace("{text_english}", input.text_english.as_deref().unwrap_or(""));
+
+    // Primary input: text_optimized > text_raw
+    let user_input = input.text_optimized
+        .as_ref()
+        .or(Some(&input.text_raw))
+        .cloned()
+        .unwrap_or_default();
+
+    let content = chat_json_completion(settings, &system_prompt, &user_input).await?;
+
+    let json_value = extract_json(&content)?;
+    let parsed: LlmJudgmentOutput = serde_json::from_value(json_value).map_err(|e| e.to_string())?;
+
+    // Apply confidence threshold
+    let final_decision = if parsed.decision == "DISCARD" && parsed.confidence >= JUDGMENT_CONFIDENCE_THRESHOLD {
+        "DISCARD".to_string()
+    } else if parsed.decision == "DISCARD" {
+        // Low confidence DISCARD → conservative KEEP
+        "KEEP".to_string()
+    } else {
+        "KEEP".to_string()
+    };
+
+    Ok(JudgmentResult {
+        decision: final_decision,
+        confidence: parsed.confidence,
+        reason: parsed.reason,
+    })
+}
+
+/// Evaluate the final judgment result.
+/// Returns true if the segment should be discarded.
+/// Applies confidence threshold: DISCARD with confidence < 0.65 is kept.
+pub fn evaluate_judgment(result: &JudgmentResult) -> bool {
+    if result.decision == "KEEP" {
+        return false;
+    }
+    // DISCARD decision
+    if result.confidence >= JUDGMENT_CONFIDENCE_THRESHOLD {
+        return true;
+    }
+    // Low confidence DISCARD → conservative KEEP
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +389,79 @@ mod tests {
             models: vec!["gpt-4o-mini".to_string()],
         };
         assert!(!model_cache_valid(&expired_cache));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Rule-based discard tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn check_discard_rules_short_text() {
+        assert!(check_discard_rules("ok"));
+        assert!(check_discard_rules("嗯"));
+        assert!(check_discard_rules("a"));
+    }
+
+    #[test]
+    fn check_discard_rules_filler_words() {
+        assert!(check_discard_rules("嗯嗯"));
+        assert!(check_discard_rules("啊"));
+        assert!(check_discard_rules("对对"));
+    }
+
+    #[test]
+    fn check_discard_rules_single_name() {
+        assert!(check_discard_rules("张三"));
+        assert!(check_discard_rules("李明"));
+    }
+
+    #[test]
+    fn check_discard_rules_high_repetition() {
+        assert!(check_discard_rules("啊啊啊啊"));
+        assert!(check_discard_rules("嗯嗯嗯"));
+    }
+
+    #[test]
+    fn check_discard_rules_keeps_meaningful_text() {
+        assert!(!check_discard_rules("今天天气不错"));
+        assert!(!check_discard_rules("你好，请问有什么可以帮助你的"));
+        assert!(!check_discard_rules("会议开始"));
+    }
+
+    #[test]
+    fn check_discard_rules_excludes_common_non_names() {
+        assert!(!check_discard_rules("老师"));
+        assert!(!check_discard_rules("同学"));
+        assert!(!check_discard_rules("大家"));
+    }
+
+    #[test]
+    fn evaluate_judgment_keeps_discard_when_confidence_high() {
+        let result = JudgmentResult {
+            decision: "DISCARD".to_string(),
+            confidence: 0.8,
+            reason: "filler".to_string(),
+        };
+        assert!(evaluate_judgment(&result));
+    }
+
+    #[test]
+    fn evaluate_judgment_Keeps_discard_when_confidence_low() {
+        let result = JudgmentResult {
+            decision: "DISCARD".to_string(),
+            confidence: 0.5,
+            reason: "uncertain".to_string(),
+        };
+        assert!(!evaluate_judgment(&result));
+    }
+
+    #[test]
+    fn evaluate_judgment_keeps_keep_decision() {
+        let result = JudgmentResult {
+            decision: "KEEP".to_string(),
+            confidence: 0.9,
+            reason: "meaningful".to_string(),
+        };
+        assert!(!evaluate_judgment(&result));
     }
 }

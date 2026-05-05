@@ -13,7 +13,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use crate::audio_buffer::SAMPLE_RATE;
 use crate::db::repository::NewSegment;
 use crate::db_worker::DbEvent;
-use crate::llm_client::{optimize_text, translate_text};
+use crate::llm_client::{check_discard_rules, evaluate_judgment, judge_discard, JudgmentInput, optimize_text, translate_text};
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::{
     can_start_finalization_check, merge_segment_in_place, mutex_lock, read_lock, set_segment_finalization_state,
@@ -439,6 +439,12 @@ async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration:
                 optimize_status: "pending".to_string(),
                 translate_status: "blocked".to_string(),
                 finalization_check_state: "not_ready".to_string(),
+                is_discarded: false,
+                discard_reason: None,
+                discard_source: None,
+                discard_confidence: None,
+                quality_check_status: "pending".to_string(),
+                text_raw: text_raw.clone(),
             };
 
             let (db_segment_id, llm_input_text) = {
@@ -676,6 +682,10 @@ async fn perform_postprocess_and_copy(
 
 fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
     let segments = Arc::clone(&state.segments);
+    let db_writer = Arc::clone(&state.db_writer);
+    let llm_settings = Arc::clone(&state.llm_settings);
+    let db = Arc::clone(&state.db);
+
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(FINALIZE_SILENCE_MS)).await;
         if !can_start_finalization_check(&segments, revision) {
@@ -684,8 +694,105 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
 
         set_segment_finalization_state(&segments, revision, "ready");
         set_segment_finalization_state(&segments, revision, "checking");
-        // Plan 1 先落状态机入口，实际 keep/discard 判定在后续 Plan 2 实现。
-        set_segment_finalization_state(&segments, revision, "keep");
+
+        // Step 1: Load segment data from DB
+        let segment_row = {
+            let db_guard = mutex_lock(&db);
+            match db_guard.as_ref() {
+                Some(db) => match tauri::async_runtime::block_on(db.get_segment_by_revision(revision)) {
+                    Ok(row) => row,
+                    Err(e) => {
+                        error!("[finalization] failed to get segment revision={revision}: {e}");
+                        set_segment_finalization_state(&segments, revision, "check_failed");
+                        let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
+                        return;
+                    }
+                },
+                None => {
+                    error!("[finalization] database not available");
+                    set_segment_finalization_state(&segments, revision, "check_failed");
+                    let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
+                    return;
+                }
+            }
+        };
+
+        let seg = match segment_row {
+            Some(s) => s,
+            None => {
+                warn!("[finalization] segment not found, revision={revision}");
+                set_segment_finalization_state(&segments, revision, "check_failed");
+                let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
+                return;
+            }
+        };
+
+        // Step 2: Rule-based discard (lightweight, no LLM)
+        let text_to_check = seg.text_raw.clone();
+        if check_discard_rules(&text_to_check) {
+            info!("[finalization] rule-based DISCARD, revision={revision}, text={text_to_check}");
+            set_segment_finalization_state(&segments, revision, "discarded");
+            let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                revision,
+                is_discarded: true,
+                discard_reason: Some("规则层判定：填充词/低信息".to_string()),
+                discard_source: Some("rule".to_string()),
+                discard_confidence: None,
+                quality_check_status: "discarded".to_string(),
+            });
+            return;
+        }
+
+        // Step 3: LLM judgment
+        set_segment_finalization_state(&segments, revision, "llm_checking");
+        let settings = read_lock(&llm_settings).clone();
+        let judgment_input = JudgmentInput {
+            text_raw: seg.text_raw.clone(),
+            text_optimized: seg.text_optimized.clone(),
+            text_english: seg.text_english.clone(),
+        };
+
+        let judgment_result = match judge_discard(&settings, &judgment_input).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("[finalization] LLM judgment failed, revision={revision}: {e}");
+                set_segment_finalization_state(&segments, revision, "check_failed");
+                let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
+                return;
+            }
+        };
+
+        // Step 4: Evaluate and apply result
+        let should_discard = evaluate_judgment(&judgment_result);
+        if should_discard {
+            info!(
+                "[finalization] LLM DISCARD, revision={revision}, confidence={}, reason={}",
+                judgment_result.confidence, judgment_result.reason
+            );
+            set_segment_finalization_state(&segments, revision, "discarded");
+            let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                revision,
+                is_discarded: true,
+                discard_reason: Some(judgment_result.reason.clone()),
+                discard_source: Some("llm".to_string()),
+                discard_confidence: Some(judgment_result.confidence),
+                quality_check_status: "discarded".to_string(),
+            });
+        } else {
+            info!(
+                "[finalization] LLM KEEP, revision={revision}, confidence={}, reason={}",
+                judgment_result.confidence, judgment_result.reason
+            );
+            set_segment_finalization_state(&segments, revision, "kept");
+            let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                revision,
+                is_discarded: false,
+                discard_reason: None,
+                discard_source: Some("llm".to_string()),
+                discard_confidence: Some(judgment_result.confidence),
+                quality_check_status: "kept".to_string(),
+            });
+        }
     });
 }
 
