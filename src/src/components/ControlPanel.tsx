@@ -13,6 +13,8 @@ interface ControlPanelProps {
   onDeviceChange: (val: string) => void;
   showEnglish: boolean;
   onShowEnglishChange: (val: boolean) => void;
+  autoRecordingEnabled: boolean;
+  onAutoRecordingEnabledChange: (val: boolean) => void;
   onStart: () => void;
   onStop: () => void;
   onClear: () => void;
@@ -29,6 +31,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onDeviceChange,
   showEnglish,
   onShowEnglishChange,
+  autoRecordingEnabled,
+  onAutoRecordingEnabledChange,
   onStart,
   onStop,
   onClear,
@@ -80,6 +84,13 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             <span className="text-[11px] text-[var(--ink-4)]">LLM 同步生成对照翻译</span>
           </div>
           <Switch checked={showEnglish} onCheckedChange={onShowEnglishChange} />
+        </div>
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col">
+            <span className="text-[13px] font-medium text-[var(--ink-2)]">自动录音</span>
+            <span className="text-[11px] text-[var(--ink-4)]">刷新后会按当前模式自动检测并尝试启动</span>
+          </div>
+          <Switch checked={autoRecordingEnabled} onCheckedChange={onAutoRecordingEnabledChange} disabled={disabled} />
         </div>
       </div>
 

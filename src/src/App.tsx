@@ -17,6 +17,7 @@ import { Button } from './components/ui/Button';
 const SIMPLE_WINDOW_SIZE = { width: 560, height: 280 };
 const DETAILED_WINDOW_MIN_SIZE = { width: 900, height: 600 };
 const DETAILED_WINDOW_SIZE = { width: 1280, height: 820 };
+const AUTO_RECORDING_STORAGE_KEY = 'streaming-speech:auto-recording';
 
 
 async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
@@ -49,6 +50,10 @@ function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
+  const [autoRecordingEnabled, setAutoRecordingEnabled] = useState(() => {
+    const saved = window.localStorage.getItem(AUTO_RECORDING_STORAGE_KEY);
+    return saved === null ? true : saved === 'true';
+  });
 
   const logNotificationDebug = useCallback((message: string, details?: Record<string, unknown>) => {
     if (details) {
@@ -339,6 +344,7 @@ function App() {
       setIsBusy(false);
     }
   };
+  const isSimpleMode = store.uiMode === 'simple';
 
   useEffect(() => {
     if (autoStartTriggeredRef.current) {
@@ -350,12 +356,19 @@ function App() {
     if (store.devices.length === 0) {
       return;
     }
+    if (!autoRecordingEnabled) {
+      return;
+    }
 
     autoStartTriggeredRef.current = true;
     startRecording().catch((err) => {
       console.error('Auto start recording failed', err);
     });
-  }, [startRecording, store.devices.length, store.status]);
+  }, [autoRecordingEnabled, startRecording, store.devices.length, store.status]);
+
+  useEffect(() => {
+    window.localStorage.setItem(AUTO_RECORDING_STORAGE_KEY, String(autoRecordingEnabled));
+  }, [autoRecordingEnabled]);
 
   const stopRecording = async () => {
     try {
@@ -455,7 +468,6 @@ function App() {
     }
   };
 
-  const isSimpleMode = store.uiMode === 'simple';
   const displaySegments = store.segments.slice().reverse();
 
   useEffect(() => {
@@ -522,6 +534,8 @@ function App() {
             onDeviceChange={handleDeviceChange}
             showEnglish={store.showEnglish}
             onShowEnglishChange={store.setShowEnglish}
+            autoRecordingEnabled={autoRecordingEnabled}
+            onAutoRecordingEnabledChange={setAutoRecordingEnabled}
             onStart={startRecording}
             onStop={stopRecording}
             onClear={handleClear}
