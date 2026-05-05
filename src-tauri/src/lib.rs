@@ -31,6 +31,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::Manager;
 
 const MERGE_MAX_GAP_SEC: f32 = 5.6;
+pub(crate) const FINALIZE_SILENCE_MS: u64 = 10_000;
 
 pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResult) -> bool {
     let Some(last) = segments.last_mut() else {
@@ -51,6 +52,7 @@ pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &
     last.text_english = None;
     last.optimize_status = "pending".to_string();
     last.translate_status = "blocked".to_string();
+    last.finalization_check_state = "not_ready".to_string();
     last.update_type = SegmentUpdateType::Replace;
     true
 }
@@ -73,6 +75,7 @@ mod tests {
             text_english: Some("en".to_string()),
             optimize_status: "success".to_string(),
             translate_status: "success".to_string(),
+            finalization_check_state: "not_ready".to_string(),
         }
     }
 
@@ -130,6 +133,7 @@ pub(crate) struct SegmentResult {
     text_english: Option<String>,
     optimize_status: String,
     translate_status: String,
+    finalization_check_state: String,
 }
 
 pub(crate) fn update_segment_llm_state(
@@ -155,6 +159,30 @@ pub(crate) fn update_segment_llm_state(
             seg.text_english = Some(text);
         }
     }
+}
+
+pub(crate) fn set_segment_finalization_state(segments: &Arc<RwLock<Vec<SegmentResult>>>, revision: i64, state: &str) {
+    let mut segs = write_lock(segments);
+    if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
+        seg.finalization_check_state = state.to_string();
+    }
+}
+
+pub(crate) fn can_start_finalization_check(segments: &Arc<RwLock<Vec<SegmentResult>>>, revision: i64) -> bool {
+    let segs = read_lock(segments);
+    let Some(seg) = segs.iter().rev().find(|seg| seg.revision == revision) else {
+        return false;
+    };
+    if seg.text.trim().is_empty() {
+        return false;
+    }
+    if matches!(seg.optimize_status.as_str(), "pending" | "running") {
+        return false;
+    }
+    if matches!(seg.translate_status.as_str(), "pending" | "running") {
+        return false;
+    }
+    seg.finalization_check_state == "not_ready"
 }
 
 #[derive(Serialize, Clone)]

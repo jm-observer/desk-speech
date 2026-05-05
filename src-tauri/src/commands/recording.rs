@@ -16,13 +16,15 @@ use crate::db_worker::DbEvent;
 use crate::llm_client::{optimize_text, translate_text};
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::{
-    merge_segment_in_place, mutex_lock, read_lock, update_segment_llm_state, write_lock, AppState, RecognizeContext,
-    RecordingAnchor, RecordingRuntime, RecordingState, SegmentResult,
+    can_start_finalization_check, merge_segment_in_place, mutex_lock, read_lock, set_segment_finalization_state,
+    update_segment_llm_state, write_lock, AppState, RecognizeContext, RecordingAnchor, RecordingRuntime,
+    RecordingState, SegmentResult, FINALIZE_SILENCE_MS,
 };
 
 #[tauri::command]
 pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("[start_recording]");
+    info!("[start_recording] finalization_silence_ms={FINALIZE_SILENCE_MS}");
     if state.recording.swap(true, Ordering::SeqCst) {
         return Err("Already recording".to_string());
     }
@@ -436,6 +438,7 @@ async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration:
                 text_english: None,
                 optimize_status: "pending".to_string(),
                 translate_status: "blocked".to_string(),
+                finalization_check_state: "not_ready".to_string(),
             };
 
             let (db_segment_id, llm_input_text) = {
@@ -667,6 +670,23 @@ async fn perform_postprocess_and_copy(
             info!("[llm] auto copy done, revision={}, mode={}", revision, mode_name);
         }
     }
+
+    schedule_finalization_check(state, revision);
+}
+
+fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
+    let segments = Arc::clone(&state.segments);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(FINALIZE_SILENCE_MS)).await;
+        if !can_start_finalization_check(&segments, revision) {
+            return;
+        }
+
+        set_segment_finalization_state(&segments, revision, "ready");
+        set_segment_finalization_state(&segments, revision, "checking");
+        // Plan 1 先落状态机入口，实际 keep/discard 判定在后续 Plan 2 实现。
+        set_segment_finalization_state(&segments, revision, "keep");
+    });
 }
 
 #[tauri::command]
