@@ -5,5 +5,6 @@ pub mod export;
 pub mod history;
 pub mod history_api;
 pub mod init;
+pub mod manual_optimize;
 pub mod recording;
 pub mod settings;

@@ -113,6 +113,11 @@ impl SpeechDatabase {
             .await
     }
 
+    pub async fn get_segment_by_revision(&self, revision: i64) -> Result<Option<SegmentRow>> {
+        self.with_conn(move |conn| repository::get_segment_by_revision(conn, revision))
+            .await
+    }
+
     pub async fn upsert_rule(&self, rule: NewRule) -> Result<()> {
         let now = now_str();
         self.with_conn(move |conn| repository::upsert_rule(conn, &rule, &now))

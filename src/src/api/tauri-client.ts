@@ -89,6 +89,7 @@ export const TauriAPI = {
   updateCorrectionRule: (payload: CorrectionRule) => invoke('update_correction_rule', { ...payload }),
   deleteCorrectionRule: (id: number) => invoke('delete_correction_rule', { id }),
   reloadCorrectionRules: () => invoke('reload_correction_rules'),
+  manualOptimizeTranslate: (revision: number) => invoke('manual_optimize_translate', { revision }),
   listSegments: (page: number, pageSize: number) => invoke<Record<string, unknown>[]>('list_segments', { page, pageSize }),
   tailSegments: (afterId: number, limit: number) => invoke<Record<string, unknown>[]>('tail_segments', { afterId, limit }),
   getRecordedAudioPath: () => invoke<string>('get_recorded_audio_path'),

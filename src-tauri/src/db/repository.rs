@@ -385,6 +385,44 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
     Ok(rows)
 }
 
+pub fn get_segment_by_revision(conn: &Connection, revision: i64) -> Result<Option<SegmentRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.id, r.segment_id, r.session_id, r.revision, r.start_sec, r.end_sec, r.wall_start, r.wall_end, r.text_raw,
+                    r.optimize_status, r.translate_status, l.text_optimized, l.text_english, r.created_at
+             FROM asr_raw_records r
+             LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
+             WHERE r.session_id = ?1 AND r.revision = ?2
+             LIMIT 1",
+        )
+        .context("failed to prepare get_segment_by_revision statement")?;
+
+    let mut rows = stmt
+        .query(params![GLOBAL_SCOPE_ID, revision])
+        .with_context(|| format!("failed to query segment by revision {revision}"))?;
+
+    if let Some(row) = rows.next().context("failed to read segment by revision row")? {
+        let segment_id = to_u64(row.get::<_, i64>(1)?).context("invalid segment_id in segment by revision row")?;
+        Ok(Some(SegmentRow {
+            id: row.get(0)?,
+            segment_id,
+            revision: row.get(3)?,
+            start_sec: row.get(4)?,
+            end_sec: row.get(5)?,
+            wall_start: row.get(6)?,
+            wall_end: row.get(7)?,
+            text_raw: row.get(8)?,
+            optimize_status: row.get(9)?,
+            translate_status: row.get(10)?,
+            text_optimized: row.get(11)?,
+            text_english: row.get(12)?,
+            created_at: row.get(13)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn upsert_rule(conn: &Connection, rule: &NewRule, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO correction_rules(source, target, enabled, priority, updated_at)

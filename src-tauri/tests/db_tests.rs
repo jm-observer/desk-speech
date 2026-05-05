@@ -126,3 +126,84 @@ async fn split_stage_status_and_latest_only_constraints_hold() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[tokio::test]
+async fn manual_rerun_can_target_non_latest_revision() {
+    let path = temp_db_path("db-manual-rerun");
+    let db = SpeechDatabase::init(&path).await.unwrap();
+    db.ensure_global_scope().await.unwrap();
+
+    db.upsert_segment(NewSegment {
+        segment_id: 1,
+        revision: 1,
+        start_sec: 0.0,
+        end_sec: 0.5,
+        wall_start: "2026-05-01 10:00:00".to_string(),
+        wall_end: "2026-05-01 10:00:01".to_string(),
+        text_raw: "raw-1".to_string(),
+    })
+    .await
+    .unwrap();
+    db.upsert_segment(NewSegment {
+        segment_id: 2,
+        revision: 2,
+        start_sec: 0.6,
+        end_sec: 1.0,
+        wall_start: "2026-05-01 10:00:01".to_string(),
+        wall_end: "2026-05-01 10:00:02".to_string(),
+        text_raw: "raw-2".to_string(),
+    })
+    .await
+    .unwrap();
+
+    db.update_optimize_status(1, "pending".to_string()).await.unwrap();
+    db.update_translate_status(1, "blocked".to_string()).await.unwrap();
+    db.update_optimize_status(2, "running".to_string()).await.unwrap();
+    db.mark_old_revisions_skipped(2).await.unwrap();
+
+    db.upsert_optimize_result(NewSegmentResult::optimize(1, "manual optimized"))
+        .await
+        .unwrap();
+    db.update_optimize_status(1, "success".to_string()).await.unwrap();
+    db.update_translate_status(1, "pending".to_string()).await.unwrap();
+    db.upsert_translate_result(NewSegmentResult::translate(1, "manual english"))
+        .await
+        .unwrap();
+    db.update_translate_status(1, "success".to_string()).await.unwrap();
+
+    let segments = db.list_segments(0, 10).await.unwrap();
+    let manual_segment = segments.iter().find(|segment| segment.revision == 1).unwrap();
+    let latest_segment = segments.iter().find(|segment| segment.revision == 2).unwrap();
+
+    assert_eq!(manual_segment.optimize_status, "success");
+    assert_eq!(manual_segment.translate_status, "success");
+    assert_eq!(manual_segment.text_optimized.as_deref(), Some("manual optimized"));
+    assert_eq!(manual_segment.text_english.as_deref(), Some("manual english"));
+    assert_eq!(latest_segment.optimize_status, "running");
+
+    let _ = std::fs::remove_file(path);
+}
+
+struct NewSegmentResult;
+
+impl NewSegmentResult {
+    fn optimize(revision: i64, text: &str) -> db::repository::OptimizeResultUpsert {
+        db::repository::OptimizeResultUpsert {
+            revision,
+            text_optimized: Some(text.to_string()),
+            optimize_error: None,
+            optimize_started_at: None,
+            optimize_finished_at: None,
+        }
+    }
+
+    fn translate(revision: i64, text: &str) -> db::repository::TranslateResultUpsert {
+        db::repository::TranslateResultUpsert {
+            revision,
+            text_english: Some(text.to_string()),
+            translate_error: None,
+            translate_started_at: None,
+            translate_finished_at: None,
+        }
+    }
+}

@@ -531,6 +531,7 @@ pub fn run() {
             commands::correction_api::update_correction_rule,
             commands::correction_api::delete_correction_rule,
             commands::correction_api::reload_correction_rules,
+            commands::manual_optimize::manual_optimize_translate,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

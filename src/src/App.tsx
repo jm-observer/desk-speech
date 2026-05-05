@@ -43,6 +43,7 @@ function App() {
   const store = useAppStore();
   const pollTimer = useRef<number | null>(null);
   const notifiedRevisionsRef = useRef<Set<string>>(new Set());
+  const manualTriggeredRevisionsRef = useRef<Set<number>>(new Set());
   const notificationBaselineReadyRef = useRef(false);
   const autoStartTriggeredRef = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
@@ -281,6 +282,17 @@ function App() {
       const revision = segment.revision;
       if (revision === undefined) return;
 
+      if (manualTriggeredRevisionsRef.current.has(revision)) {
+        if (
+          segment.optimize_status === 'failed' ||
+          segment.translate_status === 'failed' ||
+          segment.translate_status === 'success'
+        ) {
+          manualTriggeredRevisionsRef.current.delete(revision);
+        }
+        return;
+      }
+
       // Check optimization status
       const optKey = `opt-${revision}`;
       if (segment.optimize_status === 'success' && !notifiedRevisionsRef.current.has(optKey)) {
@@ -365,6 +377,68 @@ function App() {
   const handleSegmentCopy = (text: string, _source: 'english' | 'optimized' | 'raw') => {
     handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
   };
+
+  const refreshSegments = useCallback(async () => {
+    try {
+      const rows = await TauriAPI.listSegments(0, 200);
+      const mapped = rows
+        .map((row) => ({
+          id: typeof row.id === 'number' ? row.id : null,
+          segment_id: typeof row.segment_id === 'number' ? row.segment_id : null,
+          revision: typeof row.revision === 'number' ? row.revision : undefined,
+          start: typeof row.start_sec === 'number' ? row.start_sec : 0,
+          end: typeof row.end_sec === 'number' ? row.end_sec : 0,
+          wall_start: typeof row.wall_start === 'string' ? row.wall_start : '',
+          wall_end: typeof row.wall_end === 'string' ? row.wall_end : '',
+          text_raw: typeof row.text_raw === 'string' ? row.text_raw : '',
+          text_optimized: typeof row.text_optimized === 'string' ? row.text_optimized : undefined,
+          text_english: typeof row.text_english === 'string' ? row.text_english : undefined,
+          optimize_status:
+            row.optimize_status === 'pending' ||
+            row.optimize_status === 'running' ||
+            row.optimize_status === 'success' ||
+            row.optimize_status === 'failed'
+              ? row.optimize_status
+              : 'pending',
+          translate_status:
+            row.translate_status === 'blocked' ||
+            row.translate_status === 'pending' ||
+            row.translate_status === 'running' ||
+            row.translate_status === 'success' ||
+            row.translate_status === 'failed'
+              ? row.translate_status
+              : 'blocked',
+        }))
+        .filter((seg) => seg.text_raw.trim().length > 0);
+      mergeSegmentsByRevision(mapped);
+    } catch (err) {
+      console.error('Refresh segments failed', err);
+    }
+  }, [mergeSegmentsByRevision]);
+
+  const handleManualOptimizeTranslate = useCallback(
+    async (segment: Segment) => {
+      if (segment.revision === undefined) {
+        return;
+      }
+
+      try {
+        manualTriggeredRevisionsRef.current.add(segment.revision);
+        await TauriAPI.manualOptimizeTranslate(segment.revision);
+        if (store.status !== 'recording' && store.status !== 'processing') {
+          store.setStatus('processing');
+        }
+        window.setTimeout(() => {
+          refreshSegments().catch((err) => console.error('Deferred refresh failed', err));
+        }, 1200);
+      } catch (err) {
+        manualTriggeredRevisionsRef.current.delete(segment.revision);
+        console.error('Manual optimize translate failed', err);
+        alert(`手动优化与翻译失败: ${err}`);
+      }
+    },
+    [refreshSegments, store]
+  );
 
   const handleClear = async () => {
     await TauriAPI.clearResults();
@@ -477,6 +551,7 @@ function App() {
                   showEnglish={store.showEnglish}
                   onCopyChinese={(text) => handleSegmentCopy(text, 'optimized')}
                   onCopyEnglish={(text) => handleSegmentCopy(text, 'english')}
+                  onManualOptimizeTranslate={handleManualOptimizeTranslate}
                 />
               ))}
             </div>
