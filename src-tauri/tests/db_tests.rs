@@ -76,6 +76,46 @@ async fn supports_rule_version_and_tail_query() {
 }
 
 #[tokio::test]
+async fn upsert_same_segment_appends_full_raw_text() {
+    let path = temp_db_path("db-append-raw");
+    let db = SpeechDatabase::init(&path).await.unwrap();
+    db.ensure_global_scope().await.unwrap();
+
+    db.upsert_segment(NewSegment {
+        segment_id: 7,
+        revision: 1,
+        start_sec: 1.0,
+        end_sec: 1.5,
+        wall_start: "2026-05-05 10:00:01".to_string(),
+        wall_end: "2026-05-05 10:00:02".to_string(),
+        text_raw: "第一段".to_string(),
+    })
+    .await
+    .unwrap();
+    db.upsert_segment(NewSegment {
+        segment_id: 7,
+        revision: 2,
+        start_sec: 1.4,
+        end_sec: 2.0,
+        wall_start: "2026-05-05 10:00:02".to_string(),
+        wall_end: "2026-05-05 10:00:03".to_string(),
+        text_raw: "第二段".to_string(),
+    })
+    .await
+    .unwrap();
+
+    let segments = db.list_segments(0, 10).await.unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].segment_id, 7);
+    assert_eq!(segments[0].revision, 2);
+    assert_eq!(segments[0].text_raw, "第一段 第二段");
+    assert_eq!(segments[0].start_sec, 1.0);
+    assert_eq!(segments[0].end_sec, 2.0);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn split_stage_status_and_latest_only_constraints_hold() {
     let path = temp_db_path("db-split-stages");
     let db = SpeechDatabase::init(&path).await.unwrap();

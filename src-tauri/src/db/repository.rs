@@ -112,11 +112,18 @@ pub fn upsert_segment(conn: &Connection, segment: &NewSegment, now: &str) -> Res
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 'pending', 'blocked', ?9)
          ON CONFLICT(session_id, segment_id) DO UPDATE SET
             revision = excluded.revision,
-            start_sec = excluded.start_sec,
+            start_sec = MIN(asr_raw_records.start_sec, excluded.start_sec),
             end_sec = excluded.end_sec,
-            wall_start = excluded.wall_start,
+            wall_start = CASE
+                WHEN asr_raw_records.wall_start IS NULL OR TRIM(asr_raw_records.wall_start) = '' THEN excluded.wall_start
+                ELSE asr_raw_records.wall_start
+            END,
             wall_end = excluded.wall_end,
-            text_raw = excluded.text_raw,
+            text_raw = CASE
+                WHEN asr_raw_records.text_raw IS NULL OR TRIM(asr_raw_records.text_raw) = '' THEN excluded.text_raw
+                WHEN excluded.text_raw IS NULL OR TRIM(excluded.text_raw) = '' THEN asr_raw_records.text_raw
+                ELSE asr_raw_records.text_raw || ' ' || excluded.text_raw
+            END,
             created_at = excluded.created_at";
     conn.execute(
         sql,

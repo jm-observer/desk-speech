@@ -30,7 +30,6 @@ use log::{debug, error, info, warn};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
-const MERGE_MAX_DURATION_SEC: f32 = 30.0;
 const MERGE_MAX_GAP_SEC: f32 = 5.6;
 
 pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResult) -> bool {
@@ -39,8 +38,7 @@ pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &
     };
 
     let gap_sec = incoming.start - last.end;
-    let merged_duration = incoming.end - last.start;
-    if !(0.0..=MERGE_MAX_GAP_SEC).contains(&gap_sec) || merged_duration > MERGE_MAX_DURATION_SEC {
+    if !(0.0..=MERGE_MAX_GAP_SEC).contains(&gap_sec) {
         return false;
     }
 
@@ -55,6 +53,56 @@ pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &
     last.translate_status = "blocked".to_string();
     last.update_type = SegmentUpdateType::Replace;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_segment_in_place, SegmentResult, SegmentUpdateType};
+
+    fn seg(start: f32, end: f32, text: &str, revision: i64) -> SegmentResult {
+        SegmentResult {
+            segment_id: 1,
+            revision,
+            update_type: SegmentUpdateType::Append,
+            start,
+            end,
+            wall_start: "2026-01-01 00:00:00".to_string(),
+            wall_end: "2026-01-01 00:00:01".to_string(),
+            text: text.to_string(),
+            text_optimized: Some("opt".to_string()),
+            text_english: Some("en".to_string()),
+            optimize_status: "success".to_string(),
+            translate_status: "success".to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_keeps_working_for_long_running_sentence_when_gap_is_small() {
+        let mut segments = vec![seg(0.0, 29.0, "前半段", 1)];
+        let incoming = seg(29.2, 31.0, "后半段", 2);
+        let merged = merge_segment_in_place(&mut segments, &incoming);
+
+        assert!(merged);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "前半段 后半段");
+        assert_eq!(segments[0].end, 31.0);
+        assert_eq!(segments[0].revision, 2);
+        assert!(segments[0].text_optimized.is_none());
+        assert!(segments[0].text_english.is_none());
+        assert_eq!(segments[0].optimize_status, "pending");
+        assert_eq!(segments[0].translate_status, "blocked");
+    }
+
+    #[test]
+    fn merge_rejects_when_gap_exceeds_threshold() {
+        let mut segments = vec![seg(0.0, 5.0, "第一句", 1)];
+        let incoming = seg(10.7, 11.0, "第二句", 2);
+        let merged = merge_segment_in_place(&mut segments, &incoming);
+
+        assert!(!merged);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "第一句");
+    }
 }
 
 /// Which ASR model to bundle. Build scripts patch these via sed.

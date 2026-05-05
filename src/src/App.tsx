@@ -129,14 +129,16 @@ function App() {
   }, [logNotificationDebug]);
 
   const getSegmentKey = useCallback((seg: Segment) => {
-    const wallPart = seg.wall_start ? `${seg.wall_start}_` : '';
+    // 优先使用后端分配的稳定 ID
     if (seg.segment_id !== null && seg.segment_id !== undefined) {
-      return `${wallPart}segment-${seg.segment_id}`;
+      return `seg-${seg.segment_id}`;
     }
-    if (seg.id !== null) {
+    // 其次使用数据库自增 ID
+    if (seg.id !== null && seg.id !== undefined) {
       return `db-${seg.id}`;
     }
-    return `${wallPart}start-${seg.start.toFixed(3)}`;
+    // 最后使用开始时间戳（保留3位小数防止浮点误差）
+    return `ts-${seg.start.toFixed(3)}`;
   }, []);
 
   const mergeSegmentsByRevision = useCallback((incoming: Segment[]) => {
@@ -406,21 +408,19 @@ function App() {
           text_raw: typeof row.text_raw === 'string' ? row.text_raw : '',
           text_optimized: typeof row.text_optimized === 'string' ? row.text_optimized : undefined,
           text_english: typeof row.text_english === 'string' ? row.text_english : undefined,
-          optimize_status:
-            row.optimize_status === 'pending' ||
-            row.optimize_status === 'running' ||
-            row.optimize_status === 'success' ||
-            row.optimize_status === 'failed'
-              ? row.optimize_status
-              : 'pending',
-          translate_status:
-            row.translate_status === 'blocked' ||
-            row.translate_status === 'pending' ||
-            row.translate_status === 'running' ||
-            row.translate_status === 'success' ||
-            row.translate_status === 'failed'
-              ? row.translate_status
-              : 'blocked',
+          optimize_status: (row.optimize_status === 'pending' ||
+          row.optimize_status === 'running' ||
+          row.optimize_status === 'success' ||
+          row.optimize_status === 'failed'
+            ? row.optimize_status
+            : 'pending') as Segment['optimize_status'],
+          translate_status: (row.translate_status === 'blocked' ||
+          row.translate_status === 'pending' ||
+          row.translate_status === 'running' ||
+          row.translate_status === 'success' ||
+          row.translate_status === 'failed'
+            ? row.translate_status
+            : 'blocked') as Segment['translate_status'],
         }))
         .filter((seg) => seg.text_raw.trim().length > 0);
       mergeSegmentsByRevision(mapped);
