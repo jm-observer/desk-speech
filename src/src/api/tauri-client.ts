@@ -71,6 +71,16 @@ export interface CorrectionRule {
   enabled: boolean;
 }
 
+export interface SegmentDiscardedEvent {
+  revision: number;
+  segment_id: number;
+  decision: 'DISCARD';
+  reason: string;
+  source: 'rule' | 'llm';
+  confidence: number | null;
+  occurred_at_ms: number;
+}
+
 export const TauriAPI = {
   startRecording: () => invoke('start_recording'),
   stopRecording: () => invoke('stop_recording'),

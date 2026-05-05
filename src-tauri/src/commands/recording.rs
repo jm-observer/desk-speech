@@ -92,6 +92,7 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         llm_settings: Arc::clone(&state.llm_settings),
         llm_models_cache: Arc::clone(&state.llm_models_cache),
         selected_device: Arc::clone(&state.selected_device),
+        app_handle: Arc::new(RwLock::new(Some(app.clone()))),
     });
     let db_writer = state.db_writer.as_ref().clone();
     let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
@@ -685,6 +686,10 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
     let db_writer = Arc::clone(&state.db_writer);
     let llm_settings = Arc::clone(&state.llm_settings);
     let db = Arc::clone(&state.db);
+    let app_handle = {
+        let guard = read_lock(&state.app_handle);
+        guard.clone()
+    };
 
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(FINALIZE_SILENCE_MS)).await;
@@ -740,6 +745,16 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
                 discard_confidence: None,
                 quality_check_status: "discarded".to_string(),
             });
+            // Send frontend event (Plan 3)
+            let _ = app_handle.emit("segment_discarded", serde_json::json!({
+                "revision": revision,
+                "segment_id": seg.segment_id,
+                "decision": "DISCARD",
+                "reason": "规则层判定：填充词/低信息",
+                "source": "rule",
+                "confidence": null,
+                "occurred_at_ms": chrono::Utc::now().timestamp_millis(),
+            }));
             return;
         }
 
@@ -778,6 +793,16 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
                 discard_confidence: Some(judgment_result.confidence),
                 quality_check_status: "discarded".to_string(),
             });
+            // Send frontend event (Plan 3)
+            let _ = app_handle.emit("segment_discarded", serde_json::json!({
+                "revision": revision,
+                "segment_id": seg.segment_id,
+                "decision": "DISCARD",
+                "reason": judgment_result.reason,
+                "source": "llm",
+                "confidence": judgment_result.confidence,
+                "occurred_at_ms": chrono::Utc::now().timestamp_millis(),
+            }));
         } else {
             info!(
                 "[finalization] LLM KEEP, revision={revision}, confidence={}, reason={}",

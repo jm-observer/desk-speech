@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { TauriAPI } from '../api/tauri-client';
+import { TauriAPI, type SegmentDiscardedEvent } from '../api/tauri-client';
 import type { Segment } from '../api/tauri-client';
+import { listen } from '@tauri-apps/api/event';
 
 export type AppStatus = 'idle' | 'initializing' | 'recording' | 'processing' | 'error' | 'finished';
 
@@ -95,6 +96,7 @@ export const useAppStore = () => {
   useEffect(() => {
     let canceled = false;
     let initTimer: number | null = null;
+    let unsubscribeSegmentDiscarded: (() => void) | null = null;
 
     const init = async () => {
       try {
@@ -137,10 +139,53 @@ export const useAppStore = () => {
     };
     runInit();
 
+    // Subscribe to segment_discarded events (Plan 3)
+    unsubscribeSegmentDiscarded = listen<SegmentDiscardedEvent>('segment_discarded', (event) => {
+      if (canceled) return;
+      const { revision, segment_id } = event.payload;
+      console.debug('[segment_discarded]', { revision, segment_id, reason: event.payload.reason });
+      
+      // Remove segment from list by revision
+      setSegments((prev) => {
+        const getInternalKey = (s: Segment) => {
+          if (s.segment_id !== null && s.segment_id !== undefined) {
+            return `seg-${s.segment_id}`;
+          }
+          if (s.id !== null && s.id !== undefined) {
+            return `db-${s.id}`;
+          }
+          return `ts-${s.start.toFixed(3)}`;
+        };
+        
+        const filtered = prev.filter(s => {
+          const key = getInternalKey(s);
+          // Remove if segment_id matches
+          if (segment_id !== null && s.segment_id === segment_id) {
+            return false;
+          }
+          // Also remove if revision matches (for segments without segment_id)
+          if (s.revision !== undefined && revision !== undefined && s.revision === revision) {
+            return false;
+          }
+          return true;
+        });
+        
+        return filtered.sort((a, b) => {
+          if (a.wall_start !== b.wall_start) {
+            return a.wall_start.localeCompare(b.wall_start);
+          }
+          return a.start - b.start;
+        });
+      });
+    });
+
     return () => {
       canceled = true;
       if (initTimer !== null) {
         window.clearTimeout(initTimer);
+      }
+      if (unsubscribeSegmentDiscarded) {
+        unsubscribeSegmentDiscarded();
       }
     };
   }, [loadSegments]);

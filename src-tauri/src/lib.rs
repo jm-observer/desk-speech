@@ -229,6 +229,7 @@ pub(crate) struct AppState {
     llm_settings: Arc<RwLock<LlmSettings>>,
     llm_models_cache: Arc<RwLock<Option<CachedModels>>>,
     selected_device: Arc<RwLock<Option<String>>>,
+    app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
 }
 
 pub(crate) struct RecordingAnchor {
@@ -447,6 +448,7 @@ fn build_app_state(
         llm_settings: Arc::new(RwLock::new(llm_settings)),
         llm_models_cache: Arc::new(RwLock::new(None)),
         selected_device: Arc::new(RwLock::new(None)),
+        app_handle: Arc::new(RwLock::new(None)),
     }
 }
 
