@@ -566,10 +566,12 @@ function App() {
         <main className="flex-1 flex flex-col min-w-0">
           <div className="flex-1 overflow-y-auto p-4 px-6">
             <div className="max-w-none mx-0 flex flex-col gap-3">
-              {store.segments.length === 0 && store.status === 'idle' && (
+              {store.segments.length === 0 && (store.status === 'idle' || store.status === 'finished') && (
                 <div className="flex flex-col items-center justify-center py-40 gap-4 opacity-30">
                   <Icon name="mic" size={48} stroke={1.2} />
-                  <p className="text-sm font-medium">准备就绪，点击“开始录音”开始识别</p>
+                  <p className="text-sm font-medium">
+                    {store.status === 'idle' ? '准备就绪，点击“开始录音”开始识别' : '当前没有可展示的识别结果'}
+                  </p>
                 </div>
               )}
 
