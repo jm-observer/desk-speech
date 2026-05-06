@@ -18,6 +18,8 @@ const SIMPLE_WINDOW_SIZE = { width: 560, height: 280 };
 const DETAILED_WINDOW_MIN_SIZE = { width: 900, height: 600 };
 const DETAILED_WINDOW_SIZE = { width: 1280, height: 820 };
 const AUTO_RECORDING_STORAGE_KEY = 'streaming-speech:auto-recording';
+const MANUAL_REFRESH_INTERVAL_MS = 800;
+const MANUAL_REFRESH_MAX_ATTEMPTS = 25;
 
 
 async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
@@ -442,21 +444,64 @@ function App() {
       }
 
       try {
+        const targetRevision = segment.revision;
         manualTriggeredRevisionsRef.current.add(segment.revision);
-        await TauriAPI.manualOptimizeTranslate(segment.revision);
+        await TauriAPI.manualOptimizeTranslate(targetRevision);
         if (store.status !== 'recording' && store.status !== 'processing') {
           store.setStatus('processing');
         }
-        window.setTimeout(() => {
-          refreshSegments().catch((err) => console.error('Deferred refresh failed', err));
-        }, 1200);
+        let attempts = 0;
+        while (attempts < MANUAL_REFRESH_MAX_ATTEMPTS) {
+          await new Promise((resolve) => window.setTimeout(resolve, MANUAL_REFRESH_INTERVAL_MS));
+          attempts += 1;
+
+          const rows = await TauriAPI.listSegments(0, 200);
+          const mapped = rows
+            .map((row) => ({
+              id: typeof row.id === 'number' ? row.id : null,
+              segment_id: typeof row.segment_id === 'number' ? row.segment_id : null,
+              revision: typeof row.revision === 'number' ? row.revision : undefined,
+              start: typeof row.start_sec === 'number' ? row.start_sec : 0,
+              end: typeof row.end_sec === 'number' ? row.end_sec : 0,
+              wall_start: typeof row.wall_start === 'string' ? row.wall_start : '',
+              wall_end: typeof row.wall_end === 'string' ? row.wall_end : '',
+              text_raw: typeof row.text_raw === 'string' ? row.text_raw : '',
+              text_optimized: typeof row.text_optimized === 'string' ? row.text_optimized : undefined,
+              text_english: typeof row.text_english === 'string' ? row.text_english : undefined,
+              optimize_status: (row.optimize_status === 'pending' ||
+              row.optimize_status === 'running' ||
+              row.optimize_status === 'success' ||
+              row.optimize_status === 'failed'
+                ? row.optimize_status
+                : 'pending') as Segment['optimize_status'],
+              translate_status: (row.translate_status === 'blocked' ||
+              row.translate_status === 'pending' ||
+              row.translate_status === 'running' ||
+              row.translate_status === 'success' ||
+              row.translate_status === 'failed'
+                ? row.translate_status
+                : 'blocked') as Segment['translate_status'],
+            }))
+            .filter((seg) => seg.text_raw.trim().length > 0);
+          mergeSegmentsByRevision(mapped);
+
+          const target = mapped.find((item) => item.revision === targetRevision);
+          if (!target) {
+            continue;
+          }
+          const optimizeDone = target.optimize_status === 'success' || target.optimize_status === 'failed';
+          const translateDone = target.translate_status === 'success' || target.translate_status === 'failed' || target.translate_status === 'blocked';
+          if (optimizeDone && translateDone) {
+            break;
+          }
+        }
       } catch (err) {
         manualTriggeredRevisionsRef.current.delete(segment.revision);
         console.error('Manual optimize translate failed', err);
         alert(`手动优化与翻译失败: ${err}`);
       }
     },
-    [refreshSegments, store]
+    [mergeSegmentsByRevision, store]
   );
 
   const handleClear = async () => {

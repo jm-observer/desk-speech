@@ -81,6 +81,42 @@ export interface SegmentDiscardedEvent {
   occurred_at_ms: number;
 }
 
+export interface SegmentUpdatedEvent {
+  id: number;
+  segment_id: number;
+  revision: number;
+  start_sec: number;
+  end_sec: number;
+  wall_start: string;
+  wall_end: string;
+  text_raw: string;
+  optimize_status: Segment['optimize_status'];
+  translate_status: Segment['translate_status'];
+  text_optimized?: string;
+  text_english?: string;
+  created_at: string;
+}
+
+export interface QualityFilterConfig {
+  llm_prompt_template: string;
+  discard_confidence_threshold: number;
+  silence_window_ms: number;
+  filler_tokens: string[];
+  single_name_patterns: string[];
+  repeat_ratio_threshold: number;
+  enabled: boolean;
+  version: number;
+}
+
+export interface ConfigValidationError {
+  field: string;
+  message: string;
+}
+
+export interface ValidationErrorsResponse {
+  errors: ConfigValidationError[];
+}
+
 export const TauriAPI = {
   startRecording: () => invoke('start_recording'),
   stopRecording: () => invoke('stop_recording'),
@@ -105,4 +141,7 @@ export const TauriAPI = {
   getRecordedAudioPath: () => invoke<string>('get_recorded_audio_path'),
   saveAllAudio: (path: string) => invoke('save_all_audio', { path }),
   exportSrt: (path: string) => invoke('export_srt', { path }),
+  getQualityFilterConfig: () => invoke<QualityFilterConfig>('get_quality_filter_config'),
+  saveQualityFilterConfig: (payload: Omit<QualityFilterConfig, 'version'>) => invoke('save_quality_filter_config', { payload }),
+  resetQualityFilterConfig: () => invoke<QualityFilterConfig>('reset_quality_filter_config'),
 };

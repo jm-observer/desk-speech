@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::db::{repository::SegmentRow, SpeechDatabase};
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct DbSegmentDto {
     pub id: i64,
     pub segment_id: u64,
@@ -29,7 +29,7 @@ pub async fn tail_segments(db: &SpeechDatabase, after_id: i64, limit: u32) -> Re
     Ok(rows.into_iter().map(to_segment_dto).collect())
 }
 
-fn to_segment_dto(row: SegmentRow) -> DbSegmentDto {
+pub(crate) fn to_segment_dto(row: SegmentRow) -> DbSegmentDto {
     DbSegmentDto {
         id: row.id,
         segment_id: row.segment_id,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { TauriAPI, type SegmentDiscardedEvent } from '../api/tauri-client';
+import { TauriAPI, type SegmentDiscardedEvent, type SegmentUpdatedEvent, type QualityFilterConfig, type ValidationErrorsResponse } from '../api/tauri-client';
 import type { Segment } from '../api/tauri-client';
 import { listen } from '@tauri-apps/api/event';
 
@@ -13,6 +13,8 @@ export const useAppStore = () => {
   const [showEnglish, setShowEnglish] = useState(true);
   const [uiMode, setUiMode] = useState<'detailed' | 'simple'>('detailed');
   const [isInitialized, setIsInitialized] = useState(false);
+  const [qualityFilterConfig, setQualityFilterConfig] = useState<QualityFilterConfig | null>(null);
+  const [configValidationError, setConfigValidationError] = useState<string | null>(null);
 
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
@@ -97,6 +99,9 @@ export const useAppStore = () => {
     let canceled = false;
     let initTimer: number | null = null;
     let unsubscribeSegmentDiscarded: (() => void) | null = null;
+    let unsubscribeSegmentUpdated: (() => void) | null = null;
+    let unsubscribeConfigUpdated: (() => void) | null = null;
+    let unsubscribeConfigValidationError: (() => void) | null = null;
 
     const init = async () => {
       try {
@@ -107,6 +112,15 @@ export const useAppStore = () => {
         const selected = await TauriAPI.getSelectedDevice();
         if (canceled) return;
         if (selected) setSelectedDevice(selected);
+
+        // Load quality filter config
+        try {
+          const config = await TauriAPI.getQualityFilterConfig();
+          if (canceled) return;
+          setQualityFilterConfig(config);
+        } catch (err) {
+          console.error('Failed to load quality filter config', err);
+        }
 
         // Check init status
         pollInit();
@@ -178,6 +192,82 @@ export const useAppStore = () => {
         console.error('Subscribe segment_discarded failed', err);
       });
 
+    void listen<SegmentUpdatedEvent>('segment_updated', (event) => {
+      if (canceled) return;
+      const row = event.payload;
+      const next = mapDbSegment(row as unknown as Record<string, unknown>);
+      if (next.revision === undefined) {
+        return;
+      }
+      console.debug('[segment_updated]', { revision: next.revision, segmentId: next.segment_id });
+      setSegments((prev) => {
+        const updated = prev.map((segment) => {
+          if (segment.revision !== next.revision) {
+            return segment;
+          }
+          return {
+            ...segment,
+            ...next,
+          };
+        });
+
+        return updated.sort((a, b) => {
+          if (a.wall_start !== b.wall_start) {
+            return a.wall_start.localeCompare(b.wall_start);
+          }
+          return a.start - b.start;
+        });
+      });
+    })
+      .then((unlisten) => {
+        if (canceled) {
+          unlisten();
+          return;
+        }
+        unsubscribeSegmentUpdated = unlisten;
+      })
+      .catch((err) => {
+        console.error('Subscribe segment_updated failed', err);
+      });
+
+    // Subscribe to quality filter config updated events
+    void listen<QualityFilterConfig>('quality_filter_config_updated', (event) => {
+      if (canceled) return;
+      console.debug('[quality_filter_config_updated]', event.payload);
+      setQualityFilterConfig(event.payload);
+    })
+      .then((unlisten) => {
+        if (canceled) {
+          unlisten();
+          return;
+        }
+        unsubscribeConfigUpdated = unlisten;
+      })
+      .catch((err) => {
+        console.error('Subscribe quality_filter_config_updated failed', err);
+      });
+
+    // Subscribe to validation errors
+    void listen<ValidationErrorsResponse>('quality_filter_config_validation_error', (event) => {
+      if (canceled) return;
+      const errors = event.payload.errors;
+      const messages = errors.map(e => `${e.field}: ${e.message}`).join('; ');
+      setConfigValidationError(messages);
+      console.warn('[quality_filter_config_validation_error]', messages);
+      // Clear after 5 seconds
+      setTimeout(() => setConfigValidationError(null), 5000);
+    })
+      .then((unlisten) => {
+        if (canceled) {
+          unlisten();
+          return;
+        }
+        unsubscribeConfigValidationError = unlisten;
+      })
+      .catch((err) => {
+        console.error('Subscribe quality_filter_config_validation_error failed', err);
+      });
+
     return () => {
       canceled = true;
       if (initTimer !== null) {
@@ -185,6 +275,15 @@ export const useAppStore = () => {
       }
       if (typeof unsubscribeSegmentDiscarded === 'function') {
         unsubscribeSegmentDiscarded();
+      }
+      if (typeof unsubscribeSegmentUpdated === 'function') {
+        unsubscribeSegmentUpdated();
+      }
+      if (typeof unsubscribeConfigUpdated === 'function') {
+        unsubscribeConfigUpdated();
+      }
+      if (typeof unsubscribeConfigValidationError === 'function') {
+        unsubscribeConfigValidationError();
       }
     };
   }, [loadSegments]);
@@ -197,6 +296,8 @@ export const useAppStore = () => {
     selectedDevice, setSelectedDevice,
     showEnglish, setShowEnglish,
     uiMode, setUiMode,
-    isInitialized
+    isInitialized,
+    qualityFilterConfig, setQualityFilterConfig,
+    configValidationError, setConfigValidationError,
   };
 };

@@ -94,6 +94,7 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         next_revision: Arc::clone(&state.next_revision),
         settings: Arc::clone(&state.settings),
         llm_settings: Arc::clone(&state.llm_settings),
+        quality_filter_config: Arc::clone(&state.quality_filter_config),
         llm_models_cache: Arc::clone(&state.llm_models_cache),
         selected_device: Arc::clone(&state.selected_device),
         app_handle: Arc::new(RwLock::new(Some(app.clone()))),
@@ -689,6 +690,7 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
     let segments = Arc::clone(&state.segments);
     let db_writer = Arc::clone(&state.db_writer);
     let llm_settings = Arc::clone(&state.llm_settings);
+    let quality_filter_config = Arc::clone(&state.quality_filter_config);
     let db = Arc::clone(&state.db);
     let app_handle = {
         let guard = read_lock(&state.app_handle);
@@ -696,8 +698,24 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
     };
 
     tauri::async_runtime::spawn(async move {
+        let config = read_lock(&quality_filter_config).clone();
         tokio::time::sleep(Duration::from_millis(FINALIZE_SILENCE_MS)).await;
         if !can_start_finalization_check(&segments, revision) {
+            return;
+        }
+
+        // If quality filter is disabled, skip discard logic but keep logging
+        if !config.enabled {
+            info!("[finalization] quality filter disabled, skipping discard for revision={revision}");
+            set_segment_finalization_state(&segments, revision, "kept");
+            let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                revision,
+                is_discarded: false,
+                discard_reason: Some("质量过滤已禁用".to_string()),
+                discard_source: Some("system".to_string()),
+                discard_confidence: None,
+                quality_check_status: "kept".to_string(),
+            });
             return;
         }
 
@@ -760,7 +778,7 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
 
         // Step 2: Rule-based discard (lightweight, no LLM)
         let text_to_check = seg.text_raw.clone();
-        if check_discard_rules(&text_to_check) {
+        if check_discard_rules(&text_to_check, &config) {
             info!("[finalization] rule-based DISCARD, revision={revision}, text={text_to_check}");
             set_segment_finalization_state(&segments, revision, "discarded");
             let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
@@ -798,7 +816,7 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
             text_english: seg.text_english.clone(),
         };
 
-        let judgment_result = match judge_discard(&settings, &judgment_input).await {
+        let judgment_result = match judge_discard(&settings, &config, &judgment_input).await {
             Ok(r) => r,
             Err(e) => {
                 error!("[finalization] LLM judgment failed, revision={revision}: {e}");
@@ -816,7 +834,7 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
         };
 
         // Step 4: Evaluate and apply result
-        let should_discard = evaluate_judgment(&judgment_result);
+        let should_discard = evaluate_judgment(&judgment_result, &config);
         if should_discard {
             info!(
                 "[finalization] LLM DISCARD, revision={revision}, confidence={}, reason={}",

@@ -2,8 +2,10 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use log::{error, info, warn};
+use tauri::Emitter;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
+use crate::commands::history::to_segment_dto;
 use crate::db::repository::{OptimizeResultUpsert, TranslateResultUpsert};
 use crate::db::SpeechDatabase;
 use crate::llm_client::{optimize_text, translate_text};
@@ -32,7 +34,7 @@ pub async fn manual_optimize_translate(
     let db = clone_database(&state)?;
     let text_raw = validate_manual_target(&state, &db, revision).await?;
     let settings = read_lock(&state.llm_settings).clone();
-    reset_manual_state(&db, &state.segments, revision)
+    reset_manual_state(&db, &state.segments, &app_handle, revision)
         .await
         .map_err(|err| err.to_string())?;
 
@@ -90,6 +92,7 @@ async fn validate_manual_target(
 async fn reset_manual_state(
     db: &SpeechDatabase,
     segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    app_handle: &tauri::AppHandle,
     revision: i64,
 ) -> Result<()> {
     db.update_optimize_status(revision, STATUS_PENDING.to_string())
@@ -107,6 +110,7 @@ async fn reset_manual_state(
         Some(String::new()),
         Some(String::new()),
     );
+    emit_segment_updated(db, app_handle, revision).await;
     Ok(())
 }
 
@@ -118,28 +122,28 @@ async fn run_manual_optimize_translate(
     segments: Arc<RwLock<Vec<SegmentResult>>>,
     app_handle: tauri::AppHandle,
 ) -> Result<()> {
-    mark_optimize_running(&db, &segments, revision).await?;
+    mark_optimize_running(&db, &segments, &app_handle, revision).await?;
 
     let optimized = match optimize_text(&settings, &text_raw).await {
         Ok(optimized) => optimized,
         Err(err) => {
-            mark_optimize_failed(&db, &segments, revision).await?;
+            mark_optimize_failed(&db, &segments, &app_handle, revision).await?;
             return Err(anyhow::anyhow!("optimize failed for revision={revision}: {err}"));
         }
     };
 
-    save_optimize_result(&db, &segments, revision, optimized.clone()).await?;
-    mark_translate_running(&db, &segments, revision).await?;
+    save_optimize_result(&db, &segments, &app_handle, revision, optimized.clone()).await?;
+    mark_translate_running(&db, &segments, &app_handle, revision).await?;
 
     let english = match translate_text(&settings, &optimized).await {
         Ok(english) => english,
         Err(err) => {
-            mark_translate_failed(&db, &segments, revision).await?;
+            mark_translate_failed(&db, &segments, &app_handle, revision).await?;
             return Err(anyhow::anyhow!("translate failed for revision={revision}: {err}"));
         }
     };
 
-    save_translate_result(&db, &segments, revision, english.clone()).await?;
+    save_translate_result(&db, &segments, &app_handle, revision, english.clone()).await?;
     maybe_copy_result(&app_handle, settings.auto_copy_mode, &optimized, &english, revision);
     info!("[manual_optimize_translate] finished for revision={revision}");
     Ok(())
@@ -148,18 +152,21 @@ async fn run_manual_optimize_translate(
 async fn mark_optimize_running(
     db: &SpeechDatabase,
     segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    app_handle: &tauri::AppHandle,
     revision: i64,
 ) -> Result<()> {
     db.update_optimize_status(revision, STATUS_RUNNING.to_string())
         .await
         .with_context(|| format!("failed to mark optimize running for revision={revision}"))?;
     update_segment_llm_state(segments, revision, Some(STATUS_RUNNING), None, None, None);
+    emit_segment_updated(db, app_handle, revision).await;
     Ok(())
 }
 
 async fn save_optimize_result(
     db: &SpeechDatabase,
     segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    app_handle: &tauri::AppHandle,
     revision: i64,
     optimized: String,
 ) -> Result<()> {
@@ -187,24 +194,28 @@ async fn save_optimize_result(
         Some(optimized),
         None,
     );
+    emit_segment_updated(db, app_handle, revision).await;
     Ok(())
 }
 
 async fn mark_translate_running(
     db: &SpeechDatabase,
     segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    app_handle: &tauri::AppHandle,
     revision: i64,
 ) -> Result<()> {
     db.update_translate_status(revision, STATUS_RUNNING.to_string())
         .await
         .with_context(|| format!("failed to mark translate running for revision={revision}"))?;
     update_segment_llm_state(segments, revision, None, Some(STATUS_RUNNING), None, None);
+    emit_segment_updated(db, app_handle, revision).await;
     Ok(())
 }
 
 async fn save_translate_result(
     db: &SpeechDatabase,
     segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    app_handle: &tauri::AppHandle,
     revision: i64,
     english: String,
 ) -> Result<()> {
@@ -222,12 +233,14 @@ async fn save_translate_result(
         .with_context(|| format!("failed to mark translate success for revision={revision}"))?;
 
     update_segment_llm_state(segments, revision, None, Some(STATUS_SUCCESS), None, Some(english));
+    emit_segment_updated(db, app_handle, revision).await;
     Ok(())
 }
 
 async fn mark_optimize_failed(
     db: &SpeechDatabase,
     segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    app_handle: &tauri::AppHandle,
     revision: i64,
 ) -> Result<()> {
     db.update_optimize_status(revision, STATUS_FAILED.to_string())
@@ -245,19 +258,38 @@ async fn mark_optimize_failed(
         None,
         None,
     );
+    emit_segment_updated(db, app_handle, revision).await;
     Ok(())
 }
 
 async fn mark_translate_failed(
     db: &SpeechDatabase,
     segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    app_handle: &tauri::AppHandle,
     revision: i64,
 ) -> Result<()> {
     db.update_translate_status(revision, STATUS_FAILED.to_string())
         .await
         .with_context(|| format!("failed to mark translate failed for revision={revision}"))?;
     update_segment_llm_state(segments, revision, None, Some(STATUS_FAILED), None, None);
+    emit_segment_updated(db, app_handle, revision).await;
     Ok(())
+}
+
+async fn emit_segment_updated(db: &SpeechDatabase, app_handle: &tauri::AppHandle, revision: i64) {
+    match db.get_segment_by_revision(revision).await {
+        Ok(Some(row)) => {
+            if let Err(err) = app_handle.emit("segment_updated", to_segment_dto(row)) {
+                warn!("[manual_optimize_translate] emit segment_updated failed for revision={revision}: {err}");
+            }
+        }
+        Ok(None) => {
+            warn!("[manual_optimize_translate] emit skipped, revision not found: {revision}");
+        }
+        Err(err) => {
+            warn!("[manual_optimize_translate] query revision for emit failed, revision={revision}: {err}");
+        }
+    }
 }
 
 fn maybe_copy_result(

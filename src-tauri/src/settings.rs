@@ -6,6 +6,7 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 
 use crate::build_models;
+use crate::config::quality_filter::QualityFilterConfig;
 use crate::db;
 use crate::llm_client::{list_models as llm_list_models, model_cache_valid, CachedModels};
 use crate::llm_settings::{validate_llm_settings, AutoCopyMode, LlmSettings};
@@ -286,4 +287,130 @@ pub(crate) async fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSet
     }
 
     settings
+}
+
+// ─── QualityFilterConfig helpers ────────────────────────────────────────────
+
+pub(crate) async fn load_quality_filter_config_from_db(db: &db::SpeechDatabase) -> QualityFilterConfig {
+    let mut config = QualityFilterConfig::default();
+
+    // Load prompt template
+    if let Ok(Some(v)) = db.get_setting("quality_filter.llm_prompt_template".to_string()).await {
+        config.llm_prompt_template = v;
+    }
+
+    // Load discard confidence threshold
+    if let Ok(Some(v)) = db
+        .get_setting("quality_filter.discard_confidence_threshold".to_string())
+        .await
+    {
+        if let Ok(val) = v.parse::<f32>() {
+            if (0.0..=1.0).contains(&val) {
+                config.discard_confidence_threshold = val;
+            }
+        }
+    }
+
+    // Load silence window ms
+    if let Ok(Some(v)) = db.get_setting("quality_filter.silence_window_ms".to_string()).await {
+        if let Ok(val) = v.parse::<u64>() {
+            if val >= 1000 {
+                config.silence_window_ms = val;
+            }
+        }
+    }
+
+    // Load repeat ratio threshold
+    if let Ok(Some(v)) = db
+        .get_setting("quality_filter.repeat_ratio_threshold".to_string())
+        .await
+    {
+        if let Ok(val) = v.parse::<f32>() {
+            if (0.0..=1.0).contains(&val) {
+                config.repeat_ratio_threshold = val;
+            }
+        }
+    }
+
+    // Load enabled flag
+    if let Ok(Some(v)) = db.get_setting("quality_filter.enabled".to_string()).await {
+        config.enabled = v != "false" && v != "0";
+    }
+
+    // Load filler tokens (comma-separated)
+    if let Ok(Some(v)) = db.get_setting("quality_filter.filler_tokens".to_string()).await {
+        if !v.is_empty() {
+            config.filler_tokens = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+
+    // Load single name patterns (comma-separated)
+    if let Ok(Some(v)) = db.get_setting("quality_filter.single_name_patterns".to_string()).await {
+        if !v.is_empty() {
+            config.single_name_patterns = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+
+    config
+}
+
+pub(crate) async fn save_quality_filter_config_to_db(
+    db: &db::SpeechDatabase,
+    config: &QualityFilterConfig,
+) -> Result<(), String> {
+    db.upsert_setting(
+        "quality_filter.llm_prompt_template".to_string(),
+        config.llm_prompt_template.clone(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    db.upsert_setting(
+        "quality_filter.discard_confidence_threshold".to_string(),
+        config.discard_confidence_threshold.to_string(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    db.upsert_setting(
+        "quality_filter.silence_window_ms".to_string(),
+        config.silence_window_ms.to_string(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    db.upsert_setting(
+        "quality_filter.repeat_ratio_threshold".to_string(),
+        config.repeat_ratio_threshold.to_string(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    db.upsert_setting("quality_filter.enabled".to_string(), config.enabled.to_string())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    db.upsert_setting(
+        "quality_filter.filler_tokens".to_string(),
+        config.filler_tokens.join(","),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    db.upsert_setting(
+        "quality_filter.single_name_patterns".to_string(),
+        config.single_name_patterns.join(","),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }

@@ -1,19 +1,25 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use anyhow::{anyhow, Result};
 
-#[cfg(test)]
-#[path = "lock_utils.rs"]
-mod lock_utils;
-
-#[cfg(test)]
-use self::lock_utils::{read_lock, write_lock};
 use crate::db::repository::CorrectionRule;
-#[cfg(not(test))]
-use crate::lock_utils::{read_lock, write_lock};
+
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct RuleSnapshot {

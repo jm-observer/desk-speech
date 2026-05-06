@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
-    CreateChatCompletionRequestArgs, ResponseFormat,
+    CreateChatCompletionRequestArgs, ReasoningEffort, ResponseFormat,
 };
 use async_openai::Client;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::quality_filter::QualityFilterConfig;
 use crate::llm_settings::LlmSettings;
 use tokio::time::sleep;
 
@@ -34,8 +35,6 @@ pub struct JudgmentResult {
     pub confidence: f32,
     pub reason: String,
 }
-
-const JUDGMENT_CONFIDENCE_THRESHOLD: f32 = 0.65;
 
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 const LLM_RETRY_MAX_ATTEMPTS: u32 = 3;
@@ -137,6 +136,7 @@ async fn chat_json_completion(settings: &LlmSettings, system_prompt: &str, input
     let request = CreateChatCompletionRequestArgs::default()
         .model(settings.selected_model.clone())
         .messages(vec![system_message, user_message])
+        .reasoning_effort(ReasoningEffort::None)
         .response_format(ResponseFormat::JsonObject)
         .build()
         .map_err(|e| e.to_string())?;
@@ -170,17 +170,13 @@ fn extract_json(content: &str) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 /// Check if text is composed only of filler words / interjections.
-fn is_pure_filler(text: &str) -> bool {
+fn is_pure_filler(text: &str, config: &QualityFilterConfig) -> bool {
     let t = text.trim().to_lowercase();
-    const FILLERS: &[&str] = &[
-        "ok", "okay", "嗯", "啊", "呃", "嗯嗯", "嗯嗯", "哦", "哎", "唉", "对", "对对", "是", "是的", "好", "好好",
-        "嗯哼", "嘛",
-    ];
-    FILLERS.contains(&t.as_str())
+    config.filler_tokens.iter().any(|f| f.to_lowercase() == t)
 }
 
 /// Check if text matches a single name/title pattern (no verbs/real meaning).
-fn is_single_name(text: &str) -> bool {
+fn is_single_name(text: &str, _config: &QualityFilterConfig) -> bool {
     let t = text.trim();
     // Heuristic: 2-3 Chinese characters, no verbs commonly found in speech.
     let char_count = t.chars().count();
@@ -200,7 +196,7 @@ fn is_single_name(text: &str) -> bool {
 }
 
 /// Check if text has high repetition of the same token.
-fn is_high_repetition(text: &str) -> bool {
+fn is_high_repetition(text: &str, config: &QualityFilterConfig) -> bool {
     let t = text.trim();
     let len = t.chars().count();
     if len == 0 || len > 8 {
@@ -212,20 +208,23 @@ fn is_high_repetition(text: &str) -> bool {
         *freq.entry(c).or_insert(0) += 1;
     }
     if let Some(&max_count) = freq.values().max() {
-        // Same token repetition >= 0.8
-        return (max_count as f32 / len as f32) >= 0.8;
+        // Same token repetition >= threshold
+        return (max_count as f32 / len as f32) >= config.repeat_ratio_threshold;
     }
     false
 }
 
 /// Run lightweight rules. Returns `Some(true)` if text should be discarded by rule.
-pub fn check_discard_rules(text: &str) -> bool {
+pub fn check_discard_rules(text: &str, config: &QualityFilterConfig) -> bool {
+    if !config.enabled {
+        return false;
+    }
     let normalized = text.trim();
     if normalized.is_empty() {
         return true;
     }
     // Rule 1: Pure filler
-    if is_pure_filler(normalized) {
+    if is_pure_filler(normalized, config) {
         return true;
     }
     // Rule 2: Very short ASCII tokens (e.g. ok/hi/a) are low information.
@@ -233,11 +232,11 @@ pub fn check_discard_rules(text: &str) -> bool {
         return true;
     }
     // Rule 3: Single name/title
-    if is_single_name(normalized) {
+    if is_single_name(normalized, config) {
         return true;
     }
     // Rule 4: High repetition
-    if is_high_repetition(normalized) {
+    if is_high_repetition(normalized, config) {
         return true;
     }
     false
@@ -245,12 +244,25 @@ pub fn check_discard_rules(text: &str) -> bool {
 
 /// Call LLM to perform judgment. Returns (decision, confidence, reason).
 /// On failure, returns ("FAILED", 0.0, "llm_error").
-pub async fn judge_discard(settings: &LlmSettings, input: &JudgmentInput) -> Result<JudgmentResult, String> {
-    let system_prompt = settings
-        .discard_prompt_template
-        .replace("{text_optimized}", input.text_optimized.as_deref().unwrap_or(""))
-        .replace("{text_raw}", &input.text_raw)
-        .replace("{text_english}", input.text_english.as_deref().unwrap_or(""));
+pub async fn judge_discard(
+    settings: &LlmSettings,
+    config: &QualityFilterConfig,
+    input: &JudgmentInput,
+) -> Result<JudgmentResult, String> {
+    // Use config prompt template if available, fallback to settings
+    let system_prompt = if !config.llm_prompt_template.is_empty() && config.has_placeholders() {
+        config.render_prompt_template(
+            &input.text_raw,
+            input.text_optimized.as_deref(),
+            input.text_english.as_deref(),
+        )
+    } else {
+        settings
+            .discard_prompt_template
+            .replace("{text_optimized}", input.text_optimized.as_deref().unwrap_or(""))
+            .replace("{text_raw}", &input.text_raw)
+            .replace("{text_english}", input.text_english.as_deref().unwrap_or(""))
+    };
 
     // Primary input: text_optimized > text_raw
     let user_input = input
@@ -265,8 +277,9 @@ pub async fn judge_discard(settings: &LlmSettings, input: &JudgmentInput) -> Res
     let json_value = extract_json(&content)?;
     let parsed: LlmJudgmentOutput = serde_json::from_value(json_value).map_err(|e| e.to_string())?;
 
-    // Apply confidence threshold
-    let final_decision = if parsed.decision == "DISCARD" && parsed.confidence >= JUDGMENT_CONFIDENCE_THRESHOLD {
+    // Apply confidence threshold from config
+    let threshold = config.discard_confidence_threshold;
+    let final_decision = if parsed.decision == "DISCARD" && parsed.confidence >= threshold {
         "DISCARD".to_string()
     } else if parsed.decision == "DISCARD" {
         // Low confidence DISCARD → conservative KEEP
@@ -284,13 +297,14 @@ pub async fn judge_discard(settings: &LlmSettings, input: &JudgmentInput) -> Res
 
 /// Evaluate the final judgment result.
 /// Returns true if the segment should be discarded.
-/// Applies confidence threshold: DISCARD with confidence < 0.65 is kept.
-pub fn evaluate_judgment(result: &JudgmentResult) -> bool {
+/// Applies confidence threshold: DISCARD with confidence < threshold is kept.
+pub fn evaluate_judgment(result: &JudgmentResult, config: &QualityFilterConfig) -> bool {
     if result.decision == "KEEP" {
         return false;
     }
     // DISCARD decision
-    if result.confidence >= JUDGMENT_CONFIDENCE_THRESHOLD {
+    let threshold = config.discard_confidence_threshold;
+    if result.confidence >= threshold {
         return true;
     }
     // Low confidence DISCARD → conservative KEEP
@@ -398,71 +412,80 @@ mod tests {
 
     #[test]
     fn check_discard_rules_short_text() {
-        assert!(check_discard_rules("ok"));
-        assert!(check_discard_rules("嗯"));
-        assert!(check_discard_rules("a"));
+        let config = QualityFilterConfig::default();
+        assert!(check_discard_rules("ok", &config));
+        assert!(check_discard_rules("嗯", &config));
+        assert!(check_discard_rules("a", &config));
     }
 
     #[test]
     fn check_discard_rules_filler_words() {
-        assert!(check_discard_rules("嗯嗯"));
-        assert!(check_discard_rules("啊"));
-        assert!(check_discard_rules("对对"));
+        let config = QualityFilterConfig::default();
+        assert!(check_discard_rules("嗯嗯", &config));
+        assert!(check_discard_rules("啊", &config));
+        assert!(check_discard_rules("对对", &config));
     }
 
     #[test]
     fn check_discard_rules_single_name() {
-        assert!(check_discard_rules("张三"));
-        assert!(check_discard_rules("李明"));
+        let config = QualityFilterConfig::default();
+        assert!(check_discard_rules("张三", &config));
+        assert!(check_discard_rules("李明", &config));
     }
 
     #[test]
     fn check_discard_rules_high_repetition() {
-        assert!(check_discard_rules("啊啊啊啊"));
-        assert!(check_discard_rules("嗯嗯嗯"));
+        let config = QualityFilterConfig::default();
+        assert!(check_discard_rules("啊啊啊啊", &config));
+        assert!(check_discard_rules("嗯嗯嗯", &config));
     }
 
     #[test]
     fn check_discard_rules_keeps_meaningful_text() {
-        assert!(!check_discard_rules("今天天气不错"));
-        assert!(!check_discard_rules("你好，请问有什么可以帮助你的"));
-        assert!(!check_discard_rules("会议开始"));
+        let config = QualityFilterConfig::default();
+        assert!(!check_discard_rules("今天天气不错", &config));
+        assert!(!check_discard_rules("你好，请问有什么可以帮助你的", &config));
+        assert!(!check_discard_rules("会议开始", &config));
     }
 
     #[test]
     fn check_discard_rules_excludes_common_non_names() {
-        assert!(!check_discard_rules("老师"));
-        assert!(!check_discard_rules("同学"));
-        assert!(!check_discard_rules("大家"));
+        let config = QualityFilterConfig::default();
+        assert!(!check_discard_rules("老师", &config));
+        assert!(!check_discard_rules("同学", &config));
+        assert!(!check_discard_rules("大家", &config));
     }
 
     #[test]
     fn evaluate_judgment_keeps_discard_when_confidence_high() {
+        let config = QualityFilterConfig::default();
         let result = JudgmentResult {
             decision: "DISCARD".to_string(),
             confidence: 0.8,
             reason: "filler".to_string(),
         };
-        assert!(evaluate_judgment(&result));
+        assert!(evaluate_judgment(&result, &config));
     }
 
     #[test]
-    fn evaluate_judgment_Keeps_discard_when_confidence_low() {
+    fn evaluate_judgment_keeps_discard_when_confidence_low() {
+        let config = QualityFilterConfig::default();
         let result = JudgmentResult {
             decision: "DISCARD".to_string(),
             confidence: 0.5,
             reason: "uncertain".to_string(),
         };
-        assert!(!evaluate_judgment(&result));
+        assert!(!evaluate_judgment(&result, &config));
     }
 
     #[test]
     fn evaluate_judgment_keeps_keep_decision() {
+        let config = QualityFilterConfig::default();
         let result = JudgmentResult {
             decision: "KEEP".to_string(),
             confidence: 0.9,
             reason: "meaningful".to_string(),
         };
-        assert!(!evaluate_judgment(&result));
+        assert!(!evaluate_judgment(&result, &config));
     }
 }

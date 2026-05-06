@@ -1,5 +1,6 @@
 mod audio_buffer;
 mod commands;
+mod config;
 mod correction;
 pub mod db;
 mod db_worker;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 
+use crate::config::quality_filter::QualityFilterConfig;
 use crate::correction::CorrectionEngine;
 use crate::llm_client::CachedModels;
 use crate::llm_settings::LlmSettings;
@@ -227,6 +229,7 @@ pub(crate) struct AppState {
     next_revision: Arc<AtomicU64>,
     settings: Arc<RwLock<VadSettings>>,
     llm_settings: Arc<RwLock<LlmSettings>>,
+    quality_filter_config: Arc<RwLock<QualityFilterConfig>>,
     llm_models_cache: Arc<RwLock<Option<CachedModels>>>,
     selected_device: Arc<RwLock<Option<String>>>,
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
@@ -424,6 +427,7 @@ fn build_app_state(
     db: db::SpeechDatabase,
     db_writer: SyncSender<db_worker::DbEvent>,
     llm_settings: LlmSettings,
+    quality_filter_config: QualityFilterConfig,
     next_segment_id: u64,
     next_revision: u64,
 ) -> AppState {
@@ -446,6 +450,7 @@ fn build_app_state(
         next_revision: Arc::new(AtomicU64::new(next_revision)),
         settings: Arc::new(RwLock::new(VadSettings::default())),
         llm_settings: Arc::new(RwLock::new(llm_settings)),
+        quality_filter_config: Arc::new(RwLock::new(quality_filter_config)),
         llm_models_cache: Arc::new(RwLock::new(None)),
         selected_device: Arc::new(RwLock::new(None)),
         app_handle: Arc::new(RwLock::new(None)),
@@ -469,6 +474,7 @@ pub fn run() {
     };
 
     let llm_settings = tauri::async_runtime::block_on(settings::load_llm_settings_from_db(&db));
+    let quality_filter_config = tauri::async_runtime::block_on(settings::load_quality_filter_config_from_db(&db));
     let next_segment_id = match tauri::async_runtime::block_on(db.get_next_segment_id()) {
         Ok(next_segment_id) => next_segment_id,
         Err(err) => {
@@ -484,7 +490,14 @@ pub fn run() {
         }
     };
     let db_writer = db_worker::start_db_worker(db.clone());
-    let state = build_app_state(db, db_writer, llm_settings, next_segment_id, next_revision);
+    let state = build_app_state(
+        db,
+        db_writer,
+        llm_settings,
+        quality_filter_config,
+        next_segment_id,
+        next_revision,
+    );
     {
         let db_guard = mutex_lock(&state.db);
         if let Some(db) = db_guard.as_ref() {
@@ -624,6 +637,9 @@ pub fn run() {
             commands::correction_api::delete_correction_rule,
             commands::correction_api::reload_correction_rules,
             commands::manual_optimize::manual_optimize_translate,
+            commands::quality_filter::get_quality_filter_config,
+            commands::quality_filter::save_quality_filter_config,
+            commands::quality_filter::reset_quality_filter_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
