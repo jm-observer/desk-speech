@@ -19,7 +19,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 // Mock window.setTimeout/clearTimeout
-const mockSetTimeout = vi.fn((fn: () => void, ms: number) => ms);
+const mockSetTimeout = vi.fn((_fn: () => void, ms: number) => ms);
 const mockClearTimeout = vi.fn();
 vi.stubGlobal('setTimeout', mockSetTimeout);
 vi.stubGlobal('clearTimeout', mockClearTimeout);
@@ -154,8 +154,8 @@ describe('useAppStore - segment loading', () => {
   it('should filter out empty text segments', async () => {
     vi.mocked(TauriAPI.getInitStatus).mockResolvedValue({ status: 1 });
     vi.mocked(TauriAPI.listSegments).mockResolvedValue([
-      { id: 1, segment_id: 1, revision: 1, start_sec: 0, end_sec: 1, wall_start: '2026-01-01 00:00:00', wall_end: '2026-01-01 00:00:01', text_raw: 'hello', optimize_status: 'success', translate_status: 'success', segment_id: 1, revision: 1 },
-      { id: 2, segment_id: 2, revision: 2, start_sec: 1, end_sec: 2, wall_start: '2026-01-01 00:00:01', wall_end: '2026-01-01 00:00:02', text_raw: '', optimize_status: 'success', translate_status: 'success', segment_id: 2, revision: 2 },
+      { id: 1, segment_id: 1, revision: 1, start_sec: 0, end_sec: 1, wall_start: '2026-01-01 00:00:00', wall_end: '2026-01-01 00:00:01', text_raw: 'hello', optimize_status: 'success', translate_status: 'success' },
+      { id: 2, segment_id: 2, revision: 2, start_sec: 1, end_sec: 2, wall_start: '2026-01-01 00:00:01', wall_end: '2026-01-01 00:00:02', text_raw: '', optimize_status: 'success', translate_status: 'success' },
     ] as any);
 
     const store = useAppStore();
@@ -168,8 +168,8 @@ describe('useAppStore - segment loading', () => {
   it('should merge segments with same segment_id', async () => {
     vi.mocked(TauriAPI.getInitStatus).mockResolvedValue({ status: 1 });
     vi.mocked(TauriAPI.listSegments).mockResolvedValue([
-      { id: 1, segment_id: 1, revision: 1, start_sec: 0, end_sec: 1, wall_start: '2026-01-01 00:00:00', wall_end: '2026-01-01 00:00:01', text_raw: 'first', optimize_status: 'success', translate_status: 'success', segment_id: 1, revision: 1 },
-      { id: 2, segment_id: 1, revision: 2, start_sec: 0.8, end_sec: 2, wall_start: '2026-01-01 00:00:01', wall_end: '2026-01-01 00:00:02', text_raw: 'second', optimize_status: 'success', translate_status: 'success', segment_id: 1, revision: 2 },
+      { id: 1, segment_id: 1, revision: 1, start_sec: 0, end_sec: 1, wall_start: '2026-01-01 00:00:00', wall_end: '2026-01-01 00:00:01', text_raw: 'first', optimize_status: 'success', translate_status: 'success' },
+      { id: 2, segment_id: 1, revision: 2, start_sec: 0.8, end_sec: 2, wall_start: '2026-01-01 00:00:01', wall_end: '2026-01-01 00:00:02', text_raw: 'second', optimize_status: 'success', translate_status: 'success' },
     ] as any);
 
     const store = useAppStore();
