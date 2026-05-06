@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -8,12 +9,15 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use log::{debug, error, info, warn};
 use sherpa_onnx::{LinearResampler, OfflineRecognizer, OfflineStream, VoiceActivityDetector};
+use tauri::Emitter;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::audio_buffer::SAMPLE_RATE;
 use crate::db::repository::NewSegment;
 use crate::db_worker::DbEvent;
-use crate::llm_client::{check_discard_rules, evaluate_judgment, judge_discard, JudgmentInput, optimize_text, translate_text};
+use crate::llm_client::{
+    check_discard_rules, evaluate_judgment, judge_discard, optimize_text, translate_text, JudgmentInput,
+};
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::{
     can_start_finalization_check, merge_segment_in_place, mutex_lock, read_lock, set_segment_finalization_state,
@@ -701,24 +705,39 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
         set_segment_finalization_state(&segments, revision, "checking");
 
         // Step 1: Load segment data from DB
-        let segment_row = {
+        let db_instance = {
             let db_guard = mutex_lock(&db);
-            match db_guard.as_ref() {
-                Some(db) => match tauri::async_runtime::block_on(db.get_segment_by_revision(revision)) {
-                    Ok(row) => row,
-                    Err(e) => {
-                        error!("[finalization] failed to get segment revision={revision}: {e}");
-                        set_segment_finalization_state(&segments, revision, "check_failed");
-                        let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
-                        return;
-                    }
-                },
-                None => {
-                    error!("[finalization] database not available");
+            db_guard.clone()
+        };
+        let segment_row = match db_instance {
+            Some(db) => match db.get_segment_by_revision(revision).await {
+                Ok(row) => row,
+                Err(e) => {
+                    error!("[finalization] failed to get segment revision={revision}: {e}");
                     set_segment_finalization_state(&segments, revision, "check_failed");
-                    let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
+                    let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                        revision,
+                        is_discarded: false,
+                        discard_reason: Some("终态判定读取分段失败".to_string()),
+                        discard_source: Some("system".to_string()),
+                        discard_confidence: None,
+                        quality_check_status: "check_failed".to_string(),
+                    });
                     return;
                 }
+            },
+            None => {
+                error!("[finalization] database not available");
+                set_segment_finalization_state(&segments, revision, "check_failed");
+                let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                    revision,
+                    is_discarded: false,
+                    discard_reason: Some("终态判定数据库不可用".to_string()),
+                    discard_source: Some("system".to_string()),
+                    discard_confidence: None,
+                    quality_check_status: "check_failed".to_string(),
+                });
+                return;
             }
         };
 
@@ -727,7 +746,14 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
             None => {
                 warn!("[finalization] segment not found, revision={revision}");
                 set_segment_finalization_state(&segments, revision, "check_failed");
-                let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
+                let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                    revision,
+                    is_discarded: false,
+                    discard_reason: Some("终态判定未找到分段".to_string()),
+                    discard_source: Some("system".to_string()),
+                    discard_confidence: None,
+                    quality_check_status: "check_failed".to_string(),
+                });
                 return;
             }
         };
@@ -746,15 +772,20 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
                 quality_check_status: "discarded".to_string(),
             });
             // Send frontend event (Plan 3)
-            let _ = app_handle.emit("segment_discarded", serde_json::json!({
-                "revision": revision,
-                "segment_id": seg.segment_id,
-                "decision": "DISCARD",
-                "reason": "规则层判定：填充词/低信息",
-                "source": "rule",
-                "confidence": null,
-                "occurred_at_ms": chrono::Utc::now().timestamp_millis(),
-            }));
+            if let Some(app_handle) = &app_handle {
+                let _ = app_handle.emit(
+                    "segment_discarded",
+                    serde_json::json!({
+                        "revision": revision,
+                        "segment_id": seg.segment_id,
+                        "decision": "DISCARD",
+                        "reason": "规则层判定：填充词/低信息",
+                        "source": "rule",
+                        "confidence": null,
+                        "occurred_at_ms": chrono::Utc::now().timestamp_millis(),
+                    }),
+                );
+            }
             return;
         }
 
@@ -772,7 +803,14 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
             Err(e) => {
                 error!("[finalization] LLM judgment failed, revision={revision}: {e}");
                 set_segment_finalization_state(&segments, revision, "check_failed");
-                let _ = db_writer.try_send(DbEvent::MarkTranslateFailed { revision });
+                let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
+                    revision,
+                    is_discarded: false,
+                    discard_reason: Some(format!("终态判定模型调用失败: {e}")),
+                    discard_source: Some("llm".to_string()),
+                    discard_confidence: None,
+                    quality_check_status: "check_failed".to_string(),
+                });
                 return;
             }
         };
@@ -794,15 +832,20 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
                 quality_check_status: "discarded".to_string(),
             });
             // Send frontend event (Plan 3)
-            let _ = app_handle.emit("segment_discarded", serde_json::json!({
-                "revision": revision,
-                "segment_id": seg.segment_id,
-                "decision": "DISCARD",
-                "reason": judgment_result.reason,
-                "source": "llm",
-                "confidence": judgment_result.confidence,
-                "occurred_at_ms": chrono::Utc::now().timestamp_millis(),
-            }));
+            if let Some(app_handle) = &app_handle {
+                let _ = app_handle.emit(
+                    "segment_discarded",
+                    serde_json::json!({
+                        "revision": revision,
+                        "segment_id": seg.segment_id,
+                        "decision": "DISCARD",
+                        "reason": judgment_result.reason,
+                        "source": "llm",
+                        "confidence": judgment_result.confidence,
+                        "occurred_at_ms": chrono::Utc::now().timestamp_millis(),
+                    }),
+                );
+            }
         } else {
             info!(
                 "[finalization] LLM KEEP, revision={revision}, confidence={}, reason={}",

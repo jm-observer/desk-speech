@@ -309,7 +309,7 @@ pub fn list_segments(conn: &Connection, page: u32, page_size: u32) -> Result<Vec
                     r.is_discarded, r.discard_reason, r.discard_source, r.discard_confidence, r.quality_check_status
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
-             WHERE r.session_id = ?1
+             WHERE r.session_id = ?1 AND r.is_discarded = 0
              ORDER BY r.start_sec ASC
              LIMIT ?2 OFFSET ?3",
         )
@@ -368,7 +368,7 @@ pub fn tail_segments(conn: &Connection, after_id: i64, limit: u32) -> Result<Vec
                     r.is_discarded, r.discard_reason, r.discard_source, r.discard_confidence, r.quality_check_status
              FROM asr_raw_records r
              LEFT JOIN asr_llm_results l ON l.session_id = r.session_id AND l.revision = r.revision
-             WHERE r.session_id = ?1 AND r.id > ?2
+             WHERE r.session_id = ?1 AND r.is_discarded = 0 AND r.id > ?2
              ORDER BY r.id ASC
              LIMIT ?3",
         )

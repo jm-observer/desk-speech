@@ -9,17 +9,41 @@ pub(crate) const DB_EVENT_QUEUE_CAPACITY: usize = 1024;
 
 #[derive(Clone)]
 pub(crate) enum DbEvent {
-    InsertSegment { segment: NewSegment },
-    MarkOptimizeRunning { revision: i64 },
-    MarkOptimizeSuccess { revision: i64 },
-    MarkTranslatePending { revision: i64 },
-    MarkTranslateRunning { revision: i64 },
-    MarkTranslateFailed { revision: i64 },
-    MarkSkippedBefore { revision: i64 },
-    MarkSkipped { revision: i64 },
-    MarkOptimizeFailed { revision: i64 },
-    SaveOptimizeResult { revision: i64, text_optimized: String },
-    SaveTranslateResult { revision: i64, text_english: String },
+    InsertSegment {
+        segment: NewSegment,
+    },
+    MarkOptimizeRunning {
+        revision: i64,
+    },
+    MarkOptimizeSuccess {
+        revision: i64,
+    },
+    MarkTranslatePending {
+        revision: i64,
+    },
+    MarkTranslateRunning {
+        revision: i64,
+    },
+    MarkTranslateFailed {
+        revision: i64,
+    },
+    MarkSkippedBefore {
+        revision: i64,
+    },
+    MarkSkipped {
+        revision: i64,
+    },
+    MarkOptimizeFailed {
+        revision: i64,
+    },
+    SaveOptimizeResult {
+        revision: i64,
+        text_optimized: String,
+    },
+    SaveTranslateResult {
+        revision: i64,
+        text_english: String,
+    },
     UpdateDiscardResult {
         revision: i64,
         is_discarded: bool,
@@ -120,14 +144,16 @@ pub(crate) fn start_db_worker(db: db::SpeechDatabase) -> SyncSender<DbEvent> {
                     discard_confidence,
                     quality_check_status,
                 } => {
-                    let _ = db.update_discard_result(
-                        revision,
-                        is_discarded,
-                        discard_reason,
-                        discard_source,
-                        discard_confidence,
-                        quality_check_status,
-                    ).await;
+                    let _ = db
+                        .update_discard_result(
+                            revision,
+                            is_discarded,
+                            discard_reason,
+                            discard_source,
+                            discard_confidence,
+                            quality_check_status,
+                        )
+                        .await;
                 }
             }
         }

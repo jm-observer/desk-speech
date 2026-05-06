@@ -140,25 +140,14 @@ export const useAppStore = () => {
     runInit();
 
     // Subscribe to segment_discarded events (Plan 3)
-    unsubscribeSegmentDiscarded = listen<SegmentDiscardedEvent>('segment_discarded', (event) => {
+    void listen<SegmentDiscardedEvent>('segment_discarded', (event) => {
       if (canceled) return;
       const { revision, segment_id } = event.payload;
       console.debug('[segment_discarded]', { revision, segment_id, reason: event.payload.reason });
-      
+
       // Remove segment from list by revision
       setSegments((prev) => {
-        const getInternalKey = (s: Segment) => {
-          if (s.segment_id !== null && s.segment_id !== undefined) {
-            return `seg-${s.segment_id}`;
-          }
-          if (s.id !== null && s.id !== undefined) {
-            return `db-${s.id}`;
-          }
-          return `ts-${s.start.toFixed(3)}`;
-        };
-        
         const filtered = prev.filter(s => {
-          const key = getInternalKey(s);
           // Remove if segment_id matches
           if (segment_id !== null && s.segment_id === segment_id) {
             return false;
@@ -169,7 +158,7 @@ export const useAppStore = () => {
           }
           return true;
         });
-        
+
         return filtered.sort((a, b) => {
           if (a.wall_start !== b.wall_start) {
             return a.wall_start.localeCompare(b.wall_start);
@@ -177,14 +166,24 @@ export const useAppStore = () => {
           return a.start - b.start;
         });
       });
-    });
+    })
+      .then((unlisten) => {
+        if (canceled) {
+          unlisten();
+          return;
+        }
+        unsubscribeSegmentDiscarded = unlisten;
+      })
+      .catch((err) => {
+        console.error('Subscribe segment_discarded failed', err);
+      });
 
     return () => {
       canceled = true;
       if (initTimer !== null) {
         window.clearTimeout(initTimer);
       }
-      if (unsubscribeSegmentDiscarded) {
+      if (typeof unsubscribeSegmentDiscarded === 'function') {
         unsubscribeSegmentDiscarded();
       }
     };
@@ -193,6 +192,7 @@ export const useAppStore = () => {
   return {
     status, setStatus,
     segments, setSegments,
+    loadSegments,
     devices, setDevices,
     selectedDevice, setSelectedDevice,
     showEnglish, setShowEnglish,

@@ -173,8 +173,8 @@ fn extract_json(content: &str) -> Result<Value, String> {
 fn is_pure_filler(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     const FILLERS: &[&str] = &[
-        "ok", "okay", "嗯", "啊", "呃", "嗯嗯", "嗯嗯", "哦", "哎", "唉",
-        "对", "对对", "是", "是的", "好", "好好", "嗯哼", "嘛",
+        "ok", "okay", "嗯", "啊", "呃", "嗯嗯", "嗯嗯", "哦", "哎", "唉", "对", "对对", "是", "是的", "好", "好好",
+        "嗯哼", "嘛",
     ];
     FILLERS.contains(&t.as_str())
 }
@@ -182,16 +182,15 @@ fn is_pure_filler(text: &str) -> bool {
 /// Check if text matches a single name/title pattern (no verbs/real meaning).
 fn is_single_name(text: &str) -> bool {
     let t = text.trim();
-    // Heuristic: 2-4 Chinese characters, no verbs commonly found in speech.
+    // Heuristic: 2-3 Chinese characters, no verbs commonly found in speech.
     let char_count = t.chars().count();
-    if !(2..=4).contains(&char_count) {
+    if !(2..=3).contains(&char_count) {
         return false;
     }
     // Check if all chars are CJK unified ideographs (simplified name check).
-    let all_cjk = t.chars().all(|c| {
-        ('\u{4e00}'..='\u{9fff}').contains(&c)
-            || ('\u{3400}'..='\u{4dbf}').contains(&c)
-    });
+    let all_cjk = t
+        .chars()
+        .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3400}'..='\u{4dbf}').contains(&c));
     // Exclude common non-name words.
     let non_names = ["老师", "同学", "朋友", "大家", "我们", "你们", "他们", "这个", "那个"];
     if non_names.iter().any(|n| t.contains(*n)) {
@@ -203,7 +202,7 @@ fn is_single_name(text: &str) -> bool {
 /// Check if text has high repetition of the same token.
 fn is_high_repetition(text: &str) -> bool {
     let t = text.trim();
-    let len = t.len();
+    let len = t.chars().count();
     if len == 0 || len > 8 {
         return false;
     }
@@ -225,12 +224,12 @@ pub fn check_discard_rules(text: &str) -> bool {
     if normalized.is_empty() {
         return true;
     }
-    // Rule 1: Character length < 3
-    if normalized.chars().count() < 3 {
+    // Rule 1: Pure filler
+    if is_pure_filler(normalized) {
         return true;
     }
-    // Rule 2: Pure filler
-    if is_pure_filler(normalized) {
+    // Rule 2: Very short ASCII tokens (e.g. ok/hi/a) are low information.
+    if normalized.chars().count() < 3 && normalized.chars().all(|c| c.is_ascii_alphanumeric()) {
         return true;
     }
     // Rule 3: Single name/title
@@ -247,13 +246,15 @@ pub fn check_discard_rules(text: &str) -> bool {
 /// Call LLM to perform judgment. Returns (decision, confidence, reason).
 /// On failure, returns ("FAILED", 0.0, "llm_error").
 pub async fn judge_discard(settings: &LlmSettings, input: &JudgmentInput) -> Result<JudgmentResult, String> {
-    let system_prompt = settings.discard_prompt_template
+    let system_prompt = settings
+        .discard_prompt_template
         .replace("{text_optimized}", input.text_optimized.as_deref().unwrap_or(""))
         .replace("{text_raw}", &input.text_raw)
         .replace("{text_english}", input.text_english.as_deref().unwrap_or(""));
 
     // Primary input: text_optimized > text_raw
-    let user_input = input.text_optimized
+    let user_input = input
+        .text_optimized
         .as_ref()
         .or(Some(&input.text_raw))
         .cloned()
