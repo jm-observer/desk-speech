@@ -20,9 +20,9 @@ use crate::llm_client::{
 };
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::{
-    can_start_finalization_check, merge_segment_in_place, mutex_lock, read_lock, set_segment_finalization_state,
-    update_segment_llm_state, write_lock, AppState, RecognizeContext, RecordingAnchor, RecordingRuntime,
-    RecordingState, SegmentResult, FINALIZE_SILENCE_MS,
+    can_start_finalization_check, merge_segment_in_place, mutex_lock, read_lock, set_segment_discard_state,
+    set_segment_finalization_state, update_segment_llm_state, write_lock, AppState, RecognizeContext, RecordingAnchor,
+    RecordingRuntime, RecordingState, SegmentResult, FINALIZE_SILENCE_MS,
 };
 
 #[tauri::command]
@@ -708,6 +708,15 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
         if !config.enabled {
             info!("[finalization] quality filter disabled, skipping discard for revision={revision}");
             set_segment_finalization_state(&segments, revision, "kept");
+            set_segment_discard_state(
+                &segments,
+                revision,
+                false,
+                Some("质量过滤已禁用".to_string()),
+                Some("system".to_string()),
+                None,
+                "kept",
+            );
             let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
                 revision,
                 is_discarded: false,
@@ -781,6 +790,15 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
         if check_discard_rules(&text_to_check, &config) {
             info!("[finalization] rule-based DISCARD, revision={revision}, text={text_to_check}");
             set_segment_finalization_state(&segments, revision, "discarded");
+            set_segment_discard_state(
+                &segments,
+                revision,
+                true,
+                Some("规则层判定：填充词/低信息".to_string()),
+                Some("rule".to_string()),
+                None,
+                "discarded",
+            );
             let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
                 revision,
                 is_discarded: true,
@@ -841,6 +859,15 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
                 judgment_result.confidence, judgment_result.reason
             );
             set_segment_finalization_state(&segments, revision, "discarded");
+            set_segment_discard_state(
+                &segments,
+                revision,
+                true,
+                Some(judgment_result.reason.clone()),
+                Some("llm".to_string()),
+                Some(judgment_result.confidence),
+                "discarded",
+            );
             let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
                 revision,
                 is_discarded: true,
@@ -870,6 +897,15 @@ fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
                 judgment_result.confidence, judgment_result.reason
             );
             set_segment_finalization_state(&segments, revision, "kept");
+            set_segment_discard_state(
+                &segments,
+                revision,
+                false,
+                None,
+                Some("llm".to_string()),
+                Some(judgment_result.confidence),
+                "kept",
+            );
             let _ = db_writer.try_send(DbEvent::UpdateDiscardResult {
                 revision,
                 is_discarded: false,
@@ -906,7 +942,11 @@ pub fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
     let recording = state.recording.load(Ordering::Relaxed);
-    let segments = read_lock(&state.segments).clone();
+    let segments = read_lock(&state.segments)
+        .iter()
+        .filter(|seg| !seg.is_discarded)
+        .cloned()
+        .collect();
     let elapsed_secs = 0.0;
     let (audio_window_start_sec, audio_window_end_sec) = {
         let audio = read_lock(&state.recorded_audio);

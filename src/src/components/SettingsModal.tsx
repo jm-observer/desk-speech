@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { TauriAPI } from '../api/tauri-client';
 import type { AppSettings } from '../api/tauri-client';
+import type { QualityFilterConfig } from '../api/tauri-client';
 import { Button } from './ui/Button';
 
 interface SettingsModalProps {
@@ -9,10 +10,12 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = 'vad' | 'asr' | 'llm';
+type Tab = 'vad' | 'asr' | 'llm' | 'quality';
 type FieldKey = keyof AppSettings;
 type FieldErrorMap = Partial<Record<FieldKey, string>>;
 type InputKind = 'number' | 'text' | 'password' | 'select' | 'textarea';
+type QualityFieldKey = Exclude<keyof QualityFilterConfig, 'version'>;
+type QualityFieldErrorMap = Partial<Record<QualityFieldKey, string>>;
 
 interface FieldDefinition {
   key: FieldKey;
@@ -33,12 +36,14 @@ const TAB_LABELS: Record<Tab, string> = {
   vad: 'VAD 分段',
   asr: 'ASR 识别',
   llm: 'LLM 后处理',
+  quality: '质量过滤',
 };
 
 const TAB_DESCRIPTIONS: Record<Tab, string> = {
   vad: '控制系统如何判断“开始说话”和“停止说话”，会直接影响分段频率、漏切和误切。',
   asr: '控制本地识别模型的并行度，主要影响 CPU 占用与识别速度。',
   llm: '配置远程模型接入与文本后处理策略，影响润色、翻译和自动复制结果。',
+  quality: '配置终态质量过滤策略，包括丢弃阈值、静默窗口、规则词表与判定提示词模板。',
 };
 
 const FIELD_DEFINITIONS: FieldDefinition[] = [
@@ -223,6 +228,53 @@ const getErrorMessage = (err: unknown): string => {
   return '保存失败，请重试';
 };
 
+const validateQualityField = (key: QualityFieldKey, value: QualityFilterConfig[QualityFieldKey]): string | null => {
+  switch (key) {
+    case 'discard_confidence_threshold':
+      return typeof value !== 'number' || Number.isNaN(value) || value < 0 || value > 1
+        ? '丢弃阈值必须在 0 到 1 之间'
+        : null;
+    case 'repeat_ratio_threshold':
+      return typeof value !== 'number' || Number.isNaN(value) || value < 0 || value > 1
+        ? '重复比阈值必须在 0 到 1 之间'
+        : null;
+    case 'silence_window_ms':
+      return typeof value !== 'number' || Number.isNaN(value) || value < 1000
+        ? '静默窗口必须 >= 1000ms'
+        : null;
+    case 'filler_tokens':
+      return !Array.isArray(value) ? '语气词列表格式不正确' : null;
+    case 'single_name_patterns':
+      return !Array.isArray(value) ? '姓名模式列表格式不正确' : null;
+    case 'llm_prompt_template':
+      return typeof value !== 'string' ? '提示词模板格式不正确' : null;
+    case 'enabled':
+      return typeof value !== 'boolean' ? '开关值格式不正确' : null;
+    default:
+      return null;
+  }
+};
+
+const validateQualityConfig = (config: Omit<QualityFilterConfig, 'version'>): QualityFieldErrorMap => {
+  const keys: QualityFieldKey[] = [
+    'enabled',
+    'discard_confidence_threshold',
+    'silence_window_ms',
+    'repeat_ratio_threshold',
+    'filler_tokens',
+    'single_name_patterns',
+    'llm_prompt_template',
+  ];
+  const nextErrors: QualityFieldErrorMap = {};
+  for (const key of keys) {
+    const error = validateQualityField(key, config[key]);
+    if (error) {
+      nextErrors[key] = error;
+    }
+  }
+  return nextErrors;
+};
+
 const mapBackendError = (message: string): { field?: FieldKey; form?: string } => {
   if (message.includes('threshold')) {
     return { field: 'threshold' };
@@ -296,7 +348,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const [tab, setTab] = useState<Tab>('vad');
   const [showApiKey, setShowApiKey] = useState(false);
   const [errors, setErrors] = useState<FieldErrorMap>({});
+  const [qualityErrors, setQualityErrors] = useState<QualityFieldErrorMap>({});
   const [touched, setTouched] = useState<Partial<Record<FieldKey, boolean>>>({});
+  const [qualityTouched, setQualityTouched] = useState<Partial<Record<QualityFieldKey, boolean>>>({});
+  const [qualityConfig, setQualityConfig] = useState<Omit<QualityFilterConfig, 'version'> | null>(null);
+  const [qualitySaving, setQualitySaving] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -306,7 +362,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
     const loadSettings = async () => {
       setErrors({});
+      setQualityErrors({});
       setTouched({});
+      setQualityTouched({});
+      setQualityConfig(null);
       setFormError(null);
       setShowApiKey(false);
       setTab('vad');
@@ -337,8 +396,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       }
     };
 
+    const loadQualityConfig = async () => {
+      try {
+        const config = await TauriAPI.getQualityFilterConfig();
+        setQualityConfig({
+          llm_prompt_template: config.llm_prompt_template,
+          discard_confidence_threshold: config.discard_confidence_threshold,
+          silence_window_ms: config.silence_window_ms,
+          filler_tokens: config.filler_tokens,
+          single_name_patterns: config.single_name_patterns,
+          repeat_ratio_threshold: config.repeat_ratio_threshold,
+          enabled: config.enabled,
+        });
+      } catch (err) {
+        console.error('Load quality filter config failed', err);
+      }
+    };
+
     void loadSettings();
     void loadModels();
+    void loadQualityConfig();
   }, [open]);
 
   const focusField = (key: FieldKey) => {
@@ -379,6 +456,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   };
 
   const apply = async () => {
+    if (tab === 'quality') {
+      if (!qualityConfig) {
+        return;
+      }
+
+      const nextQualityErrors = validateQualityConfig(qualityConfig);
+      setQualityErrors(nextQualityErrors);
+      setQualityTouched({
+        enabled: true,
+        discard_confidence_threshold: true,
+        silence_window_ms: true,
+        repeat_ratio_threshold: true,
+        filler_tokens: true,
+        single_name_patterns: true,
+        llm_prompt_template: true,
+      });
+
+      if (Object.keys(nextQualityErrors).length > 0) {
+        setFormError('请先修正质量过滤配置中的错误字段。');
+        return;
+      }
+
+      setQualitySaving(true);
+      setFormError(null);
+      try {
+        await TauriAPI.saveQualityFilterConfig(qualityConfig);
+      } catch (err) {
+        console.error('Save quality filter config failed', err);
+        setFormError(`质量过滤配置保存失败：${getErrorMessage(err)}`);
+      } finally {
+        setQualitySaving(false);
+      }
+      return;
+    }
+
     if (!settings) {
       return;
     }
@@ -421,6 +533,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const patchQuality = <K extends QualityFieldKey>(key: K, value: Omit<QualityFilterConfig, 'version'>[K]) => {
+    setQualityConfig((prev) => (prev ? { ...prev, [key]: value } : prev));
+    setFormError(null);
+    if (qualityTouched[key]) {
+      setQualityErrors((prev) => {
+        const next = { ...prev };
+        const error = validateQualityField(key, value);
+        if (error) {
+          next[key] = error;
+        } else {
+          delete next[key];
+        }
+        return next;
+      });
+    }
+  };
+
+  const markQualityTouched = (key: QualityFieldKey) => {
+    setQualityTouched((prev) => ({ ...prev, [key]: true }));
+    if (qualityConfig) {
+      const error = validateQualityField(key, qualityConfig[key]);
+      setQualityErrors((prev) => {
+        const next = { ...prev };
+        if (error) {
+          next[key] = error;
+        } else {
+          delete next[key];
+        }
+        return next;
+      });
     }
   };
 
@@ -623,13 +768,183 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                   {formError}
                 </div>
               )}
-              <div className="mb-6 flex flex-wrap items-center gap-3">{(['vad', 'asr', 'llm'] as Tab[]).map(renderTabButton)}</div>
+              <div className="mb-6 flex flex-wrap items-center gap-3">{(['vad', 'asr', 'llm', 'quality'] as Tab[]).map(renderTabButton)}</div>
 
               <div className="mb-8 rounded-xl border border-[var(--line)] bg-[var(--bg-softer)] p-4 text-[13px] leading-relaxed text-[var(--ink-3)]">
                 {TAB_DESCRIPTIONS[tab]}
               </div>
 
-              <div className="grid grid-cols-1 gap-x-8 gap-y-8 md:grid-cols-2">{currentFields.map(renderField)}</div>
+              {tab !== 'quality' && <div className="grid grid-cols-1 gap-x-8 gap-y-8 md:grid-cols-2">{currentFields.map(renderField)}</div>}
+
+              {tab === 'quality' && qualityConfig && (
+                <div className="grid grid-cols-1 gap-x-8 gap-y-8 md:grid-cols-2">
+                  <SettingsField
+                    field={{
+                      key: 'provider_url',
+                      tab: 'quality',
+                      label: '启用质量过滤',
+                      description: '关闭后将跳过终态丢弃判定。',
+                      kind: 'text',
+                    }}
+                    error={qualityErrors.enabled}
+                  >
+                    <label className="inline-flex items-center gap-3 text-[14px] text-[var(--ink-1)]">
+                      <input
+                        id="settings-field-quality-enabled"
+                        type="checkbox"
+                        checked={qualityConfig.enabled}
+                        onChange={(event) => patchQuality('enabled', event.target.checked)}
+                        onBlur={() => markQualityTouched('enabled')}
+                      />
+                      启用
+                    </label>
+                  </SettingsField>
+
+                  <SettingsField
+                    field={{
+                      key: 'provider_url',
+                      tab: 'quality',
+                      label: '丢弃阈值',
+                      description: 'LLM 返回 DISCARD 时，达到该置信度才会丢弃。',
+                      kind: 'number',
+                    }}
+                    error={qualityErrors.discard_confidence_threshold}
+                  >
+                    <input
+                      id="settings-field-quality-threshold"
+                      type="number"
+                      className="w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={qualityConfig.discard_confidence_threshold}
+                      onChange={(event) => patchQuality('discard_confidence_threshold', Number(event.target.value))}
+                      onBlur={() => markQualityTouched('discard_confidence_threshold')}
+                    />
+                  </SettingsField>
+
+                  <SettingsField
+                    field={{
+                      key: 'provider_url',
+                      tab: 'quality',
+                      label: '静默窗口(ms)',
+                      description: '无新增内容超过该窗口后触发终态判定。',
+                      kind: 'number',
+                    }}
+                    error={qualityErrors.silence_window_ms}
+                  >
+                    <input
+                      id="settings-field-quality-silence-window"
+                      type="number"
+                      className="w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
+                      min={1000}
+                      step={100}
+                      value={qualityConfig.silence_window_ms}
+                      onChange={(event) => patchQuality('silence_window_ms', Number(event.target.value))}
+                      onBlur={() => markQualityTouched('silence_window_ms')}
+                    />
+                  </SettingsField>
+
+                  <SettingsField
+                    field={{
+                      key: 'provider_url',
+                      tab: 'quality',
+                      label: '重复比阈值',
+                      description: '高重复低信息规则判定阈值。',
+                      kind: 'number',
+                    }}
+                    error={qualityErrors.repeat_ratio_threshold}
+                  >
+                    <input
+                      id="settings-field-quality-repeat-ratio"
+                      type="number"
+                      className="w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={qualityConfig.repeat_ratio_threshold}
+                      onChange={(event) => patchQuality('repeat_ratio_threshold', Number(event.target.value))}
+                      onBlur={() => markQualityTouched('repeat_ratio_threshold')}
+                    />
+                  </SettingsField>
+
+                  <SettingsField
+                    field={{
+                      key: 'provider_url',
+                      tab: 'quality',
+                      label: '语气词列表',
+                      description: '逗号分隔，用于规则层直接丢弃。',
+                      kind: 'textarea',
+                      fullWidth: true,
+                    }}
+                    error={qualityErrors.filler_tokens}
+                  >
+                    <textarea
+                      id="settings-field-quality-filler"
+                      className="min-h-[88px] w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
+                      value={qualityConfig.filler_tokens.join(', ')}
+                      onChange={(event) =>
+                        patchQuality(
+                          'filler_tokens',
+                          event.target.value
+                            .split(',')
+                            .map((item) => item.trim())
+                            .filter((item) => item.length > 0),
+                        )
+                      }
+                      onBlur={() => markQualityTouched('filler_tokens')}
+                    />
+                  </SettingsField>
+
+                  <SettingsField
+                    field={{
+                      key: 'provider_url',
+                      tab: 'quality',
+                      label: '姓名模式',
+                      description: '逗号分隔，用于单姓名规则匹配。',
+                      kind: 'textarea',
+                      fullWidth: true,
+                    }}
+                    error={qualityErrors.single_name_patterns}
+                  >
+                    <textarea
+                      id="settings-field-quality-name-patterns"
+                      className="min-h-[88px] w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
+                      value={qualityConfig.single_name_patterns.join(', ')}
+                      onChange={(event) =>
+                        patchQuality(
+                          'single_name_patterns',
+                          event.target.value
+                            .split(',')
+                            .map((item) => item.trim())
+                            .filter((item) => item.length > 0),
+                        )
+                      }
+                      onBlur={() => markQualityTouched('single_name_patterns')}
+                    />
+                  </SettingsField>
+
+                  <SettingsField
+                    field={{
+                      key: 'provider_url',
+                      tab: 'quality',
+                      label: '终态判定提示词',
+                      description: '支持 {{text_raw}}/{{text_optimized}}/{{text_english}} 占位符。',
+                      kind: 'textarea',
+                      fullWidth: true,
+                    }}
+                    error={qualityErrors.llm_prompt_template}
+                  >
+                    <textarea
+                      id="settings-field-quality-prompt"
+                      className="min-h-[160px] w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
+                      value={qualityConfig.llm_prompt_template}
+                      onChange={(event) => patchQuality('llm_prompt_template', event.target.value)}
+                      onBlur={() => markQualityTouched('llm_prompt_template')}
+                    />
+                  </SettingsField>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -638,11 +953,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <p className="text-[11px] font-medium italic text-[var(--danger)]">保存后会重新加载识别模型，录音中不可修改。</p>
             <div className="flex gap-3">
+              {tab === 'quality' && (
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      const config = await TauriAPI.resetQualityFilterConfig();
+                      setQualityConfig({
+                        llm_prompt_template: config.llm_prompt_template,
+                        discard_confidence_threshold: config.discard_confidence_threshold,
+                        silence_window_ms: config.silence_window_ms,
+                        filler_tokens: config.filler_tokens,
+                        single_name_patterns: config.single_name_patterns,
+                        repeat_ratio_threshold: config.repeat_ratio_threshold,
+                        enabled: config.enabled,
+                      });
+                      setQualityErrors({});
+                      setQualityTouched({});
+                      setFormError(null);
+                    } catch (err) {
+                      setFormError(`重置质量过滤配置失败：${getErrorMessage(err)}`);
+                    }
+                  }}
+                >
+                  恢复默认
+                </Button>
+              )}
               <Button variant="outline" onClick={onClose} className="px-6">
                 取消
               </Button>
-              <Button onClick={apply} disabled={saving} className="bg-[var(--primary)] px-6 text-white">
-                {saving ? '应用中...' : '应用并保存'}
+              <Button onClick={apply} disabled={saving || qualitySaving} className="bg-[var(--primary)] px-6 text-white">
+                {saving || qualitySaving ? '应用中...' : '应用并保存'}
               </Button>
             </div>
           </div>

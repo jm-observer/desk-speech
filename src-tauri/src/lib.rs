@@ -184,6 +184,25 @@ pub(crate) fn set_segment_finalization_state(segments: &Arc<RwLock<Vec<SegmentRe
     }
 }
 
+pub(crate) fn set_segment_discard_state(
+    segments: &Arc<RwLock<Vec<SegmentResult>>>,
+    revision: i64,
+    is_discarded: bool,
+    discard_reason: Option<String>,
+    discard_source: Option<String>,
+    discard_confidence: Option<f32>,
+    quality_check_status: &str,
+) {
+    let mut segs = write_lock(segments);
+    if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
+        seg.is_discarded = is_discarded;
+        seg.discard_reason = discard_reason;
+        seg.discard_source = discard_source;
+        seg.discard_confidence = discard_confidence;
+        seg.quality_check_status = quality_check_status.to_string();
+    }
+}
+
 pub(crate) fn can_start_finalization_check(segments: &Arc<RwLock<Vec<SegmentResult>>>, revision: i64) -> bool {
     let segs = read_lock(segments);
     let Some(seg) = segs.iter().rev().find(|seg| seg.revision == revision) else {
