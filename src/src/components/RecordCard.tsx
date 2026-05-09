@@ -17,7 +17,8 @@ export const RecordCard: React.FC<RecordCardProps> = ({
   onStop,
   disabled 
 }) => {
-  const isRecording = status === 'recording';
+  const isRecording = status === 'recording' || status === 'processing';
+  const isProcessingOnly = status === 'processing';
 
   return (
     <div className={cn(
@@ -30,7 +31,9 @@ export const RecordCard: React.FC<RecordCardProps> = ({
         {isRecording && (
           <div className="flex items-center gap-2">
             <div className="w-2.5 h-2.5 rounded-full bg-[var(--danger)] animate-pulse-dot" />
-            <span className="text-sm font-medium text-[var(--danger)]">正在录制...</span>
+            <span className="text-sm font-medium text-[var(--danger)]">
+              {isProcessingOnly ? '识别处理中...' : '正在录制...'}
+            </span>
           </div>
         )}
       </div>
