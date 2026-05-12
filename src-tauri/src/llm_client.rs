@@ -82,10 +82,51 @@ struct LlmTranslateOutput {
     text_english: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct OpenAIModelsResponse {
+    data: Vec<OpenAIModel>,
+    #[allow(dead_code)]
+    object: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct OpenAIModel {
+    id: String,
+    #[allow(dead_code)]
+    created: Option<u64>,
+    #[serde(rename = "object")]
+    #[allow(dead_code)]
+    object_type: Option<String>,
+    #[allow(dead_code)]
+    owned_by: Option<String>,
+}
+
 pub async fn list_models(settings: &LlmSettings) -> Result<Vec<String>, String> {
-    let client = build_client(settings);
-    let resp = client.models().list().await.map_err(|e| e.to_string())?;
-    let mut models = resp.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
+    let base_url = settings.provider_url.trim();
+    let url = if base_url.ends_with("/v1") {
+        format!("{}/models", base_url)
+    } else if let Some(stripped) = base_url.strip_suffix('/') {
+        format!("{}/v1/models", stripped)
+    } else {
+        format!("{}/v1/models", base_url)
+    };
+
+    let resp = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("failed to call model provider api: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("model provider api returned status: {}", resp.status()));
+    }
+
+    let models_resp: OpenAIModelsResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("failed to deserialize api response: {}", e))?;
+
+    let mut models = models_resp.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
     models.sort();
     Ok(models)
 }
@@ -137,7 +178,7 @@ async fn chat_json_completion(settings: &LlmSettings, system_prompt: &str, input
         .model(settings.selected_model.clone())
         .messages(vec![system_message, user_message])
         .reasoning_effort(ReasoningEffort::None)
-        .response_format(ResponseFormat::JsonObject)
+        .response_format(ResponseFormat::Text)
         .build()
         .map_err(|e| e.to_string())?;
 

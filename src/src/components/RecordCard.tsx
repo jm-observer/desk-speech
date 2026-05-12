@@ -17,7 +17,7 @@ export const RecordCard: React.FC<RecordCardProps> = ({
   onStop,
   disabled 
 }) => {
-  const isRecording = status === 'recording' || status === 'processing';
+  const isRecording = status === 'recording';
   const isProcessingOnly = status === 'processing';
 
   return (
@@ -40,10 +40,10 @@ export const RecordCard: React.FC<RecordCardProps> = ({
 
       <div className="w-full flex flex-col items-center gap-3">
         {!isRecording ? (
-          <Button 
-            className="w-full h-[46px] rounded-xl text-base gap-2" 
+          <Button
+            className="w-full h-[46px] rounded-xl text-base gap-2"
             onClick={onStart}
-            disabled={disabled || status === 'initializing'}
+            disabled={disabled || status === 'initializing' || status === 'processing'}
           >
             <Icon name="mic" size={18} />
             开始录音

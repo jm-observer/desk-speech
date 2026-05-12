@@ -369,6 +369,9 @@ function App() {
     if (!autoRecordingEnabled) {
       return;
     }
+    if (manualTriggeredRevisionsRef.current.size > 0) {
+      return;
+    }
 
     autoStartTriggeredRef.current = true;
     startRecording().catch((err) => {
@@ -411,9 +414,6 @@ function App() {
         const targetRevision = segment.revision;
         manualTriggeredRevisionsRef.current.add(segment.revision);
         await TauriAPI.manualOptimizeTranslate(targetRevision);
-        if (store.status !== 'recording' && store.status !== 'processing') {
-          store.setStatus('processing');
-        }
         let attempts = 0;
         while (attempts < MANUAL_REFRESH_MAX_ATTEMPTS) {
           await new Promise((resolve) => window.setTimeout(resolve, MANUAL_REFRESH_INTERVAL_MS));
