@@ -101,8 +101,6 @@ export interface QualityFilterConfig {
   llm_prompt_template: string;
   discard_confidence_threshold: number;
   silence_window_ms: number;
-  filler_tokens: string[];
-  single_name_patterns: string[];
   repeat_ratio_threshold: number;
   enabled: boolean;
   version: number;

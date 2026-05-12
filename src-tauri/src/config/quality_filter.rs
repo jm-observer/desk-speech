@@ -17,14 +17,6 @@ pub struct QualityFilterConfig {
     #[serde(default = "default_silence_window_ms")]
     pub silence_window_ms: u64,
 
-    /// Filler token whitelist for rule-based discard.
-    #[serde(default)]
-    pub filler_tokens: Vec<String>,
-
-    /// Single name/title patterns for rule-based discard.
-    #[serde(default)]
-    pub single_name_patterns: Vec<String>,
-
     /// Ratio threshold for high repetition detection (0.0..=1.0).
     #[serde(default = "default_repeat_ratio_threshold")]
     pub repeat_ratio_threshold: f32,
@@ -66,29 +58,6 @@ impl Default for QualityFilterConfig {
             llm_prompt_template: String::new(), // Will be populated from LlmSettings or built-in default
             discard_confidence_threshold: default_discard_confidence_threshold(),
             silence_window_ms: default_silence_window_ms(),
-            filler_tokens: vec![
-                "ok".to_string(),
-                "okay".to_string(),
-                "嗯".to_string(),
-                "啊".to_string(),
-                "呃".to_string(),
-                "嗯嗯".to_string(),
-                "哦".to_string(),
-                "哎".to_string(),
-                "唉".to_string(),
-                "对".to_string(),
-                "对对".to_string(),
-                "是".to_string(),
-                "是的".to_string(),
-                "好".to_string(),
-                "好好".to_string(),
-                "嗯哼".to_string(),
-                "嘛".to_string(),
-            ],
-            single_name_patterns: vec![
-                // 2-3 Chinese characters pattern (handled by is_single_name heuristic)
-                "name_2_3_cjk".to_string(),
-            ],
             repeat_ratio_threshold: default_repeat_ratio_threshold(),
             enabled: default_enabled(),
             version: default_version(),

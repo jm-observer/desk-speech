@@ -242,10 +242,6 @@ const validateQualityField = (key: QualityFieldKey, value: QualityFilterConfig[Q
       return typeof value !== 'number' || Number.isNaN(value) || value < 1000
         ? '静默窗口必须 >= 1000ms'
         : null;
-    case 'filler_tokens':
-      return !Array.isArray(value) ? '语气词列表格式不正确' : null;
-    case 'single_name_patterns':
-      return !Array.isArray(value) ? '姓名模式列表格式不正确' : null;
     case 'llm_prompt_template':
       return typeof value !== 'string' ? '提示词模板格式不正确' : null;
     case 'enabled':
@@ -261,8 +257,6 @@ const validateQualityConfig = (config: Omit<QualityFilterConfig, 'version'>): Qu
     'discard_confidence_threshold',
     'silence_window_ms',
     'repeat_ratio_threshold',
-    'filler_tokens',
-    'single_name_patterns',
     'llm_prompt_template',
   ];
   const nextErrors: QualityFieldErrorMap = {};
@@ -403,8 +397,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
           llm_prompt_template: config.llm_prompt_template,
           discard_confidence_threshold: config.discard_confidence_threshold,
           silence_window_ms: config.silence_window_ms,
-          filler_tokens: config.filler_tokens,
-          single_name_patterns: config.single_name_patterns,
           repeat_ratio_threshold: config.repeat_ratio_threshold,
           enabled: config.enabled,
         });
@@ -468,8 +460,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
         discard_confidence_threshold: true,
         silence_window_ms: true,
         repeat_ratio_threshold: true,
-        filler_tokens: true,
-        single_name_patterns: true,
         llm_prompt_template: true,
       });
 
@@ -872,62 +862,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                     field={{
                       key: 'provider_url',
                       tab: 'quality',
-                      label: '语气词列表',
-                      description: '逗号分隔，用于规则层直接丢弃。',
-                      kind: 'textarea',
-                      fullWidth: true,
-                    }}
-                    error={qualityErrors.filler_tokens}
-                  >
-                    <textarea
-                      id="settings-field-quality-filler"
-                      className="min-h-[88px] w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
-                      value={qualityConfig.filler_tokens.join(', ')}
-                      onChange={(event) =>
-                        patchQuality(
-                          'filler_tokens',
-                          event.target.value
-                            .split(',')
-                            .map((item) => item.trim())
-                            .filter((item) => item.length > 0),
-                        )
-                      }
-                      onBlur={() => markQualityTouched('filler_tokens')}
-                    />
-                  </SettingsField>
-
-                  <SettingsField
-                    field={{
-                      key: 'provider_url',
-                      tab: 'quality',
-                      label: '姓名模式',
-                      description: '逗号分隔，用于单姓名规则匹配。',
-                      kind: 'textarea',
-                      fullWidth: true,
-                    }}
-                    error={qualityErrors.single_name_patterns}
-                  >
-                    <textarea
-                      id="settings-field-quality-name-patterns"
-                      className="min-h-[88px] w-full rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-3 py-2 text-[14px] text-[var(--ink-1)] outline-none focus:border-[var(--primary)]"
-                      value={qualityConfig.single_name_patterns.join(', ')}
-                      onChange={(event) =>
-                        patchQuality(
-                          'single_name_patterns',
-                          event.target.value
-                            .split(',')
-                            .map((item) => item.trim())
-                            .filter((item) => item.length > 0),
-                        )
-                      }
-                      onBlur={() => markQualityTouched('single_name_patterns')}
-                    />
-                  </SettingsField>
-
-                  <SettingsField
-                    field={{
-                      key: 'provider_url',
-                      tab: 'quality',
                       label: '终态判定提示词',
                       description: '支持 {{text_raw}}/{{text_optimized}}/{{text_english}} 占位符。',
                       kind: 'textarea',
@@ -963,8 +897,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                         llm_prompt_template: config.llm_prompt_template,
                         discard_confidence_threshold: config.discard_confidence_threshold,
                         silence_window_ms: config.silence_window_ms,
-                        filler_tokens: config.filler_tokens,
-                        single_name_patterns: config.single_name_patterns,
                         repeat_ratio_threshold: config.repeat_ratio_threshold,
                         enabled: config.enabled,
                       });
