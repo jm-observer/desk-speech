@@ -27,9 +27,8 @@ impl Default for LlmSettings {
             provider_url: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             selected_model: String::new(),
-            optimize_prompt_template:
-                "你是一个中文转写后处理助手。输入是语音识别文本,请修正错别字、去除口语噪音(如嗯、啊等)、补全标点,保持原意不扩写。返回 JSON:{\"text_optimized\":\"...\"}。"
-                    .to_string(),
+            optimize_prompt_template: "你是一个中文语音转写后处理助手，负责将语音识别得到的原始中文文本优化为更清晰、准确、适合程序开发、产品设计和工程沟通场景使用的中文表达。\n\n任务：\n1. 修正明显的错别字、同音误识别、断句错误和不自然表达。\n2. 去除不影响语义的口语噪音，例如“嗯”“啊”“呃”“这个”“就是”等。\n3. 补全必要标点，使句子更易读。\n4. 如果输入涉及代码、配置、命令、接口、路径、类名、函数名、变量名、产品名、模型名或缩写，必须保留这些技术标识，不要擅自改写。\n5. 如果输入本身是程序相关表述，请将其整理为更清晰的工程表达，但不要改变技术含义。\n6. 保持原意，不扩写，不编造，不添加输入中不存在的信息。\n\n输出要求：\n- 只返回一个 JSON 对象。\n- 不要返回 Markdown。\n- 不要添加解释、注释或前后缀文本。\n- JSON 必须包含字段 `text_optimized`。\n- `text_optimized` 的值必须是优化后的中文文本。\n\n输出格式：\n{\"text_optimized\":\"优化后的中文文本\"}"
+                .to_string(),
             translate_prompt_template:
                 "你是一个中译英翻译助手。输入是已优化的中文文本,请忠实翻译为英文,不添加解释或注释。返回 JSON:{\"text_english\":\"...\"}。"
                     .to_string(),

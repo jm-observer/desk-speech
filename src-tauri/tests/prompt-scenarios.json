@@ -1,0 +1,211 @@
+{
+  "optimize": [
+    {
+      "id": "OPT-001",
+      "name": "remove filler words and add punctuation",
+      "input": "嗯这个我们明天下午三点和客户开会",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "mustPreserveMeaning": true,
+        "shouldRemoveFillers": ["嗯", "这个"]
+      }
+    },
+    {
+      "id": "OPT-002",
+      "name": "normalize engineering expression",
+      "input": "把setting modal里面质量过滤的保存逻辑优化一下",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "mustPreserveMeaning": true,
+        "shouldPreserveTokens": ["setting", "modal"]
+      }
+    },
+    {
+      "id": "OPT-003",
+      "name": "preserve API names",
+      "input": "先调用getSettings然后再saveQualityFilterConfig",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "shouldPreserveTokens": ["getSettings", "saveQualityFilterConfig"]
+      }
+    },
+    {
+      "id": "OPT-004",
+      "name": "keep error meaning while removing noise",
+      "input": "啊啊这个就是报错了",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "mustPreserveMeaning": true,
+        "shouldRemoveFillers": ["啊啊", "这个", "就是"]
+      }
+    },
+    {
+      "id": "OPT-005",
+      "name": "preserve commands and technical words",
+      "input": "vite build失败因为typescript类型不匹配",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "shouldPreserveTokens": ["vite build", "typescript"]
+      }
+    },
+    {
+      "id": "OPT-006",
+      "name": "preserve file path",
+      "input": "不要改 src-tauri/src/settings.rs 里的 provider_url 默认值",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "mustPreserveMeaning": true,
+        "shouldPreserveTokens": ["src-tauri/src/settings.rs", "provider_url"]
+      }
+    },
+    {
+      "id": "OPT-007",
+      "name": "preserve mixed technical identifiers",
+      "input": "把 SettingsModal 里的 saveQualityFilterConfig 调用顺序调整一下",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "mustPreserveMeaning": true,
+        "shouldPreserveTokens": ["SettingsModal", "saveQualityFilterConfig"]
+      }
+    },
+    {
+      "id": "OPT-008",
+      "name": "preserve shell command and config key",
+      "input": "先跑 npm run build 再检查 optimize_prompt_template 有没有被改坏",
+      "expectedContract": {
+        "jsonField": "text_optimized",
+        "mustPreserveMeaning": true,
+        "shouldPreserveTokens": ["npm run build", "optimize_prompt_template"]
+      }
+    }
+  ],
+  "translate": [
+    {
+      "id": "TR-001",
+      "name": "preserve component name",
+      "input": "请优化 SettingsModal 里的质量过滤配置保存逻辑。",
+      "expectedContract": {
+        "jsonField": "text_english",
+        "mustPreserveTokens": ["SettingsModal"]
+      }
+    },
+    {
+      "id": "TR-002",
+      "name": "preserve shell command",
+      "input": "运行 npm run build 验证类型检查和打包。",
+      "expectedContract": {
+        "jsonField": "text_english",
+        "mustPreserveTokens": ["npm run build"]
+      }
+    },
+    {
+      "id": "TR-003",
+      "name": "preserve source path",
+      "input": "不要修改 src-tauri/src/settings.rs 的数据库键名。",
+      "expectedContract": {
+        "jsonField": "text_english",
+        "mustPreserveTokens": ["src-tauri/src/settings.rs"]
+      }
+    },
+    {
+      "id": "TR-004",
+      "name": "translate quality filter statement",
+      "input": "这个分段应该被质量过滤器丢弃。",
+      "expectedContract": {
+        "jsonField": "text_english",
+        "mustPreserveMeaning": true
+      }
+    },
+    {
+      "id": "TR-005",
+      "name": "translate engineering communication",
+      "input": "把程序表达优化为更适合工程沟通的中文。",
+      "expectedContract": {
+        "jsonField": "text_english",
+        "mustPreserveMeaning": true
+      }
+    }
+  ],
+  "qualityFilter": [
+    {
+      "id": "QF-001",
+      "name": "discard filler word",
+      "input": {
+        "text_raw": "嗯",
+        "text_optimized": "",
+        "text_english": ""
+      },
+      "expectedDecision": "DISCARD"
+    },
+    {
+      "id": "QF-002",
+      "name": "discard short response",
+      "input": {
+        "text_raw": "ok",
+        "text_optimized": "",
+        "text_english": ""
+      },
+      "expectedDecision": "DISCARD"
+    },
+    {
+      "id": "QF-003",
+      "name": "discard isolated name",
+      "input": {
+        "text_raw": "张三",
+        "text_optimized": "张三",
+        "text_english": "Zhang San"
+      },
+      "expectedDecision": "DISCARD"
+    },
+    {
+      "id": "QF-004",
+      "name": "discard repeated noise",
+      "input": {
+        "text_raw": "啊啊啊啊",
+        "text_optimized": "啊啊啊啊",
+        "text_english": ""
+      },
+      "expectedDecision": "DISCARD"
+    },
+    {
+      "id": "QF-005",
+      "name": "keep meeting information",
+      "input": {
+        "text_raw": "明天下午三点和客户开会",
+        "text_optimized": "明天下午三点和客户开会。",
+        "text_english": "Meet with the client at 3 PM tomorrow afternoon."
+      },
+      "expectedDecision": "KEEP"
+    },
+    {
+      "id": "QF-006",
+      "name": "keep technical implementation task",
+      "input": {
+        "text_raw": "把状态机拆成三个阶段实现",
+        "text_optimized": "把状态机拆成三个阶段实现。",
+        "text_english": "Implement the state machine in three phases."
+      },
+      "expectedDecision": "KEEP"
+    },
+    {
+      "id": "QF-007",
+      "name": "discard repeated low-value response",
+      "input": {
+        "text_raw": "好的好的好的",
+        "text_optimized": "好的好的好的",
+        "text_english": "okay okay okay"
+      },
+      "expectedDecision": "DISCARD"
+    },
+    {
+      "id": "QF-008",
+      "name": "keep explicit bug-fix task",
+      "input": {
+        "text_raw": "修复 translate_prompt_template 的 JSON 字段解析问题",
+        "text_optimized": "修复 translate_prompt_template 的 JSON 字段解析问题。",
+        "text_english": "Fix the JSON field parsing issue in translate_prompt_template."
+      },
+      "expectedDecision": "KEEP"
+    }
+  ]
+}

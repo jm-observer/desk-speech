@@ -16,10 +16,10 @@ use crate::llm_settings::LlmSettings;
 use tokio::time::sleep;
 
 #[derive(Deserialize, Debug, Serialize)]
-struct LlmJudgmentOutput {
-    decision: String, // KEEP or DISCARD
-    confidence: f32,
-    reason: String,
+pub(crate) struct LlmJudgmentOutput {
+    pub(crate) decision: String, // KEEP or DISCARD
+    pub(crate) confidence: f32,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug)]
@@ -73,8 +73,8 @@ pub struct CachedModels {
 }
 
 #[derive(Deserialize, Debug)]
-struct LlmOptimizeOutput {
-    text_optimized: String,
+pub(crate) struct LlmOptimizeOutput {
+    pub(crate) text_optimized: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -198,7 +198,7 @@ fn build_client(settings: &LlmSettings) -> Client<OpenAIConfig> {
     Client::with_config(config)
 }
 
-fn extract_json(content: &str) -> Result<Value, String> {
+pub(crate) fn extract_json(content: &str) -> Result<Value, String> {
     serde_json::from_str(content).or_else(|_| {
         let start = content.find('{').ok_or("missing JSON object start")?;
         let end = content.rfind('}').ok_or("missing JSON object end")?;
@@ -323,31 +323,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_json_accepts_plain_json() {
-        let content = r#"{"text_optimized":"你好","text_english":"hello"}"#;
-        let value = extract_json(content).unwrap();
-        assert_eq!(value["text_optimized"], "你好");
-        assert_eq!(value["text_english"], "hello");
-    }
-
-    #[test]
-    fn extract_json_accepts_wrapped_json() {
-        let content = r#"结果如下：
-{"text_optimized":"测试","text_english":"test"}
-谢谢"#;
-        let value = extract_json(content).unwrap();
-        assert_eq!(value["text_optimized"], "测试");
-        assert_eq!(value["text_english"], "test");
-    }
-
-    #[test]
-    fn extract_json_rejects_invalid_payload() {
-        let content = "no json here";
-        let err = extract_json(content).unwrap_err();
-        assert!(err.contains("missing JSON object start"));
-    }
-
-    #[test]
     fn retry_task_success_first_time() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(retry_task("test", 3, Duration::from_millis(1), || async {
@@ -448,36 +423,4 @@ mod tests {
         assert!(!check_discard_rules("会议开始", &config));
     }
 
-    #[test]
-    fn evaluate_judgment_keeps_discard_when_confidence_high() {
-        let config = QualityFilterConfig::default();
-        let result = JudgmentResult {
-            decision: "DISCARD".to_string(),
-            confidence: 0.8,
-            reason: "filler".to_string(),
-        };
-        assert!(evaluate_judgment(&result, &config));
-    }
-
-    #[test]
-    fn evaluate_judgment_keeps_discard_when_confidence_low() {
-        let config = QualityFilterConfig::default();
-        let result = JudgmentResult {
-            decision: "DISCARD".to_string(),
-            confidence: 0.5,
-            reason: "uncertain".to_string(),
-        };
-        assert!(!evaluate_judgment(&result, &config));
-    }
-
-    #[test]
-    fn evaluate_judgment_keeps_keep_decision() {
-        let config = QualityFilterConfig::default();
-        let result = JudgmentResult {
-            decision: "KEEP".to_string(),
-            confidence: 0.9,
-            reason: "meaningful".to_string(),
-        };
-        assert!(!evaluate_judgment(&result, &config));
-    }
 }

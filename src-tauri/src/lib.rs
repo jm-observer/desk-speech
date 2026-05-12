@@ -1,6 +1,6 @@
 mod audio_buffer;
 mod commands;
-mod config;
+pub mod config;
 mod correction;
 pub mod db;
 mod db_worker;
