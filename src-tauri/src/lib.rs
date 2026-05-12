@@ -14,7 +14,7 @@ use audio_buffer::RollingAudioBuffer;
 use model_registry::get_model_config;
 use serde::Serialize;
 use sherpa_onnx::{OfflineRecognizer, SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
@@ -305,6 +305,17 @@ pub(crate) struct RecognizeContext {
 // Resource directory & model init
 // ---------------------------------------------------------------------------
 
+fn manifest_assets_dir() -> Option<PathBuf> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let assets_dir = manifest_dir.join("assets");
+    assets_dir.exists().then_some(assets_dir)
+}
+
+fn should_prefer_manifest_assets(exe: &Path) -> bool {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    exe.starts_with(manifest_dir.join("target"))
+}
+
 fn resource_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         debug!("[resource_dir] current_exe: {exe:?}");
@@ -327,14 +338,29 @@ fn resource_dir() -> PathBuf {
         }
 
         if let Some(exe_dir) = exe.parent() {
+            if should_prefer_manifest_assets(&exe) {
+                if let Some(manifest_assets_dir) = manifest_assets_dir() {
+                    debug!("[resource_dir] preferring manifest assets dir in dev: {manifest_assets_dir:?}");
+                    return manifest_assets_dir;
+                }
+            }
+
             let assets_dir = exe_dir.join("assets");
             if assets_dir.exists() {
                 debug!("[resource_dir] using assets dir: {assets_dir:?}");
                 return assets_dir;
             }
             debug!("[resource_dir] using exe dir: {exe_dir:?}");
+            if let Some(manifest_assets_dir) = manifest_assets_dir() {
+                debug!("[resource_dir] using manifest assets dir: {manifest_assets_dir:?}");
+                return manifest_assets_dir;
+            }
             return exe_dir.to_path_buf();
         }
+    }
+    if let Some(manifest_assets_dir) = manifest_assets_dir() {
+        debug!("[resource_dir] using manifest assets dir without current_exe: {manifest_assets_dir:?}");
+        return manifest_assets_dir;
     }
     warn!("[resource_dir] fallback to current directory");
     PathBuf::from(".")
