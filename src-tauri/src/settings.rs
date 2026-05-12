@@ -337,28 +337,6 @@ pub(crate) async fn load_quality_filter_config_from_db(db: &db::SpeechDatabase) 
         config.enabled = v != "false" && v != "0";
     }
 
-    // Load filler tokens (comma-separated)
-    if let Ok(Some(v)) = db.get_setting("quality_filter.filler_tokens".to_string()).await {
-        if !v.is_empty() {
-            config.filler_tokens = v
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-    }
-
-    // Load single name patterns (comma-separated)
-    if let Ok(Some(v)) = db.get_setting("quality_filter.single_name_patterns".to_string()).await {
-        if !v.is_empty() {
-            config.single_name_patterns = v
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-    }
-
     config
 }
 
@@ -397,20 +375,6 @@ pub(crate) async fn save_quality_filter_config_to_db(
     db.upsert_setting("quality_filter.enabled".to_string(), config.enabled.to_string())
         .await
         .map_err(|e| e.to_string())?;
-
-    db.upsert_setting(
-        "quality_filter.filler_tokens".to_string(),
-        config.filler_tokens.join(","),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    db.upsert_setting(
-        "quality_filter.single_name_patterns".to_string(),
-        config.single_name_patterns.join(","),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
 
     Ok(())
 }

@@ -210,32 +210,6 @@ fn extract_json(content: &str) -> Result<Value, String> {
 // Rule-based discard (lightweight, no LLM call)
 // ---------------------------------------------------------------------------
 
-/// Check if text is composed only of filler words / interjections.
-fn is_pure_filler(text: &str, config: &QualityFilterConfig) -> bool {
-    let t = text.trim().to_lowercase();
-    config.filler_tokens.iter().any(|f| f.to_lowercase() == t)
-}
-
-/// Check if text matches a single name/title pattern (no verbs/real meaning).
-fn is_single_name(text: &str, _config: &QualityFilterConfig) -> bool {
-    let t = text.trim();
-    // Heuristic: 2-3 Chinese characters, no verbs commonly found in speech.
-    let char_count = t.chars().count();
-    if !(2..=3).contains(&char_count) {
-        return false;
-    }
-    // Check if all chars are CJK unified ideographs (simplified name check).
-    let all_cjk = t
-        .chars()
-        .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3400}'..='\u{4dbf}').contains(&c));
-    // Exclude common non-name words.
-    let non_names = ["老师", "同学", "朋友", "大家", "我们", "你们", "他们", "这个", "那个"];
-    if non_names.iter().any(|n| t.contains(*n)) {
-        return false;
-    }
-    all_cjk
-}
-
 /// Check if text has high repetition of the same token.
 fn is_high_repetition(text: &str, config: &QualityFilterConfig) -> bool {
     let t = text.trim();
@@ -264,19 +238,11 @@ pub fn check_discard_rules(text: &str, config: &QualityFilterConfig) -> bool {
     if normalized.is_empty() {
         return true;
     }
-    // Rule 1: Pure filler
-    if is_pure_filler(normalized, config) {
-        return true;
-    }
-    // Rule 2: Very short ASCII tokens (e.g. ok/hi/a) are low information.
+    // Rule 1: Very short ASCII tokens (e.g. ok/hi/a) are low information.
     if normalized.chars().count() < 3 && normalized.chars().all(|c| c.is_ascii_alphanumeric()) {
         return true;
     }
-    // Rule 3: Single name/title
-    if is_single_name(normalized, config) {
-        return true;
-    }
-    // Rule 4: High repetition
+    // Rule 2: High repetition
     if is_high_repetition(normalized, config) {
         return true;
     }
@@ -460,18 +426,11 @@ mod tests {
     }
 
     #[test]
-    fn check_discard_rules_filler_words() {
+    fn check_discard_rules_repeated_short_tokens() {
         let config = QualityFilterConfig::default();
         assert!(check_discard_rules("嗯嗯", &config));
-        assert!(check_discard_rules("啊", &config));
+        assert!(check_discard_rules("啊啊啊啊", &config));
         assert!(check_discard_rules("对对", &config));
-    }
-
-    #[test]
-    fn check_discard_rules_single_name() {
-        let config = QualityFilterConfig::default();
-        assert!(check_discard_rules("张三", &config));
-        assert!(check_discard_rules("李明", &config));
     }
 
     #[test]
@@ -487,14 +446,6 @@ mod tests {
         assert!(!check_discard_rules("今天天气不错", &config));
         assert!(!check_discard_rules("你好，请问有什么可以帮助你的", &config));
         assert!(!check_discard_rules("会议开始", &config));
-    }
-
-    #[test]
-    fn check_discard_rules_excludes_common_non_names() {
-        let config = QualityFilterConfig::default();
-        assert!(!check_discard_rules("老师", &config));
-        assert!(!check_discard_rules("同学", &config));
-        assert!(!check_discard_rules("大家", &config));
     }
 
     #[test]
