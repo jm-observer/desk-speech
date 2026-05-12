@@ -641,6 +641,7 @@ pub fn run() {
             commands::recording::get_recording_state,
             commands::history_api::list_segments,
             commands::history_api::tail_segments,
+            commands::history_api::delete_segment,
             commands::export::save_segment_as_wav,
             commands::export::save_all_audio,
             commands::export::get_recorded_audio_path,

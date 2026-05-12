@@ -30,3 +30,13 @@ pub async fn tail_segments(
     };
     crate::commands::history::tail_segments(&db, after_id, limit).await
 }
+
+#[tauri::command]
+pub async fn delete_segment(segment_id: u64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    info!("[delete_segment] segment_id={}", segment_id);
+    let db = {
+        let guard = mutex_lock(&state.db);
+        guard.as_ref().cloned().ok_or("Database not initialized")?
+    };
+    crate::commands::history::delete_segment(&db, segment_id).await
+}

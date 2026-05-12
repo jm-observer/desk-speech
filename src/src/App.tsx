@@ -473,6 +473,18 @@ function App() {
     store.setSegments([]);
   };
 
+  const handleDeleteSegment = useCallback(
+    async (segment: Segment) => {
+      try {
+        await store.deleteSegment(segment);
+      } catch (err) {
+        console.error('Delete segment failed', err);
+        alert(`删除失败: ${err}`);
+      }
+    },
+    [store]
+  );
+
   const handleDeviceChange = async (device: string) => {
     store.setSelectedDevice(device);
     try {
@@ -583,6 +595,7 @@ function App() {
                   onCopyChinese={(text) => handleSegmentCopy(text, 'optimized')}
                   onCopyEnglish={(text) => handleSegmentCopy(text, 'english')}
                   onManualOptimizeTranslate={handleManualOptimizeTranslate}
+                  onDelete={handleDeleteSegment}
                 />
               ))}
             </div>

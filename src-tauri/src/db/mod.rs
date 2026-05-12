@@ -128,6 +128,11 @@ impl SpeechDatabase {
         self.with_conn(move |conn| repository::delete_rule(conn, rule_id)).await
     }
 
+    pub async fn delete_segment(&self, segment_id: u64) -> Result<()> {
+        self.with_conn(move |conn| repository::delete_segment(conn, segment_id))
+            .await
+    }
+
     pub async fn update_rule(&self, rule_id: i64, rule: NewRule) -> Result<()> {
         let now = now_str();
         self.with_conn(move |conn| repository::update_rule(conn, rule_id, &rule, &now))

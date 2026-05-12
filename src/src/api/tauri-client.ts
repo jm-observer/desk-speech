@@ -138,6 +138,7 @@ export const TauriAPI = {
   manualOptimizeTranslate: (revision: number) => invoke('manual_optimize_translate', { revision }),
   listSegments: (page: number, pageSize: number) => invoke<Record<string, unknown>[]>('list_segments', { page, pageSize }),
   tailSegments: (afterId: number, limit: number) => invoke<Record<string, unknown>[]>('tail_segments', { afterId, limit }),
+  deleteSegment: (segmentId: number) => invoke('delete_segment', { segmentId }),
   getRecordedAudioPath: () => invoke<string>('get_recorded_audio_path'),
   saveAllAudio: (path: string) => invoke('save_all_audio', { path }),
   exportSrt: (path: string) => invoke('export_srt', { path }),

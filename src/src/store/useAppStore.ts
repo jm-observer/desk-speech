@@ -16,6 +16,33 @@ export const useAppStore = () => {
   const [qualityFilterConfig, setQualityFilterConfig] = useState<QualityFilterConfig | null>(null);
   const [configValidationError, setConfigValidationError] = useState<string | null>(null);
 
+  const deleteSegment = useCallback(async (segment: Segment) => {
+    const segmentId = segment.segment_id ?? segment.id;
+    if (segmentId === null || segmentId === undefined) {
+      console.error('Cannot delete segment: missing segment_id');
+      return;
+    }
+    try {
+      await TauriAPI.deleteSegment(segmentId);
+      setSegments((prev) => {
+        const key = segment.segment_id != null ? `seg-${segment.segment_id}` : `db-${segment.id}`;
+        return prev.filter((s) => {
+          if (s.segment_id != null && `seg-${s.segment_id}` === key) return false;
+          if (s.id != null && `db-${s.id}` === key) return false;
+          return true;
+        }).sort((a, b) => {
+          if (a.wall_start !== b.wall_start) {
+            return a.wall_start.localeCompare(b.wall_start);
+          }
+          return a.start - b.start;
+        });
+      });
+    } catch (err) {
+      console.error('Delete segment failed', err);
+      throw err;
+    }
+  }, []);
+
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
     segment_id: typeof row.segment_id === 'number' ? row.segment_id : null,
@@ -292,6 +319,7 @@ export const useAppStore = () => {
     status, setStatus,
     segments, setSegments,
     loadSegments,
+    deleteSegment,
     devices, setDevices,
     selectedDevice, setSelectedDevice,
     showEnglish, setShowEnglish,

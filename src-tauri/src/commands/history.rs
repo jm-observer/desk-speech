@@ -29,6 +29,10 @@ pub async fn tail_segments(db: &SpeechDatabase, after_id: i64, limit: u32) -> Re
     Ok(rows.into_iter().map(to_segment_dto).collect())
 }
 
+pub async fn delete_segment(db: &SpeechDatabase, segment_id: u64) -> Result<(), String> {
+    db.delete_segment(segment_id).await.map_err(|e| e.to_string())
+}
+
 pub(crate) fn to_segment_dto(row: SegmentRow) -> DbSegmentDto {
     DbSegmentDto {
         id: row.id,

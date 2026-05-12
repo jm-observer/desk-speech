@@ -579,6 +579,30 @@ pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
     }
 }
 
+pub fn delete_segment(conn: &Connection, segment_id: u64) -> Result<()> {
+    let segment = conn
+        .query_row(
+            "SELECT revision FROM asr_raw_records WHERE session_id = ?1 AND segment_id = ?2 LIMIT 1",
+            params![GLOBAL_SCOPE_ID, to_db_i64(segment_id)?],
+            |row| row.get::<_, i64>(0),
+        )
+        .with_context(|| format!("segment_id={segment_id} not found"))?;
+
+    conn.execute(
+        "DELETE FROM asr_llm_results WHERE session_id = ?1 AND revision = ?2",
+        params![GLOBAL_SCOPE_ID, segment],
+    )
+    .with_context(|| format!("failed to delete llm results for revision {segment}"))?;
+
+    conn.execute(
+        "DELETE FROM asr_raw_records WHERE session_id = ?1 AND segment_id = ?2",
+        params![GLOBAL_SCOPE_ID, to_db_i64(segment_id)?],
+    )
+    .with_context(|| format!("failed to delete segment {segment_id}"))?;
+
+    Ok(())
+}
+
 pub fn update_discard_result(
     conn: &Connection,
     revision: i64,
