@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use deadpool_sqlite::rusqlite::{params, Connection};
+use deadpool_sqlite::rusqlite::{params, Connection, OptionalExtension};
 use std::convert::TryFrom;
 
 pub(crate) const GLOBAL_SCOPE_ID: &str = "global";
@@ -586,13 +586,18 @@ pub fn delete_segment(conn: &Connection, segment_id: u64) -> Result<()> {
             params![GLOBAL_SCOPE_ID, to_db_i64(segment_id)?],
             |row| row.get::<_, i64>(0),
         )
-        .with_context(|| format!("segment_id={segment_id} not found"))?;
+        .optional()
+        .with_context(|| format!("failed to query revision for segment_id={segment_id}"))?;
+
+    let Some(revision) = segment else {
+        return Ok(());
+    };
 
     conn.execute(
         "DELETE FROM asr_llm_results WHERE session_id = ?1 AND revision = ?2",
-        params![GLOBAL_SCOPE_ID, segment],
+        params![GLOBAL_SCOPE_ID, revision],
     )
-    .with_context(|| format!("failed to delete llm results for revision {segment}"))?;
+    .with_context(|| format!("failed to delete llm results for revision {revision}"))?;
 
     conn.execute(
         "DELETE FROM asr_raw_records WHERE session_id = ?1 AND segment_id = ?2",
@@ -601,6 +606,77 @@ pub fn delete_segment(conn: &Connection, segment_id: u64) -> Result<()> {
     .with_context(|| format!("failed to delete segment {segment_id}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::schema::run_migrations;
+
+    fn setup_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        run_migrations(&conn).expect("run migrations");
+        ensure_global_scope(&conn, "2026-01-01 00:00:00").expect("ensure global scope");
+        conn
+    }
+
+    #[test]
+    fn delete_segment_returns_ok_when_segment_missing() {
+        let conn = setup_conn();
+        let result = delete_segment(&conn, 2254);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn delete_segment_removes_raw_and_llm_rows() {
+        let conn = setup_conn();
+        let now = "2026-01-01 00:00:01";
+        upsert_segment(
+            &conn,
+            &NewSegment {
+                segment_id: 1,
+                revision: 7,
+                start_sec: 0.0,
+                end_sec: 1.0,
+                wall_start: now.to_string(),
+                wall_end: now.to_string(),
+                text_raw: "hello".to_string(),
+            },
+            now,
+        )
+        .expect("insert segment");
+        upsert_optimize_result(
+            &conn,
+            &OptimizeResultUpsert {
+                revision: 7,
+                text_optimized: Some("hello".to_string()),
+                optimize_error: None,
+                optimize_started_at: None,
+                optimize_finished_at: None,
+            },
+            now,
+        )
+        .expect("insert llm result");
+
+        delete_segment(&conn, 1).expect("delete segment");
+
+        let raw_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM asr_raw_records WHERE session_id = ?1 AND segment_id = ?2",
+                params![GLOBAL_SCOPE_ID, 1_i64],
+                |row| row.get(0),
+            )
+            .expect("query raw count");
+        let llm_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM asr_llm_results WHERE session_id = ?1 AND revision = ?2",
+                params![GLOBAL_SCOPE_ID, 7_i64],
+                |row| row.get(0),
+            )
+            .expect("query llm count");
+        assert_eq!(raw_count, 0);
+        assert_eq!(llm_count, 0);
+    }
 }
 
 pub fn update_discard_result(

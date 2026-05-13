@@ -1,6 +1,6 @@
 use crate::commands::history::DbSegmentDto;
 use crate::lock_utils::mutex_lock;
-use crate::AppState;
+use crate::{remove_segment_from_memory, AppState};
 use log::info;
 
 #[tauri::command]
@@ -38,5 +38,7 @@ pub async fn delete_segment(segment_id: u64, state: tauri::State<'_, AppState>) 
         let guard = mutex_lock(&state.db);
         guard.as_ref().cloned().ok_or("Database not initialized")?
     };
-    crate::commands::history::delete_segment(&db, segment_id).await
+    crate::commands::history::delete_segment(&db, segment_id).await?;
+    remove_segment_from_memory(&state.segments, segment_id);
+    Ok(())
 }

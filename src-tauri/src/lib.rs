@@ -61,7 +61,10 @@ pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_segment_in_place, SegmentResult, SegmentUpdateType};
+    use std::sync::{Arc, RwLock};
+
+    use super::{merge_segment_in_place, remove_segment_from_memory, SegmentResult, SegmentUpdateType};
+    use crate::lock_utils::read_lock;
 
     fn seg(start: f32, end: f32, text: &str, revision: i64) -> SegmentResult {
         SegmentResult {
@@ -113,6 +116,39 @@ mod tests {
         assert!(!merged);
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "第一句");
+    }
+
+    #[test]
+    fn remove_segment_from_memory_removes_matching_segment_id_only() {
+        let segments = Arc::new(RwLock::new(vec![
+            seg(0.0, 1.0, "第一句", 1),
+            seg(1.0, 2.0, "第二句", 2),
+        ]));
+        {
+            let mut guard = segments.write().expect("lock segments");
+            guard[0].segment_id = 100;
+            guard[1].segment_id = 200;
+        }
+
+        let removed = remove_segment_from_memory(&segments, 100);
+
+        assert!(removed);
+        let guard = read_lock(&segments);
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].segment_id, 200);
+        assert_eq!(guard[0].text, "第二句");
+    }
+
+    #[test]
+    fn remove_segment_from_memory_returns_false_when_segment_missing() {
+        let segments = Arc::new(RwLock::new(vec![seg(0.0, 1.0, "第一句", 1)]));
+
+        let removed = remove_segment_from_memory(&segments, 999);
+
+        assert!(!removed);
+        let guard = read_lock(&segments);
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].segment_id, 1);
     }
 }
 
@@ -201,6 +237,13 @@ pub(crate) fn set_segment_discard_state(
         seg.discard_confidence = discard_confidence;
         seg.quality_check_status = quality_check_status.to_string();
     }
+}
+
+pub(crate) fn remove_segment_from_memory(segments: &Arc<RwLock<Vec<SegmentResult>>>, segment_id: u64) -> bool {
+    let mut segs = write_lock(segments);
+    let original_len = segs.len();
+    segs.retain(|seg| seg.segment_id != segment_id);
+    segs.len() != original_len
 }
 
 pub(crate) fn can_start_finalization_check(segments: &Arc<RwLock<Vec<SegmentResult>>>, revision: i64) -> bool {
