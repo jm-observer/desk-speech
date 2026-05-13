@@ -3,7 +3,7 @@
   "title": "AppVersionInfo",
   "description": "前后端共享的应用版本信息结构",
   "type": "object",
-  "required": ["app_version", "app_name", "build_profile", "schema_version", "first_run_after_upgrade"],
+  "required": ["app_version", "app_name", "build_profile", "git_commit", "schema_version", "config_schema_version", "first_run_after_upgrade"],
   "properties": {
     "app_version": {
       "type": "string",

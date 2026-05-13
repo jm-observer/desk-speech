@@ -1,7 +1,12 @@
+#[path = "../src/config/mod.rs"]
+mod config;
 #[path = "../src/db/mod.rs"]
 mod db;
+#[path = "../src/versioning.rs"]
+mod versioning;
 
 use db::SpeechDatabase;
+use versioning::AppVersionInfo;
 
 fn temp_db_path(suffix: &str) -> std::path::PathBuf {
     let mut path = std::env::temp_dir();
@@ -14,16 +19,16 @@ fn temp_db_path(suffix: &str) -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn upgrade_detection_fresh_install_returns_false() {
+async fn app_version_info_fresh_install_is_not_upgrade() {
     let path = temp_db_path("fresh-install");
     let db = SpeechDatabase::init(&path).await.unwrap();
 
-    let result = db.get_setting("app.last_run_version".to_string()).await.unwrap();
-    assert!(result.is_none(), "fresh install should have no last_run_version");
+    let info = AppVersionInfo::new(&db).await.unwrap();
+    assert!(!info.first_run_after_upgrade);
 }
 
 #[tokio::test]
-async fn upgrade_detection_same_version_returns_false() {
+async fn app_version_info_same_version_is_not_upgrade() {
     let path = temp_db_path("same-version");
     let db = SpeechDatabase::init(&path).await.unwrap();
 
@@ -34,12 +39,12 @@ async fn upgrade_detection_same_version_returns_false() {
     .await
     .unwrap();
 
-    let result = db.get_setting("app.last_run_version".to_string()).await.unwrap();
-    assert_eq!(result, Some(env!("CARGO_PKG_VERSION").to_string()));
+    let info = AppVersionInfo::new(&db).await.unwrap();
+    assert!(!info.first_run_after_upgrade);
 }
 
 #[tokio::test]
-async fn upgrade_detection_different_version_returns_true() {
+async fn app_version_info_different_version_is_upgrade() {
     let path = temp_db_path("diff-version");
     let db = SpeechDatabase::init(&path).await.unwrap();
 
@@ -47,6 +52,17 @@ async fn upgrade_detection_different_version_returns_true() {
         .await
         .unwrap();
 
+    let info = AppVersionInfo::new(&db).await.unwrap();
+    assert!(info.first_run_after_upgrade);
+}
+
+#[tokio::test]
+async fn save_last_run_version_writes_current_version() {
+    let path = temp_db_path("save-current");
+    let db = SpeechDatabase::init(&path).await.unwrap();
+
+    AppVersionInfo::save_last_run_version(&db).await;
+
     let result = db.get_setting("app.last_run_version".to_string()).await.unwrap();
-    assert_eq!(result, Some("1.12.0".to_string()));
+    assert_eq!(result, Some(env!("CARGO_PKG_VERSION").to_string()));
 }

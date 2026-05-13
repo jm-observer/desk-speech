@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::config::quality_filter::QUALITY_FILTER_CONFIG_SCHEMA_VERSION;
 use crate::db::SpeechDatabase;
 
 /// 应用版本信息，前后端共享的统一结构体。
@@ -24,6 +25,8 @@ pub struct AppVersionInfo {
     pub first_run_after_upgrade: bool,
 }
 
+pub const APP_NAME: &str = "StreamSpeech";
+
 /// 用于升级检测的持久化键名。
 const LAST_RUN_VERSION_KEY: &str = "app.last_run_version";
 
@@ -42,14 +45,14 @@ impl AppVersionInfo {
     /// `schema_version` 使用数据库迁移常量。
     /// `config_schema_version` 使用质量过滤配置的结构版本号（固定为 1）。
     /// `first_run_after_upgrade` 通过比较当前版本与数据库中存储的最近运行版本来确定。
-    pub fn new(app_name: String, db: &SpeechDatabase) -> Result<Self, anyhow::Error> {
+    pub async fn new(db: &SpeechDatabase) -> Result<Self, anyhow::Error> {
         let build_profile = if cfg!(debug_assertions) {
             "debug".to_string()
         } else {
             "release".to_string()
         };
 
-        let last_run_version = tauri::async_runtime::block_on(db.get_setting(LAST_RUN_VERSION_KEY.to_string()))?;
+        let last_run_version = db.get_setting(LAST_RUN_VERSION_KEY.to_string()).await?;
 
         let first_run_after_upgrade = match last_run_version {
             Some(previous_version) => version_comparison(&previous_version, env!("CARGO_PKG_VERSION")),
@@ -58,11 +61,11 @@ impl AppVersionInfo {
 
         Ok(Self {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
-            app_name,
+            app_name: APP_NAME.to_string(),
             build_profile,
             git_commit: None,
             schema_version: crate::db::schema::DB_SCHEMA_VERSION,
-            config_schema_version: 1,
+            config_schema_version: QUALITY_FILTER_CONFIG_SCHEMA_VERSION,
             first_run_after_upgrade,
         })
     }
@@ -71,11 +74,9 @@ impl AppVersionInfo {
     ///
     /// 在启动流程的关键步骤完成后调用。
     /// 写入失败时记录 error 日志但不阻断主流程。
-    pub fn save_last_run_version(db: &SpeechDatabase) {
+    pub async fn save_last_run_version(db: &SpeechDatabase) {
         let app_version = env!("CARGO_PKG_VERSION").to_string();
-        if let Err(err) =
-            tauri::async_runtime::block_on(db.upsert_setting(LAST_RUN_VERSION_KEY.to_string(), app_version))
-        {
+        if let Err(err) = db.upsert_setting(LAST_RUN_VERSION_KEY.to_string(), app_version).await {
             log::error!("[version] failed to save last run version: {err}");
         }
     }
@@ -86,9 +87,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_version_info_contains_cargo_package_version() {
-        // 此测试不依赖数据库，直接验证常量
-        assert_eq!(env!("CARGO_PKG_VERSION"), "1.13.0");
+    fn app_version_is_non_empty() {
+        assert!(!env!("CARGO_PKG_VERSION").is_empty());
     }
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn version_comparison_returns_false_for_empty_previous() {
+    fn version_comparison_returns_true_for_empty_previous() {
         // 空字符串与任何版本都不同，模拟首次安装时由调用方处理为 false
         assert!(version_comparison("", "1.13.0"));
     }
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn config_schema_version_is_positive() {
-        assert!(1 > 0);
+        assert!(QUALITY_FILTER_CONFIG_SCHEMA_VERSION > 0);
     }
 
     #[test]
@@ -135,7 +135,15 @@ mod tests {
         assert!(json.contains("app_name"));
         assert!(json.contains("build_profile"));
         assert!(json.contains("schema_version"));
+        assert!(json.contains("config_schema_version"));
+        assert!(json.contains("git_commit"));
         assert!(json.contains("first_run_after_upgrade"));
+    }
+
+    #[test]
+    fn build_profile_is_valid() {
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        assert!(matches!(profile, "debug" | "release"));
     }
 
     #[test]

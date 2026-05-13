@@ -410,7 +410,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
     const loadVersionInfo = async () => {
       try {
-        const info = await TauriAPI.getAppVersionInfo('StreamSpeech');
+        const info = await TauriAPI.getAppVersionInfo();
         setVersionInfo(info);
       } catch (err) {
         console.warn('Load version info failed', err);
@@ -898,6 +898,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
         <div className="rounded-b-[24px] border-t border-[var(--line)] bg-[var(--bg-card)] p-6 pt-2">
           <div className="mb-3 flex items-center justify-between">
+            {versionInfo?.first_run_after_upgrade && (
+              <div className="rounded-lg border border-[var(--primary)]/30 bg-[var(--primary-soft)] px-3 py-1.5 text-[11px] text-[var(--primary-deep)]">
+                已升级到 v{versionInfo.app_version}
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-[var(--ink-3)]">
                 {versionInfo ? `${versionInfo.app_name} v${versionInfo.app_version}` : 'StreamSpeech'}

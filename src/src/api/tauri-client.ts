@@ -153,5 +153,5 @@ export const TauriAPI = {
   getQualityFilterConfig: () => invoke<QualityFilterConfig>('get_quality_filter_config'),
   saveQualityFilterConfig: (payload: Omit<QualityFilterConfig, 'version'>) => invoke('save_quality_filter_config', { payload }),
   resetQualityFilterConfig: () => invoke<QualityFilterConfig>('reset_quality_filter_config'),
-  getAppVersionInfo: (appName: string) => invoke<AppVersionInfo>('get_app_version_info', { appName }),
+  getAppVersionInfo: () => invoke<AppVersionInfo>('get_app_version_info'),
 };

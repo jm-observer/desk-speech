@@ -48,8 +48,10 @@ fn default_enabled() -> bool {
     true
 }
 
+pub const QUALITY_FILTER_CONFIG_SCHEMA_VERSION: u32 = 1;
+
 fn default_version() -> u32 {
-    1
+    QUALITY_FILTER_CONFIG_SCHEMA_VERSION
 }
 
 impl Default for QualityFilterConfig {

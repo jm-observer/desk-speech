@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "check:versions": "node scripts/check-versions.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

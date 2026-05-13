@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check version consistency
+        run: node scripts/check-versions.mjs
+
       - name: Install ARM64 toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |

@@ -577,13 +577,13 @@ pub fn run() {
             return;
         }
     };
-    let version_info = match versioning::AppVersionInfo::new("StreamSpeech".to_string(), &db) {
+    let version_info = match tauri::async_runtime::block_on(versioning::AppVersionInfo::new(&db)) {
         Ok(info) => info,
         Err(err) => {
             error!("[version] failed to build version info: {err}");
             versioning::AppVersionInfo {
                 app_version: env!("CARGO_PKG_VERSION").to_string(),
-                app_name: "StreamSpeech".to_string(),
+                app_name: versioning::APP_NAME.to_string(),
                 build_profile: if cfg!(debug_assertions) {
                     "debug".to_string()
                 } else {
@@ -591,7 +591,7 @@ pub fn run() {
                 },
                 git_commit: None,
                 schema_version: crate::db::schema::DB_SCHEMA_VERSION,
-                config_schema_version: 1,
+                config_schema_version: crate::config::quality_filter::QUALITY_FILTER_CONFIG_SCHEMA_VERSION,
                 first_run_after_upgrade: false,
             }
         }
@@ -603,7 +603,6 @@ pub fn run() {
         version_info.schema_version,
         version_info.first_run_after_upgrade
     );
-    versioning::AppVersionInfo::save_last_run_version(&db);
     let db_writer = db_worker::start_db_worker(db.clone());
     let state = build_app_state(
         db,
