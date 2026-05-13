@@ -115,6 +115,16 @@ export interface ValidationErrorsResponse {
   errors: ConfigValidationError[];
 }
 
+export interface AppVersionInfo {
+  app_version: string;
+  app_name: string;
+  build_profile: string;
+  git_commit: string | null;
+  schema_version: number;
+  config_schema_version: number;
+  first_run_after_upgrade: boolean;
+}
+
 export const TauriAPI = {
   startRecording: () => invoke('start_recording'),
   stopRecording: () => invoke('stop_recording'),
@@ -143,4 +153,5 @@ export const TauriAPI = {
   getQualityFilterConfig: () => invoke<QualityFilterConfig>('get_quality_filter_config'),
   saveQualityFilterConfig: (payload: Omit<QualityFilterConfig, 'version'>) => invoke('save_quality_filter_config', { payload }),
   resetQualityFilterConfig: () => invoke<QualityFilterConfig>('reset_quality_filter_config'),
+  getAppVersionInfo: (appName: string) => invoke<AppVersionInfo>('get_app_version_info', { appName }),
 };

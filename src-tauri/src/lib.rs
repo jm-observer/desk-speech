@@ -9,6 +9,7 @@ mod llm_settings;
 mod lock_utils;
 mod model_registry;
 mod settings;
+mod versioning;
 
 use audio_buffer::RollingAudioBuffer;
 use model_registry::get_model_config;
@@ -17,8 +18,7 @@ use sherpa_onnx::{OfflineRecognizer, SileroVadModelConfig, VadModelConfig, Voice
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::sync::Arc;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::config::quality_filter::QualityFilterConfig;
@@ -577,6 +577,33 @@ pub fn run() {
             return;
         }
     };
+    let version_info = match versioning::AppVersionInfo::new("StreamSpeech".to_string(), &db) {
+        Ok(info) => info,
+        Err(err) => {
+            error!("[version] failed to build version info: {err}");
+            versioning::AppVersionInfo {
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
+                app_name: "StreamSpeech".to_string(),
+                build_profile: if cfg!(debug_assertions) {
+                    "debug".to_string()
+                } else {
+                    "release".to_string()
+                },
+                git_commit: None,
+                schema_version: crate::db::schema::DB_SCHEMA_VERSION,
+                config_schema_version: 1,
+                first_run_after_upgrade: false,
+            }
+        }
+    };
+    info!(
+        "[version] app_version={} build_profile={} schema_version={} first_run_after_upgrade={}",
+        version_info.app_version,
+        version_info.build_profile,
+        version_info.schema_version,
+        version_info.first_run_after_upgrade
+    );
+    versioning::AppVersionInfo::save_last_run_version(&db);
     let db_writer = db_worker::start_db_worker(db.clone());
     let state = build_app_state(
         db,
@@ -729,6 +756,7 @@ pub fn run() {
             commands::quality_filter::get_quality_filter_config,
             commands::quality_filter::save_quality_filter_config,
             commands::quality_filter::reset_quality_filter_config,
+            commands::version::get_app_version_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

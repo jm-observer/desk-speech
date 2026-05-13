@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { TauriAPI } from '../api/tauri-client';
 import type { AppSettings } from '../api/tauri-client';
 import type { QualityFilterConfig } from '../api/tauri-client';
+import type { AppVersionInfo } from '../api/tauri-client';
 import { Button } from './ui/Button';
 
 interface SettingsModalProps {
@@ -347,6 +348,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const [qualityTouched, setQualityTouched] = useState<Partial<Record<QualityFieldKey, boolean>>>({});
   const [qualityConfig, setQualityConfig] = useState<Omit<QualityFilterConfig, 'version'> | null>(null);
   const [qualitySaving, setQualitySaving] = useState(false);
+  const [versionInfo, setVersionInfo] = useState<AppVersionInfo | null>(null);
+  const [showDevInfo, setShowDevInfo] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -405,9 +408,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       }
     };
 
+    const loadVersionInfo = async () => {
+      try {
+        const info = await TauriAPI.getAppVersionInfo('StreamSpeech');
+        setVersionInfo(info);
+      } catch (err) {
+        console.warn('Load version info failed', err);
+      }
+    };
+
     void loadSettings();
     void loadModels();
     void loadQualityConfig();
+    void loadVersionInfo();
   }, [open]);
 
   const focusField = (key: FieldKey) => {
@@ -884,6 +897,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
         </div>
 
         <div className="rounded-b-[24px] border-t border-[var(--line)] bg-[var(--bg-card)] p-6 pt-2">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-[var(--ink-3)]">
+                {versionInfo ? `${versionInfo.app_name} v${versionInfo.app_version}` : 'StreamSpeech'}
+              </span>
+              {versionInfo && (
+                <button
+                  type="button"
+                  className="text-[10px] text-[var(--ink-4)] underline decoration-dotted hover:text-[var(--ink-2)]"
+                  onClick={() => setShowDevInfo((prev) => !prev)}
+                >
+                  {showDevInfo ? '收起' : '开发信息'}
+                </button>
+              )}
+            </div>
+            {showDevInfo && versionInfo && (
+              <div className="text-[10px] text-[var(--ink-4)]">
+                <span>build={versionInfo.build_profile}</span>
+                <span className="mx-1.5">·</span>
+                <span>schema v{versionInfo.schema_version}</span>
+                <span className="mx-1.5">·</span>
+                <span>config v{versionInfo.config_schema_version}</span>
+                {versionInfo.git_commit && (
+                  <>
+                    <span className="mx-1.5">·</span>
+                    <span>commit {versionInfo.git_commit.slice(0, 7)}</span>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <p className="text-[11px] font-medium italic text-[var(--danger)]">保存后会重新加载识别模型，录音中不可修改。</p>
             <div className="flex gap-3">

@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use deadpool_sqlite::rusqlite::Connection;
 
+/// 数据库 schema 当前版本号，与 migrations/ 目录中的迁移文件数量同步。
+pub const DB_SCHEMA_VERSION: u32 = 4;
+
 pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     let sql_0001 = include_str!("../../migrations/0001_init.sql");
     conn.execute_batch(sql_0001)

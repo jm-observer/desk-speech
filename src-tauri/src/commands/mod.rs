@@ -9,3 +9,4 @@ pub mod manual_optimize;
 pub mod quality_filter;
 pub mod recording;
 pub mod settings;
+pub mod version;
