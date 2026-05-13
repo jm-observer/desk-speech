@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { cn, stripYear } from '../utils';
 import type { Segment } from '../api/tauri-client';
 import { Button } from './ui/Button';
@@ -13,73 +13,6 @@ interface SegmentCardProps {
   onDelete?: (segment: Segment) => void;
 }
 
-interface ConfirmDialogProps {
-  title: string;
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-}
-
-const ConfirmDialog: React.FC<ConfirmDialogProps> = ({ title, message, onConfirm, onCancel }) => {
-  const overlayRef = useRef<HTMLDivElement>(null);
-
-  const handleOverlayClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.target === e.currentTarget) {
-      onCancel();
-    }
-  }, [onCancel]);
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      onCancel();
-    }
-  }, [onCancel]);
-
-  useEffect(() => {
-    overlayRef.current?.focus();
-  }, []);
-
-  return (
-    <div
-      ref={overlayRef}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="confirm-title"
-      tabIndex={-1}
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 animate-fade-in"
-      onClick={handleOverlayClick}
-      onKeyDown={handleKeyDown}
-    >
-      <div className="bg-[var(--bg-app)] border border-[var(--line)] rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.3)] w-[360px] p-6 animate-scale-in">
-        <h3 id="confirm-title" className="text-[15px] font-semibold text-[var(--ink)] mb-2">
-          {title}
-        </h3>
-        <p className="text-[13px] text-[var(--ink-3)] leading-relaxed mb-5">
-          {message}
-        </p>
-        <div className="flex gap-2.5 justify-end">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onCancel}
-            className="h-8 px-3.5 text-[13px]"
-          >
-            取消
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={onConfirm}
-            className="h-8 px-3.5 text-[13px] bg-red-500 hover:bg-red-600 text-white shadow-none"
-          >
-            删除
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 export const SegmentCard: React.FC<SegmentCardProps> = ({
   segment,
   showEnglish,
@@ -90,7 +23,6 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
 }) => {
   const [copiedZh, setCopiedZh] = useState(false);
   const [copiedEn, setCopiedEn] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const maxHeightRef = useRef(0);
@@ -108,23 +40,14 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
     setTimeout(() => setCopiedEn(false), 2000);
   };
 
-  const handleDeleteClick = () => {
-    setShowConfirm(true);
-  };
-
-  const handleConfirmDelete = async () => {
-    if (!onDelete) return;
+  const handleDeleteClick = async () => {
+    if (!onDelete || isDeleting) return;
     setIsDeleting(true);
-    setShowConfirm(false);
     try {
       await onDelete(segment);
     } catch {
       setIsDeleting(false);
     }
-  };
-
-  const handleCancelDelete = () => {
-    setShowConfirm(false);
   };
 
   const optimizeRunning = segment.optimize_status === 'running' || segment.optimize_status === 'pending';
@@ -259,14 +182,6 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
         )}
       </div>
 
-      {showConfirm && onDelete && (
-        <ConfirmDialog
-          title="删除识别记录"
-          message="确定要删除这条识别记录吗？此操作不可恢复。"
-          onConfirm={handleConfirmDelete}
-          onCancel={handleCancelDelete}
-        />
-      )}
     </>
   );
 };
