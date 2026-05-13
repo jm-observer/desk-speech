@@ -422,5 +422,4 @@ mod tests {
         assert!(!check_discard_rules("你好，请问有什么可以帮助你的", &config));
         assert!(!check_discard_rules("会议开始", &config));
     }
-
 }

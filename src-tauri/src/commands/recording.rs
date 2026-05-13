@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -189,12 +189,16 @@ fn run_recording(
     };
 
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    let stream = build_input_stream(&device, tx)?;
+    let received_audio = Arc::new(AtomicBool::new(false));
+    let stream = build_input_stream(&device, tx, Arc::clone(&received_audio))?;
     stream.play().map_err(|e| format!("Stream play: {e}"))?;
+    info!("[recording] input stream started, waiting for microphone samples");
 
     vad.reset();
     let window_size: usize = 512;
     let mut vad_buf: Vec<f32> = Vec::new();
+    let wait_started_at = Instant::now();
+    let mut warned_no_audio = false;
 
     loop {
         if runtime.stop_signal.load(Ordering::Relaxed) {
@@ -237,7 +241,16 @@ fn run_recording(
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !warned_no_audio
+                    && !received_audio.load(Ordering::Relaxed)
+                    && wait_started_at.elapsed() >= Duration::from_secs(3)
+                {
+                    warned_no_audio = true;
+                    warn!("[recording] no microphone samples received within 3 seconds");
+                }
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 info!("[recording] audio channel disconnected");
                 break;
@@ -275,7 +288,11 @@ fn run_recording(
     Ok((recognizer, vad))
 }
 
-fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Result<cpal::Stream, String> {
+fn build_input_stream(
+    device: &cpal::Device,
+    tx: mpsc::Sender<Vec<f32>>,
+    received_audio: Arc<AtomicBool>,
+) -> Result<cpal::Stream, String> {
     let supported = device
         .default_input_config()
         .map_err(|e| format!("No input config: {e}"))?;
@@ -301,6 +318,9 @@ fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Resu
                     if data.is_empty() {
                         return;
                     }
+                    if !received_audio.swap(true, Ordering::Relaxed) {
+                        info!("[mic] first audio callback received, frames={}", data.len() / channels);
+                    }
                     let mono: Vec<f32> = data
                         .chunks(channels)
                         .map(|frame| {
@@ -322,6 +342,9 @@ fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Resu
                     if data.is_empty() {
                         return;
                     }
+                    if !received_audio.swap(true, Ordering::Relaxed) {
+                        info!("[mic] first audio callback received, frames={}", data.len() / channels);
+                    }
                     let mono: Vec<f32> = data
                         .chunks(channels)
                         .map(|frame| {
@@ -342,6 +365,9 @@ fn build_input_stream(device: &cpal::Device, tx: mpsc::Sender<Vec<f32>>) -> Resu
                 move |data: &[u16], _| {
                     if data.is_empty() {
                         return;
+                    }
+                    if !received_audio.swap(true, Ordering::Relaxed) {
+                        info!("[mic] first audio callback received, frames={}", data.len() / channels);
                     }
                     let mono: Vec<f32> = data
                         .chunks(channels)
@@ -370,6 +396,7 @@ fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::Spee
         return;
     }
     let vad_start = segment.start() as f32 / SAMPLE_RATE as f32;
+    info!("[vad] detected speech segment start={vad_start:.2}s duration={duration:.2}s");
     let stream = recognizer.create_stream();
     stream.accept_waveform(16000, samples);
     recognizer.decode(&stream);
@@ -383,6 +410,10 @@ async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration:
     let rel_end = rel_start + duration;
     if let Some(r) = stream.get_result() {
         let text_raw = r.text.trim().to_string();
+        info!(
+            "[asr] decoded segment start={vad_start:.2}s duration={duration:.2}s text={:?}",
+            text_raw
+        );
 
         // Filter out results that contain Japanese Hiragana or Katakana,
         // as the model often misidentifies silence/noise as Japanese.

@@ -6,7 +6,7 @@ mod llm_client;
 mod llm_settings;
 
 use config::quality_filter::QualityFilterConfig;
-use llm_client::{extract_json, evaluate_judgment, JudgmentResult, LlmJudgmentOutput, LlmOptimizeOutput};
+use llm_client::{evaluate_judgment, extract_json, JudgmentResult, LlmJudgmentOutput, LlmOptimizeOutput};
 
 #[test]
 fn extract_json_accepts_plain_json() {
