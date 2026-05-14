@@ -133,6 +133,7 @@ async fn run_manual_optimize_translate(
     };
 
     save_optimize_result(&db, &segments, &app_handle, revision, optimized.clone()).await?;
+    maybe_copy_optimized_result(&app_handle, &settings.auto_copy_mode, &optimized, revision);
     mark_translate_running(&db, &segments, &app_handle, revision).await?;
 
     let english = match translate_text(&settings, &optimized).await {
@@ -144,7 +145,7 @@ async fn run_manual_optimize_translate(
     };
 
     save_translate_result(&db, &segments, &app_handle, revision, english.clone()).await?;
-    maybe_copy_result(&app_handle, settings.auto_copy_mode, &optimized, &english, revision);
+    maybe_copy_translated_result(&app_handle, &settings.auto_copy_mode, &english, revision);
     info!("[manual_optimize_translate] finished for revision={revision}");
     Ok(())
 }
@@ -292,23 +293,33 @@ async fn emit_segment_updated(db: &SpeechDatabase, app_handle: &tauri::AppHandle
     }
 }
 
-fn maybe_copy_result(
+fn maybe_copy_optimized_result(
     app_handle: &tauri::AppHandle,
-    auto_copy_mode: AutoCopyMode,
+    auto_copy_mode: &AutoCopyMode,
     optimized: &str,
+    revision: i64,
+) {
+    if !matches!(auto_copy_mode, &AutoCopyMode::OptimizedZh) {
+        return;
+    }
+
+    if let Err(err) = app_handle.clipboard().write_text(optimized) {
+        warn!("[manual_optimize_translate] copy 优化中文 failed for revision={revision}: {err}");
+    }
+}
+
+fn maybe_copy_translated_result(
+    app_handle: &tauri::AppHandle,
+    auto_copy_mode: &AutoCopyMode,
     english: &str,
     revision: i64,
 ) {
-    let copy_text = match auto_copy_mode {
-        AutoCopyMode::Off => None,
-        AutoCopyMode::English => Some((english, "英文")),
-        AutoCopyMode::OptimizedZh => Some((optimized, "优化中文")),
-    };
+    if !matches!(auto_copy_mode, &AutoCopyMode::English) {
+        return;
+    }
 
-    if let Some((text, mode_name)) = copy_text {
-        if let Err(err) = app_handle.clipboard().write_text(text) {
-            warn!("[manual_optimize_translate] copy {mode_name} failed for revision={revision}: {err}");
-        }
+    if let Err(err) = app_handle.clipboard().write_text(english) {
+        warn!("[manual_optimize_translate] copy 英文 failed for revision={revision}: {err}");
     }
 }
 

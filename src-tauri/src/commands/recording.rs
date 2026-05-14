@@ -663,6 +663,8 @@ async fn perform_postprocess_and_copy(
         None,
     );
 
+    maybe_copy_optimized_result(app_handle, &settings.auto_copy_mode, &optimized_for_memory, revision);
+
     let _ = writer.try_send(DbEvent::MarkTranslateRunning { revision });
     update_segment_llm_state(&state.segments, revision, None, Some("running"), None, None);
 
@@ -700,21 +702,43 @@ async fn perform_postprocess_and_copy(
         Some(english.clone()),
     );
 
-    let copy_text = match settings.auto_copy_mode {
-        AutoCopyMode::Off => None,
-        AutoCopyMode::English => Some((english, "英文")),
-        AutoCopyMode::OptimizedZh => Some((optimized_for_memory, "优化中文")),
-    };
-
-    if let Some((text, mode_name)) = copy_text {
-        if let Err(err) = app_handle.clipboard().write_text(text) {
-            error!("copy {mode_name} to clipboard failed: {}", err);
-        } else {
-            info!("[llm] auto copy done, revision={}, mode={}", revision, mode_name);
-        }
-    }
+    maybe_copy_translated_result(app_handle, &settings.auto_copy_mode, &english, revision);
 
     schedule_finalization_check(state, revision);
+}
+
+fn maybe_copy_optimized_result(
+    app_handle: &tauri::AppHandle,
+    auto_copy_mode: &AutoCopyMode,
+    optimized: &str,
+    revision: i64,
+) {
+    if !matches!(auto_copy_mode, &AutoCopyMode::OptimizedZh) {
+        return;
+    }
+
+    if let Err(err) = app_handle.clipboard().write_text(optimized) {
+        error!("copy 优化中文 to clipboard failed: {}", err);
+    } else {
+        info!("[llm] auto copy done, revision={}, mode=优化中文", revision);
+    }
+}
+
+fn maybe_copy_translated_result(
+    app_handle: &tauri::AppHandle,
+    auto_copy_mode: &AutoCopyMode,
+    english: &str,
+    revision: i64,
+) {
+    if !matches!(auto_copy_mode, &AutoCopyMode::English) {
+        return;
+    }
+
+    if let Err(err) = app_handle.clipboard().write_text(english) {
+        error!("copy 英文 to clipboard failed: {}", err);
+    } else {
+        info!("[llm] auto copy done, revision={}, mode=英文", revision);
+    }
 }
 
 fn schedule_finalization_check(state: &Arc<AppState>, revision: i64) {
