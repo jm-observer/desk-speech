@@ -45,6 +45,7 @@ async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
 function App() {
   const store = useAppStore();
   const pollTimer = useRef<number | null>(null);
+  const pollInFlightRef = useRef(false);
   const notifiedRevisionsRef = useRef<Set<string>>(new Set());
   const manualTriggeredRevisionsRef = useRef<Set<number>>(new Set());
   const notificationBaselineReadyRef = useRef(false);
@@ -182,6 +183,8 @@ function App() {
   const startPolling = useCallback(() => {
     if (pollTimer.current) clearInterval(pollTimer.current);
     pollTimer.current = window.setInterval(async () => {
+      if (pollInFlightRef.current) return;
+      pollInFlightRef.current = true;
       try {
         const state = await TauriAPI.getRecordingState();
 
@@ -232,6 +235,8 @@ function App() {
         console.error("Poll failed", err);
         stopPolling();
         store.setStatus('error');
+      } finally {
+        pollInFlightRef.current = false;
       }
     }, 1000);
   }, [mergeSegmentsByRevision, store, stopPolling]);

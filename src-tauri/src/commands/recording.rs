@@ -119,7 +119,7 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
                     segments: &segments,
                     next_realtime_segment_id,
                     next_revision,
-                    correction_engine: &correction_engine,
+                    correction_engine: correction_engine.clone(),
                     app_state: &app_state,
                     app_handle: &app,
                     db_writer: db_writer_for_run.clone(),
@@ -150,7 +150,9 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         }
 
         recording.store(false, Ordering::SeqCst);
-        let _ = db_writer.try_send(DbEvent::TouchGlobalScopeEnd);
+        if let Err(err) = db_writer.try_send(DbEvent::TouchGlobalScopeEnd) {
+            error!("[recording task] failed to finalize global scope end: {err}");
+        }
         info!("[recording task] stopped");
     });
 
@@ -497,13 +499,6 @@ async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration:
                 }
             };
 
-            // let llm_input_text = ctx
-            //     .segments
-            //     .read()
-            //     .map(|guard| guard.last().map(|seg| seg.text.clone()))
-            //     .unwrap_or_else(|poisoned| poisoned.into_inner().last().map(|seg| seg.text.clone()))
-            //     .filter(|t| !t.trim().is_empty())
-            //     .unwrap_or_else(|| text_corrected.clone());
 
             let event = DbEvent::InsertSegment {
                 segment: NewSegment {
@@ -517,13 +512,19 @@ async fn recognize_segment_task(stream: OfflineStream, vad_start: f32, duration:
                 },
             };
             if let Err(err) = ctx.db_writer.try_send(event) {
-                if matches!(err, TrySendError::Full(_)) {
-                    warn!("[db-worker] queue full, dropping segment event");
-                } else {
-                    warn!(
-                        "[db-worker] failed to enqueue segment segment_id={}, revision={}, err={}",
-                        db_segment_id, revision, err
-                    );
+                match err {
+                    TrySendError::Full(_) => {
+                        error!(
+                            "[db-worker] queue full, dropping segment segment_id={}, revision={}. Consider increasing queue capacity.",
+                            db_segment_id, revision
+                        );
+                    }
+                    TrySendError::Disconnected(_) => {
+                        error!(
+                            "[db-worker] channel disconnected, cannot persist segment segment_id={}, revision={}",
+                            db_segment_id, revision
+                        );
+                    }
                 }
             } else {
                 debug!(
@@ -563,46 +564,14 @@ fn spawn_llm_postprocess_task_v2(
         let settings = read_lock(&state.llm_settings).clone();
 
         if settings.selected_model.trim().is_empty() {
-            error!("");
+            warn!(
+                "[llm] selected_model is empty, skipping postprocess for revision={}",
+                revision
+            );
+            update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
+            let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
+            return;
         }
-        // if settings.selected_model.trim().is_empty() {
-        //     match llm_list_models(&settings).await {
-        //         Ok(models) => {
-        //             if let Some(first) = models.into_iter().find(|m| !m.trim().is_empty()) {
-        //                 warn!(
-        //                     "[llm] selected_model is empty, fallback to first model={}, revision={}",
-        //                     first, revision
-        //                 );
-        //                 let mut fallback_settings = settings.clone();
-        //                 fallback_settings.selected_model = first;
-        //                 perform_postprocess_and_copy(
-        //                     &writer,
-        //                     &state,
-        //                     &app_handle,
-        //                     revision,
-        //                     &llm_input_text,
-        //                     fallback_settings,
-        //                 )
-        //                 .await;
-        //                 return;
-        //             } else {
-        //                 warn!("[llm] skip due to empty model list, revision={}", revision);
-        //                 update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-        //                 let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
-        //                 return;
-        //             }
-        //         }
-        //         Err(err) => {
-        //             warn!(
-        //                 "[llm] skip due to empty model and list_models failed, revision={}, err={}",
-        //                 revision, err
-        //             );
-        //             update_segment_llm_state(&state.segments, revision, Some("failed"), None, None, None);
-        //             let _ = writer.try_send(DbEvent::MarkOptimizeFailed { revision });
-        //             return;
-        //         }
-        //     }
-        // }
 
         perform_postprocess_and_copy(&writer, &state, &app_handle, revision, &llm_input_text, settings).await;
     });

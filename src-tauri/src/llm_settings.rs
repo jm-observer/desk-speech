@@ -39,8 +39,12 @@ impl Default for LlmSettings {
 }
 
 pub fn validate_llm_settings(settings: &LlmSettings) -> Result<(), String> {
-    if settings.provider_url.trim().is_empty() {
+    let url = settings.provider_url.trim();
+    if url.is_empty() {
         return Err("provider_url cannot be empty".to_string());
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("provider_url must start with http:// or https://".to_string());
     }
     if settings.optimize_prompt_template.trim().is_empty() {
         return Err("optimize_prompt_template cannot be empty".to_string());

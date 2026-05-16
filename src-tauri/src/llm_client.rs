@@ -249,6 +249,15 @@ pub fn check_discard_rules(text: &str, config: &QualityFilterConfig) -> bool {
     false
 }
 
+/// Truncate and strip control characters from text before embedding in prompts.
+fn sanitize_for_prompt(text: &str) -> String {
+    const MAX_PROMPT_INPUT_LEN: usize = 2000;
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .take(MAX_PROMPT_INPUT_LEN)
+        .collect()
+}
+
 /// Call LLM to perform judgment. Returns (decision, confidence, reason).
 /// On failure, returns ("FAILED", 0.0, "llm_error").
 pub async fn judge_discard(
@@ -256,19 +265,24 @@ pub async fn judge_discard(
     config: &QualityFilterConfig,
     input: &JudgmentInput,
 ) -> Result<JudgmentResult, String> {
+    // Sanitize inputs to mitigate prompt injection from ASR output
+    let sanitized_raw = sanitize_for_prompt(&input.text_raw);
+    let sanitized_optimized = input.text_optimized.as_deref().map(sanitize_for_prompt);
+    let sanitized_english = input.text_english.as_deref().map(sanitize_for_prompt);
+
     // Use config prompt template if available, fallback to settings
     let system_prompt = if !config.llm_prompt_template.is_empty() && config.has_placeholders() {
         config.render_prompt_template(
-            &input.text_raw,
-            input.text_optimized.as_deref(),
-            input.text_english.as_deref(),
+            &sanitized_raw,
+            sanitized_optimized.as_deref(),
+            sanitized_english.as_deref(),
         )
     } else {
         settings
             .discard_prompt_template
-            .replace("{text_optimized}", input.text_optimized.as_deref().unwrap_or(""))
-            .replace("{text_raw}", &input.text_raw)
-            .replace("{text_english}", input.text_english.as_deref().unwrap_or(""))
+            .replace("{text_optimized}", sanitized_optimized.as_deref().unwrap_or(""))
+            .replace("{text_raw}", &sanitized_raw)
+            .replace("{text_english}", sanitized_english.as_deref().unwrap_or(""))
     };
 
     // Primary input: text_optimized > text_raw

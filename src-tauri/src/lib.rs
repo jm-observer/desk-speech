@@ -32,7 +32,11 @@ use log::{debug, error, info, warn};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
+/// Max gap (seconds) between two consecutive VAD segments to merge them into one logical sentence.
+/// Tuned for natural speech pauses within a sentence (breathing, hesitation).
 const MERGE_MAX_GAP_SEC: f32 = 5.6;
+/// How long to wait (ms) after the last segment before running quality/finalization checks.
+/// Ensures the speaker has truly stopped before committing the segment.
 pub(crate) const FINALIZE_SILENCE_MS: u64 = 10_000;
 
 pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResult) -> bool {
@@ -307,7 +311,7 @@ pub(crate) struct RecordingRuntime<'a> {
     segments: &'a Arc<RwLock<Vec<SegmentResult>>>,
     next_realtime_segment_id: Arc<AtomicU64>,
     next_revision: Arc<AtomicU64>,
-    correction_engine: &'a CorrectionEngine,
+    correction_engine: Arc<CorrectionEngine>,
     app_state: &'a Arc<AppState>,
     app_handle: &'a tauri::AppHandle,
     db_writer: SyncSender<db_worker::DbEvent>,
@@ -320,7 +324,7 @@ pub(crate) struct RecognizeContext {
     segments: Arc<RwLock<Vec<SegmentResult>>>,
     next_realtime_segment_id: Arc<AtomicU64>,
     next_revision: Arc<AtomicU64>,
-    correction_engine: CorrectionEngine,
+    correction_engine: Arc<CorrectionEngine>,
     state: Arc<AppState>,
     app_handle: tauri::AppHandle,
     db_writer: SyncSender<db_worker::DbEvent>,
@@ -547,7 +551,13 @@ fn build_app_state(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let workspace = custom_utils::args::workspace(&None, "streaming-speech").unwrap();
+    let workspace = match custom_utils::args::workspace(&None, "streaming-speech") {
+        Ok(ws) => ws,
+        Err(err) => {
+            error!("[init] failed to determine workspace path: {err}");
+            return;
+        }
+    };
     let db_path = workspace.join("speech_history.db");
     if let Err(err) = std::fs::create_dir_all(&workspace) {
         error!("[db] cannot create parent dir {}: {err}", workspace.display());
