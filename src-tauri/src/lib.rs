@@ -756,6 +756,7 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::apply_settings,
             commands::settings::list_llm_models,
+            commands::settings::list_llm_models_with_url,
             commands::correction_api::list_correction_rules,
             commands::correction_api::create_correction_rule,
             commands::correction_api::update_correction_rule,

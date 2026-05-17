@@ -17,7 +17,7 @@ export const RecordCard: React.FC<RecordCardProps> = ({
   onStop,
   disabled 
 }) => {
-  const isRecording = status === 'recording';
+  const isRecording = status === 'recording' || status === 'processing';
   const isProcessingOnly = status === 'processing';
 
   return (

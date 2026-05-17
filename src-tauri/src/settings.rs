@@ -103,13 +103,6 @@ pub(crate) async fn apply_settings(
     let llm_settings_arc = Arc::clone(&state.llm_settings);
     let llm_models_cache_arc = Arc::clone(&state.llm_models_cache);
     let db_arc = Arc::clone(&state.db);
-    if state.recording.load(Ordering::SeqCst) {
-        return Err("Cannot change settings while recording".to_string());
-    }
-    let init = state.init_status.load(Ordering::Relaxed);
-    if init == 0 {
-        return Err("Models are still loading, please wait".to_string());
-    }
 
     let new_vad_settings = VadSettings {
         threshold: new_settings.threshold,
@@ -131,16 +124,32 @@ pub(crate) async fn apply_settings(
     validate_settings(&new_vad_settings)?;
     validate_llm_settings(&new_llm_settings)?;
 
-    {
+    let vad_changed = {
         let current_vad = read_lock(&settings_arc);
+        *current_vad != new_vad_settings
+    };
+    let llm_changed = {
         let current_llm = read_lock(&llm_settings_arc);
-        if *current_vad == new_vad_settings && *current_llm == new_llm_settings {
-            return Ok(());
-        }
+        *current_llm != new_llm_settings
+    };
+
+    if !vad_changed && !llm_changed {
+        return Ok(());
     }
 
-    state.init_status.store(0, Ordering::Relaxed);
-    *write_lock(&settings_arc) = new_vad_settings.clone();
+    if vad_changed && state.recording.load(Ordering::SeqCst) {
+        return Err("Cannot change settings while recording".to_string());
+    }
+
+    let init = state.init_status.load(Ordering::Relaxed);
+    if vad_changed && init == 0 {
+        return Err("Models are still loading, please wait".to_string());
+    }
+
+    if vad_changed {
+        state.init_status.store(0, Ordering::Relaxed);
+        *write_lock(&settings_arc) = new_vad_settings.clone();
+    }
     *write_lock(&llm_settings_arc) = new_llm_settings.clone();
     *write_lock(&llm_models_cache_arc) = None;
 
@@ -186,47 +195,49 @@ pub(crate) async fn apply_settings(
         .map_err(|e| e.to_string())?;
     }
 
-    let recognizer_arc = Arc::clone(&state.recognizer);
-    let vad_arc = Arc::clone(&state.vad);
-    let init_status = Arc::clone(&state.init_status);
-    let init_error = Arc::clone(&state.init_error);
-    let init_num_threads = Arc::clone(&state.num_threads);
+    if vad_changed {
+        let recognizer_arc = Arc::clone(&state.recognizer);
+        let vad_arc = Arc::clone(&state.vad);
+        let init_status = Arc::clone(&state.init_status);
+        let init_error = Arc::clone(&state.init_error);
+        let init_num_threads = Arc::clone(&state.num_threads);
 
-    tauri::async_runtime::spawn(async move {
-        info!("[apply_settings] rebuilding models...");
-        let join = tauri::async_runtime::spawn_blocking(move || build_models(&new_vad_settings));
-        match join.await {
-            Ok(Ok((rec, vad, threads))) => {
-                info!("[apply_settings] models rebuilt, num_threads={threads}");
-                {
-                    let mut r = write_lock(&recognizer_arc);
-                    *r = Some(rec);
+        tauri::async_runtime::spawn(async move {
+            info!("[apply_settings] rebuilding models...");
+            let join = tauri::async_runtime::spawn_blocking(move || build_models(&new_vad_settings));
+            match join.await {
+                Ok(Ok((rec, vad, threads))) => {
+                    info!("[apply_settings] models rebuilt, num_threads={threads}");
+                    {
+                        let mut r = write_lock(&recognizer_arc);
+                        *r = Some(rec);
+                    }
+                    {
+                        let mut v = write_lock(&vad_arc);
+                        *v = Some(vad);
+                    }
+                    init_num_threads.store(threads, Ordering::Relaxed);
+                    init_status.store(1, Ordering::Relaxed);
                 }
-                {
-                    let mut v = write_lock(&vad_arc);
-                    *v = Some(vad);
+                Ok(Err(err)) => {
+                    error!("[apply_settings] rebuild failed: {err}");
+                    {
+                        let mut init_err = write_lock(&init_error);
+                        *init_err = err;
+                    }
+                    init_status.store(2, Ordering::Relaxed);
                 }
-                init_num_threads.store(threads, Ordering::Relaxed);
-                init_status.store(1, Ordering::Relaxed);
+                Err(err) => {
+                    error!("[apply_settings] join failed: {err}");
+                    {
+                        let mut init_err = write_lock(&init_error);
+                        *init_err = "Internal error: settings task join failed".to_string();
+                    }
+                    init_status.store(2, Ordering::Relaxed);
+                }
             }
-            Ok(Err(err)) => {
-                error!("[apply_settings] rebuild failed: {err}");
-                {
-                    let mut init_err = write_lock(&init_error);
-                    *init_err = err;
-                }
-                init_status.store(2, Ordering::Relaxed);
-            }
-            Err(err) => {
-                error!("[apply_settings] join failed: {err}");
-                {
-                    let mut init_err = write_lock(&init_error);
-                    *init_err = "Internal error: settings task join failed".to_string();
-                }
-                init_status.store(2, Ordering::Relaxed);
-            }
-        }
-    });
+        });
+    }
 
     Ok(())
 }
@@ -249,6 +260,18 @@ pub(crate) async fn list_llm_models(state: tauri::State<'_, AppState>) -> Result
         fetched_at: Instant::now(),
         models: fetched.clone(),
     });
+    Ok(ModelListResponse { models: fetched })
+}
+
+pub(crate) async fn list_llm_models_with_url(provider_url: String, api_key: String) -> Result<ModelListResponse, String> {
+    info!("[list_llm_models_with_url] provider_url={}", provider_url);
+    let settings = LlmSettings {
+        provider_url,
+        api_key,
+        ..LlmSettings::default()
+    };
+    validate_llm_settings(&settings)?;
+    let fetched = llm_list_models(&settings).await?;
     Ok(ModelListResponse { models: fetched })
 }
 

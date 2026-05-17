@@ -103,7 +103,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
         <Button variant="soft" size="sm" className="w-full h-9 rounded-lg text-xs" onClick={onShowRules} disabled={disabled}>
           词修正
         </Button>
-        <Button variant="soft" size="sm" className="col-span-2 w-full h-9 rounded-lg text-xs" onClick={onShowSettings} disabled={status === 'recording' || disabled}>
+        <Button variant="soft" size="sm" className="col-span-2 w-full h-9 rounded-lg text-xs" onClick={onShowSettings} disabled={disabled}>
           识别参数设置
         </Button>
       </div>

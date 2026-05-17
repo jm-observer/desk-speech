@@ -631,21 +631,47 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
       return (
         <SettingsField key={field.key} field={field} error={error} helpText={helpText}>
-          <select
-            id={`settings-field-${field.key}`}
-            className={commonClassName}
-            value={settings.selected_model}
-            onBlur={() => markTouched(field.key)}
-            onChange={(event) => patch('selected_model', event.target.value)}
-            disabled={loadingModels && modelOptions.length === 0}
-          >
-            {!settings.selected_model.trim() && <option value="">请选择模型</option>}
-            {modelOptions.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
+          <div className="flex gap-2">
+            <select
+              id={`settings-field-${field.key}`}
+              className={`${commonClassName} flex-1`}
+              value={settings.selected_model}
+              onBlur={() => markTouched(field.key)}
+              onChange={(event) => patch('selected_model', event.target.value)}
+              disabled={loadingModels && modelOptions.length === 0}
+            >
+              {!settings.selected_model.trim() && <option value="">请选择模型</option>}
+              {modelOptions.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="shrink-0 rounded-lg border border-[var(--line)] bg-[var(--bg-soft)] px-3 py-2 text-[12px] text-[var(--ink-2)] hover:bg-[var(--bg-line)] disabled:opacity-50"
+              disabled={loadingModels}
+              onClick={async () => {
+                setLoadingModels(true);
+                setModelError(null);
+                try {
+                  const url = settings.provider_url?.trim();
+                  const key = settings.api_key ?? '';
+                  const response = url
+                    ? await TauriAPI.listLlmModelsWithUrl(url, key)
+                    : await TauriAPI.listLlmModels();
+                  setModels(response.models);
+                } catch (err) {
+                  console.warn('Refresh llm models failed', err);
+                  setModelError('模型列表刷新失败，请检查服务地址和 API Key。');
+                } finally {
+                  setLoadingModels(false);
+                }
+              }}
+            >
+              {loadingModels ? '加载中...' : '刷新'}
+            </button>
+          </div>
         </SettingsField>
       );
     }
@@ -934,7 +960,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
             )}
           </div>
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <p className="text-[11px] font-medium italic text-[var(--danger)]">保存后会重新加载识别模型，录音中不可修改。</p>
+            <p className="text-[11px] font-medium italic text-[var(--danger)]">VAD/ASR 参数保存后会重新加载识别模型，录音中仅可修改 LLM 后处理配置。</p>
             <div className="flex gap-3">
               {tab === 'quality' && (
                 <Button

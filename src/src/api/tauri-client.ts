@@ -138,6 +138,7 @@ export const TauriAPI = {
   getSettings: () => invoke<AppSettings>('get_settings'),
   applySettings: (newSettings: AppSettings) => invoke('apply_settings', { newSettings }),
   listLlmModels: () => invoke<LlmModelList>('list_llm_models'),
+  listLlmModelsWithUrl: (providerUrl: string, apiKey: string) => invoke<LlmModelList>('list_llm_models_with_url', { providerUrl, apiKey }),
   listCorrectionRules: () => invoke<CorrectionRule[]>('list_correction_rules'),
   createCorrectionRule: (payload: Omit<CorrectionRule, 'id'>) => invoke('create_correction_rule', payload),
   updateCorrectionRule: (payload: CorrectionRule) => invoke('update_correction_rule', { ...payload }),
