@@ -1,8 +1,8 @@
 # GB10 服务端编排(P0)。vLLM 维持主机现状,不在此 compose 内。
 services:
   asr:
-    build: ./asr
-    image: funasr-asr:arm64
+    build: ./asr            # 薄层,FROM funasr-asr:arm64(已验证基镜像)
+    image: funasr-asr:svc
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -26,8 +26,8 @@ services:
       - ORCH_BIND=0.0.0.0:8090          # 对客户端的 WebSocket
       - ASR_WS=ws://asr:9100            # 内部 ASR 服务
       # vLLM 在主机上;host.docker.internal 经 extra_hosts 解析
-      - VLLM_BASE=http://host.docker.internal:1234/v1
-      - VLLM_MODEL=google/gemma-4-26B-A4B-it
+      - VLLM_BASE=http://host.docker.internal:8085/v1
+      - VLLM_MODEL=gemma-4-26B-A4B-it
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
