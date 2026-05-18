@@ -15,6 +15,7 @@ use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientControl, Hello, ServerEvent};
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
+#[derive(Clone)]
 struct Cfg {
     bind: String,
     asr_ws: String,
@@ -68,51 +69,62 @@ async fn handle_client(mut sock: WebSocket) {
         .await;
 
     // 2) 连接 ASR 服务
-    let (mut asr, _) = match tokio_tungstenite::connect_async(&c.asr_ws).await {
+    let (asr, _) = match tokio_tungstenite::connect_async(&c.asr_ws).await {
         Ok(x) => x,
         Err(e) => return send_fatal(&mut sock, "asr_unreachable", &e.to_string()).await,
     };
 
-    // 3) 转发循环:客户端音频 -> ASR;stop -> flush 并回收段
+    // 拆分:客户端写端交给 asr_reader(唯一写者),asr 读端并发转发。
+    let (cli_tx, mut cli_rx) = sock.split();
+    let (mut asr_tx, asr_rx) = asr.split();
+
+    // asr_reader:全程并发读 ASR(流式 VAD 会在过程中持续吐 segment),
+    // 转发并按需调 vLLM,收到 done 则发 Done 结束。
+    let reader = tokio::spawn(asr_reader(asr_rx, cli_tx, hello, c.clone(), session_id));
+
+    // 主循环:客户端音频/控制 -> ASR
     loop {
-        match sock.recv().await {
+        match cli_rx.next().await {
             Some(Ok(Message::Binary(pcm))) => {
-                if asr.send(TMessage::Binary(pcm)).await.is_err() {
+                if asr_tx.send(TMessage::Binary(pcm)).await.is_err() {
                     break;
                 }
             }
-            Some(Ok(Message::Text(t))) => {
-                match serde_json::from_str::<ClientControl>(&t) {
-                    Ok(ClientControl::Reset) => {
-                        let _ = asr.send(TMessage::text(r#"{"type":"reset"}"#)).await;
-                    }
-                    Ok(ClientControl::Stop) => {
-                        let _ = asr.send(TMessage::text(r#"{"type":"flush"}"#)).await;
-                        drain_asr(&mut asr, &mut sock, &hello, &c).await;
-                        break;
-                    }
-                    Err(_) => {}
+            Some(Ok(Message::Text(t))) => match serde_json::from_str::<ClientControl>(&t) {
+                Ok(ClientControl::Reset) => {
+                    let _ = asr_tx.send(TMessage::text(r#"{"type":"reset"}"#)).await;
                 }
+                Ok(ClientControl::Stop) => {
+                    let _ = asr_tx.send(TMessage::text(r#"{"type":"flush"}"#)).await;
+                    break;
+                }
+                Err(_) => {}
+            },
+            _ => {
+                // 断线/关闭:让 ASR 收尾,asr_reader 会发 done
+                let _ = asr_tx.send(TMessage::text(r#"{"type":"flush"}"#)).await;
+                break;
             }
-            _ => break, // 断线/关闭:P0 视为会话结束
         }
     }
 
-    let _ = sock
-        .send(Message::Text(ServerEvent::Done { session_id }.json()))
-        .await;
+    // 等 asr_reader 处理完 flush 后的收尾(它负责发 Done)
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), reader).await;
 }
 
-/// flush 后从 ASR 读段,逐段回客户端,并按需调 vLLM 优化/翻译。
-async fn drain_asr(
-    asr: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+/// 并发读取 ASR,逐段转发客户端,并按需调 vLLM 优化/翻译。收到 done 发 Done。
+async fn asr_reader(
+    mut asr_rx: futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     >,
-    sock: &mut WebSocket,
-    hello: &Hello,
-    c: &Cfg,
+    mut cli_tx: futures_util::stream::SplitSink<WebSocket, Message>,
+    hello: Hello,
+    c: Cfg,
+    session_id: String,
 ) {
-    while let Some(Ok(msg)) = asr.next().await {
+    while let Some(Ok(msg)) = asr_rx.next().await {
         let TMessage::Text(t) = msg else { continue };
         let v: serde_json::Value = match serde_json::from_str(&t) {
             Ok(v) => v,
@@ -122,7 +134,7 @@ async fn drain_asr(
             Some("segment") => {
                 let id = SEG_ID.fetch_add(1, Ordering::Relaxed);
                 let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let _ = sock
+                let _ = cli_tx
                     .send(Message::Text(
                         ServerEvent::Segment {
                             id,
@@ -134,26 +146,30 @@ async fn drain_asr(
                     ))
                     .await;
 
-                // TODO 并发化:P0 顺序调用,够用先求对
+                // TODO 并发化:P0 顺序调用(会延后后续段转发);先求对
                 if hello.want_optimize {
-                    if let Ok(opt) = llm(c, "请在不改变原意的前提下润色为通顺中文,只输出结果:", &text).await {
-                        let _ = sock
+                    if let Ok(opt) =
+                        llm(&c, "请在不改变原意的前提下润色为通顺中文,只输出结果:", &text).await
+                    {
+                        let _ = cli_tx
                             .send(Message::Text(ServerEvent::Optimized { r#ref: id, text: opt }.json()))
                             .await;
                     }
                 }
                 if hello.want_translate {
-                    if let Ok(en) = llm(c, "Translate to natural English, output only the translation:", &text).await {
-                        let _ = sock
+                    if let Ok(en) =
+                        llm(&c, "Translate to natural English, output only the translation:", &text)
+                            .await
+                    {
+                        let _ = cli_tx
                             .send(Message::Text(ServerEvent::Translated { r#ref: id, text: en }.json()))
                             .await;
                     }
                 }
             }
-            Some("done") => break,
             Some("error") => {
                 let m = v.get("message").and_then(|x| x.as_str()).unwrap_or("asr error");
-                let _ = sock
+                let _ = cli_tx
                     .send(Message::Text(
                         ServerEvent::Error {
                             code: "asr".into(),
@@ -163,6 +179,12 @@ async fn drain_asr(
                         .json(),
                     ))
                     .await;
+            }
+            Some("done") => {
+                let _ = cli_tx
+                    .send(Message::Text(ServerEvent::Done { session_id }.json()))
+                    .await;
+                return;
             }
             _ => {}
         }
