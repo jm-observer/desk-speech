@@ -733,6 +733,13 @@ pub fn run() {
     let init_settings = Arc::clone(&state.settings);
 
     tauri::async_runtime::spawn(async move {
+        // Redesign / P0: remote mode does recognition on the GB10 orchestrator,
+        // so skip the (heavy, unused) local model init and report ready at once.
+        if let Some(url) = crate::commands::remote::remote_url() {
+            info!("[init] remote mode ({url}): skipping local model init");
+            init_status.store(1, Ordering::Relaxed);
+            return;
+        }
         info!("[init] starting model initialization...");
         let settings = read_lock(&init_settings).clone();
         let join = tauri::async_runtime::spawn_blocking(move || build_models(&settings));
