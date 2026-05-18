@@ -33,6 +33,25 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         return Err("Already recording".to_string());
     }
 
+    // Redesign / P0: if a remote orchestrator is configured, stream to it
+    // instead of running sherpa-onnx locally (no local models needed).
+    if let Some(url) = crate::commands::remote::remote_url() {
+        info!("[start_recording] remote mode -> {url}");
+        state.stop_signal.store(false, Ordering::Relaxed);
+        let app2 = app.clone();
+        let selected_device = Arc::clone(&state.selected_device);
+        let settings = Arc::clone(&state.settings);
+        let stop_signal = Arc::clone(&state.stop_signal);
+        let recording = Arc::clone(&state.recording);
+        tauri::async_runtime::spawn(async move {
+            crate::commands::remote::run_remote_session(
+                url, app2, selected_device, settings, stop_signal, recording,
+            )
+            .await;
+        });
+        return Ok(());
+    }
+
     let init = state.init_status.load(Ordering::Relaxed);
     if init != 1 {
         state.recording.store(false, Ordering::SeqCst);

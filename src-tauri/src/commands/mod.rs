@@ -8,6 +8,7 @@ pub mod init;
 pub mod manual_optimize;
 pub mod quality_filter;
 pub mod recording;
+pub mod remote;
 pub mod settings;
 pub mod speaker;
 pub mod version;
