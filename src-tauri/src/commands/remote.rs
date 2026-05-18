@@ -15,7 +15,6 @@ use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info, warn};
-use sherpa_onnx::LinearResampler;
 use tauri::Emitter;
 use tokio::sync::mpsc as tok_mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -33,6 +32,47 @@ use crate::settings::VadSettings;
 /// Returns the configured remote orchestrator URL, if any.
 pub(crate) fn remote_url() -> Option<String> {
     std::env::var("REMOTE_ASR_URL").ok().filter(|s| !s.is_empty())
+}
+
+/// Minimal stateful linear resampler (mono), replaces sherpa's resampler so
+/// the client no longer depends on sherpa-onnx. ASR-grade quality is fine.
+struct LinResampler {
+    step: f64, // input samples advanced per output sample
+    pos: f64,
+    last: f32,
+    have_last: bool,
+}
+
+impl LinResampler {
+    fn new(in_rate: f64, out_rate: f64) -> Self {
+        Self { step: in_rate / out_rate, pos: 0.0, last: 0.0, have_last: false }
+    }
+
+    fn process(&mut self, input: &[f32]) -> Vec<f32> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+        let mut buf: Vec<f32> = Vec::with_capacity(input.len() + 1);
+        if self.have_last {
+            buf.push(self.last);
+        }
+        buf.extend_from_slice(input);
+        let mut out = Vec::with_capacity(((buf.len() as f64) / self.step) as usize + 1);
+        while (self.pos as usize) + 1 < buf.len() {
+            let i = self.pos as usize;
+            let frac = self.pos - i as f64;
+            let s = buf[i] as f64 * (1.0 - frac) + buf[i + 1] as f64 * frac;
+            out.push(s as f32);
+            self.pos += self.step;
+        }
+        self.last = *buf.last().unwrap();
+        self.have_last = true;
+        self.pos -= (buf.len() - 1) as f64;
+        if self.pos < 0.0 {
+            self.pos = 0.0;
+        }
+        out
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -106,8 +146,8 @@ fn spawn_capture(
             return;
         };
         let mic_rate = supported.sample_rate().0 as i32;
-        let resampler = if mic_rate != SAMPLE_RATE as i32 {
-            LinearResampler::create(mic_rate, SAMPLE_RATE as i32)
+        let mut resampler = if mic_rate != SAMPLE_RATE as i32 {
+            Some(LinResampler::new(mic_rate as f64, SAMPLE_RATE as f64))
         } else {
             None
         };
@@ -131,7 +171,7 @@ fn spawn_capture(
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(frame) => {
                     let pcm16k: Vec<f32> = match resampler {
-                        Some(ref r) => r.resample(&frame, false),
+                        Some(ref mut r) => r.process(&frame),
                         None => frame,
                     };
                     let mut bytes = Vec::with_capacity(pcm16k.len() * 2);

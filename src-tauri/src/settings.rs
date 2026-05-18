@@ -2,10 +2,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{error, info};
+use log::info;
 use serde::{Deserialize, Serialize};
 
-use crate::build_models;
 use crate::config::quality_filter::QualityFilterConfig;
 use crate::db;
 use crate::llm_client::{list_models as llm_list_models, model_cache_valid, CachedModels};
@@ -149,32 +148,19 @@ pub(crate) async fn apply_settings(
     validate_settings(&new_vad_settings)?;
     validate_llm_settings(&new_llm_settings)?;
 
-    let vad_changed = {
-        let current_vad = read_lock(&settings_arc);
-        *current_vad != new_vad_settings
-    };
-    let llm_changed = {
-        let current_llm = read_lock(&llm_settings_arc);
-        *current_llm != new_llm_settings
-    };
+    let vad_changed = *read_lock(&settings_arc) != new_vad_settings;
+    let llm_changed = *read_lock(&llm_settings_arc) != new_llm_settings;
 
     if !vad_changed && !llm_changed {
         return Ok(());
     }
-
     if vad_changed && state.recording.load(Ordering::SeqCst) {
         return Err("Cannot change settings while recording".to_string());
     }
 
-    let init = state.init_status.load(Ordering::Relaxed);
-    if vad_changed && init == 0 {
-        return Err("Models are still loading, please wait".to_string());
-    }
-
-    if vad_changed {
-        state.init_status.store(0, Ordering::Relaxed);
-        *write_lock(&settings_arc) = new_vad_settings.clone();
-    }
+    // Remote-only client: no local model rebuild — just persist + update
+    // in-memory. ASR settings (language etc.) take effect on next session.
+    *write_lock(&settings_arc) = new_vad_settings.clone();
     *write_lock(&llm_settings_arc) = new_llm_settings.clone();
     *write_lock(&llm_models_cache_arc) = None;
 
@@ -218,50 +204,6 @@ pub(crate) async fn apply_settings(
         )
         .await
         .map_err(|e| e.to_string())?;
-    }
-
-    if vad_changed {
-        let recognizer_arc = Arc::clone(&state.recognizer);
-        let vad_arc = Arc::clone(&state.vad);
-        let init_status = Arc::clone(&state.init_status);
-        let init_error = Arc::clone(&state.init_error);
-        let init_num_threads = Arc::clone(&state.num_threads);
-
-        tauri::async_runtime::spawn(async move {
-            info!("[apply_settings] rebuilding models...");
-            let join = tauri::async_runtime::spawn_blocking(move || build_models(&new_vad_settings));
-            match join.await {
-                Ok(Ok((rec, vad, threads))) => {
-                    info!("[apply_settings] models rebuilt, num_threads={threads}");
-                    {
-                        let mut r = write_lock(&recognizer_arc);
-                        *r = Some(rec);
-                    }
-                    {
-                        let mut v = write_lock(&vad_arc);
-                        *v = Some(vad);
-                    }
-                    init_num_threads.store(threads, Ordering::Relaxed);
-                    init_status.store(1, Ordering::Relaxed);
-                }
-                Ok(Err(err)) => {
-                    error!("[apply_settings] rebuild failed: {err}");
-                    {
-                        let mut init_err = write_lock(&init_error);
-                        *init_err = err;
-                    }
-                    init_status.store(2, Ordering::Relaxed);
-                }
-                Err(err) => {
-                    error!("[apply_settings] join failed: {err}");
-                    {
-                        let mut init_err = write_lock(&init_error);
-                        *init_err = "Internal error: settings task join failed".to_string();
-                    }
-                    init_status.store(2, Ordering::Relaxed);
-                }
-            }
-        });
     }
 
     Ok(())
@@ -337,56 +279,6 @@ pub(crate) async fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSet
     settings
 }
 
-// ─── Speaker (voiceprint) gating persistence ────────────────────────────────
-
-/// Load persisted speaker gating config into `(enabled, threshold, target_embedding)`.
-pub(crate) async fn load_speaker_config_from_db(
-    db: &db::SpeechDatabase,
-) -> (bool, f32, Option<Vec<f32>>) {
-    let mut enabled = false;
-    let mut threshold = crate::speaker::DEFAULT_SPEAKER_THRESHOLD;
-    let mut target = None;
-
-    if let Ok(Some(v)) = db.get_setting("speaker.enabled".to_string()).await {
-        enabled = v == "true" || v == "1";
-    }
-    if let Ok(Some(v)) = db.get_setting("speaker.threshold".to_string()).await {
-        if let Ok(t) = v.parse::<f32>() {
-            if (0.0..=1.0).contains(&t) {
-                threshold = t;
-            }
-        }
-    }
-    if let Ok(Some(v)) = db.get_setting("speaker.embedding".to_string()).await {
-        target = crate::speaker::parse_embedding(&v);
-    }
-    // Gating only makes sense with an enrolled target.
-    if target.is_none() {
-        enabled = false;
-    }
-    (enabled, threshold, target)
-}
-
-pub(crate) async fn save_speaker_config_to_db(
-    db: &db::SpeechDatabase,
-    enabled: bool,
-    threshold: f32,
-    target: Option<&Vec<f32>>,
-) -> Result<(), String> {
-    db.upsert_setting("speaker.enabled".to_string(), enabled.to_string())
-        .await
-        .map_err(|e| e.to_string())?;
-    db.upsert_setting("speaker.threshold".to_string(), threshold.to_string())
-        .await
-        .map_err(|e| e.to_string())?;
-    db.upsert_setting(
-        "speaker.embedding".to_string(),
-        target.map(|t| crate::speaker::embedding_to_csv(t)).unwrap_or_default(),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
 
 // ─── QualityFilterConfig helpers ────────────────────────────────────────────
 

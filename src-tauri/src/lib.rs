@@ -7,19 +7,12 @@ mod db_worker;
 mod llm_client;
 mod llm_settings;
 mod lock_utils;
-mod model_registry;
 mod settings;
-mod speaker;
 mod versioning;
 
 use audio_buffer::RollingAudioBuffer;
-use model_registry::get_model_config;
 use serde::Serialize;
-use sherpa_onnx::{
-    OfflineRecognizer, OfflineRecognizerConfig, OfflineWhisperModelConfig, SileroVadModelConfig,
-    VadModelConfig, VoiceActivityDetector,
-};
-use std::path::{Path, PathBuf};
+
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, RwLock};
@@ -31,9 +24,8 @@ use crate::llm_client::CachedModels;
 use crate::llm_settings::LlmSettings;
 use crate::lock_utils::{mutex_lock, read_lock, write_lock};
 use crate::settings::VadSettings;
-use crate::speaker::SpeakerState;
 use chrono::Local;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
@@ -161,61 +153,6 @@ mod tests {
     }
 }
 
-/// Default SenseVoice model bundled in assets. Build scripts patch these via sed.
-const MODEL_TYPE: u32 = 15;
-const MODEL_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
-
-/// Whisper large-v3-turbo (int8) directory under assets.
-const WHISPER_TURBO_DIR: &str = "sherpa-onnx-whisper-turbo";
-/// Whisper processes audio in 30s windows; segments longer than this are truncated.
-const WHISPER_MAX_SPEECH_SECS: f32 = 30.0;
-
-/// Map an `asr_model` setting to its assets subdirectory name.
-fn asr_model_dir_name(asr_model: &str) -> &'static str {
-    match asr_model {
-        "whisper-turbo" => WHISPER_TURBO_DIR,
-        _ => MODEL_NAME,
-    }
-}
-
-/// Build the recognizer config for the selected `asr_model`. SenseVoice reuses
-/// the auto-generated registry; whisper-turbo is constructed inline because the
-/// registry is regenerated externally and does not know the turbo file layout.
-fn build_asr_config(
-    asr_model: &str,
-    asr_language: &str,
-    model_dir: &Path,
-) -> Result<OfflineRecognizerConfig, String> {
-    let p = |sub: &str| -> Option<String> {
-        let path = model_dir.join(sub);
-        path.exists().then(|| path.to_string_lossy().into_owned())
-    };
-    // Empty string => let Whisper auto-detect the language.
-    let language = (!asr_language.is_empty()).then(|| asr_language.to_string());
-    match asr_model {
-        "whisper-turbo" => {
-            let mut config = OfflineRecognizerConfig::default();
-            config.model_config.whisper = OfflineWhisperModelConfig {
-                encoder: p("turbo-encoder.onnx"),
-                decoder: p("turbo-decoder.onnx"),
-                language,
-                task: Some("transcribe".into()),
-                ..Default::default()
-            };
-            config.model_config.tokens = p("turbo-tokens.txt");
-            config.model_config.model_type = Some("whisper".into());
-            config.model_config.num_threads = 2;
-            Ok(config)
-        }
-        _ => get_model_config(MODEL_TYPE, model_dir).ok_or_else(|| {
-            format!(
-                "Unknown MODEL_TYPE: {MODEL_TYPE}. model_dir={model_dir:?}, exists={}",
-                model_dir.exists()
-            )
-        }),
-    }
-}
-
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SegmentUpdateType {
@@ -333,8 +270,6 @@ pub(crate) struct RecordingState {
 }
 
 pub(crate) struct AppState {
-    recognizer: Arc<RwLock<Option<OfflineRecognizer>>>,
-    vad: Arc<RwLock<Option<VoiceActivityDetector>>>,
     recording: Arc<AtomicBool>,
     stop_signal: Arc<AtomicBool>,
     segments: Arc<RwLock<Vec<SegmentResult>>>,
@@ -355,7 +290,6 @@ pub(crate) struct AppState {
     llm_models_cache: Arc<RwLock<Option<CachedModels>>>,
     selected_device: Arc<RwLock<Option<String>>>,
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
-    speaker: Arc<RwLock<SpeakerState>>,
 }
 
 pub(crate) struct RecordingAnchor {
@@ -409,175 +343,6 @@ pub(crate) struct RecognizeContext {
 // Resource directory & model init
 // ---------------------------------------------------------------------------
 
-fn manifest_assets_dir() -> Option<PathBuf> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let assets_dir = manifest_dir.join("assets");
-    assets_dir.exists().then_some(assets_dir)
-}
-
-fn should_prefer_manifest_assets(exe: &Path) -> bool {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    exe.starts_with(manifest_dir.join("target"))
-}
-
-pub(crate) fn resource_dir() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        debug!("[resource_dir] current_exe: {exe:?}");
-
-        for ancestor in exe.ancestors() {
-            if ancestor.extension().is_some_and(|ext| ext == "app") {
-                let resources = ancestor.join("Contents").join("Resources");
-                debug!("[resource_dir] found .app bundle: {ancestor:?}");
-                if resources.exists() {
-                    let assets = resources.join("assets");
-                    if assets.exists() {
-                        debug!("[resource_dir] using assets inside Resources: {assets:?}");
-                        return assets;
-                    }
-                    debug!("[resource_dir] using Resources directly: {resources:?}");
-                    return resources;
-                }
-                break;
-            }
-        }
-
-        if let Some(exe_dir) = exe.parent() {
-            if should_prefer_manifest_assets(&exe) {
-                if let Some(manifest_assets_dir) = manifest_assets_dir() {
-                    debug!("[resource_dir] preferring manifest assets dir in dev: {manifest_assets_dir:?}");
-                    return manifest_assets_dir;
-                }
-            }
-
-            let assets_dir = exe_dir.join("assets");
-            if assets_dir.exists() {
-                debug!("[resource_dir] using assets dir: {assets_dir:?}");
-                return assets_dir;
-            }
-            debug!("[resource_dir] using exe dir: {exe_dir:?}");
-            if let Some(manifest_assets_dir) = manifest_assets_dir() {
-                debug!("[resource_dir] using manifest assets dir: {manifest_assets_dir:?}");
-                return manifest_assets_dir;
-            }
-            return exe_dir.to_path_buf();
-        }
-    }
-    if let Some(manifest_assets_dir) = manifest_assets_dir() {
-        debug!("[resource_dir] using manifest assets dir without current_exe: {manifest_assets_dir:?}");
-        return manifest_assets_dir;
-    }
-    warn!("[resource_dir] fallback to current directory");
-    PathBuf::from(".")
-}
-
-fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActivityDetector, u32), String> {
-    let dir = resource_dir();
-    let model_dir = dir.join(asr_model_dir_name(&settings.asr_model));
-    let silero_vad_path = dir.join("silero_vad.onnx");
-
-    debug!(
-        "[build_models] asr_model={}, provider={}",
-        settings.asr_model, settings.asr_provider
-    );
-    debug!("[build_models] MODEL_TYPE={MODEL_TYPE}, MODEL_NAME={MODEL_NAME}");
-    debug!("[build_models] resource_dir: {dir:?}");
-    debug!("[build_models] model_dir: {model_dir:?}, exists={}", model_dir.exists());
-    if model_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&model_dir) {
-            for entry in entries.flatten() {
-                debug!("[build_models]   model_dir entry: {:?}", entry.path());
-            }
-        }
-    } else {
-        error!("[build_models] model_dir does not exist");
-        debug!("[build_models] dir contents:");
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                debug!("[build_models]   {:?}", entry.path());
-            }
-        } else {
-            warn!("[build_models] cannot read dir");
-        }
-    }
-    info!(
-        "[build_models] silero_vad: {silero_vad_path:?}, exists={}",
-        silero_vad_path.exists()
-    );
-
-    let mut asr_config = build_asr_config(&settings.asr_model, &settings.asr_language, &model_dir)?;
-
-    info!(
-        "[build_models] got ASR config, num_threads={}",
-        asr_config.model_config.num_threads
-    );
-
-    let hr_lexicon = dir.join("lexicon.txt");
-    if hr_lexicon.exists() {
-        debug!("[build_models] using homophone replacer lexicon: {hr_lexicon:?}");
-        asr_config.hr.lexicon = hr_lexicon.to_str().map(|s| s.to_string());
-    }
-    let hr_rule_fst = dir.join("replace.fst");
-    if hr_rule_fst.exists() {
-        debug!("[build_models] using homophone replacer rule_fst: {hr_rule_fst:?}");
-        asr_config.hr.rule_fsts = hr_rule_fst.to_str().map(|s| s.to_string());
-    }
-
-    asr_config.model_config.num_threads = settings.num_threads;
-    asr_config.model_config.provider = Some(settings.asr_provider.clone());
-    let num_threads = settings.num_threads as u32;
-
-    let max_speech_duration = if settings.asr_model == "whisper-turbo" {
-        settings.max_speech_duration.min(WHISPER_MAX_SPEECH_SECS)
-    } else {
-        settings.max_speech_duration
-    };
-
-    let silero_vad_str = silero_vad_path
-        .to_str()
-        .ok_or_else(|| format!("Invalid silero_vad path: {silero_vad_path:?}"))?
-        .to_string();
-
-    let vad_config = VadModelConfig {
-        silero_vad: SileroVadModelConfig {
-            model: Some(silero_vad_str),
-            threshold: settings.threshold,
-            min_silence_duration: settings.min_silence_duration,
-            min_speech_duration: settings.min_speech_duration,
-            window_size: 512,
-            max_speech_duration,
-        },
-        sample_rate: 16000,
-        num_threads: 1,
-        ..Default::default()
-    };
-
-    info!("[build_models] creating recognizer...");
-    let recognizer = OfflineRecognizer::create(&asr_config).ok_or_else(|| {
-        format!(
-            "Failed to create recognizer. MODEL_TYPE={MODEL_TYPE}, model_dir={model_dir:?}, \
-             dir contents: {:?}",
-            std::fs::read_dir(&dir)
-                .map(|entries| entries
-                    .flatten()
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>())
-                .unwrap_or_default()
-        )
-    })?;
-    info!("[build_models] recognizer created");
-
-    info!("[build_models] creating VAD...");
-    let vad = VoiceActivityDetector::create(&vad_config, 120.0).ok_or_else(|| {
-        format!(
-            "Failed to create VAD. silero_vad={silero_vad_path:?}, exists={}",
-            silero_vad_path.exists()
-        )
-    })?;
-    info!("[build_models] VAD created");
-
-    Ok((recognizer, vad, num_threads))
-}
-
 fn build_app_state(
     db: db::SpeechDatabase,
     db_writer: SyncSender<db_worker::DbEvent>,
@@ -587,8 +352,6 @@ fn build_app_state(
     next_revision: u64,
 ) -> AppState {
     AppState {
-        recognizer: Arc::new(RwLock::new(None)),
-        vad: Arc::new(RwLock::new(None)),
         recording: Arc::new(AtomicBool::new(false)),
         stop_signal: Arc::new(AtomicBool::new(false)),
         segments: Arc::new(RwLock::new(Vec::new())),
@@ -609,7 +372,6 @@ fn build_app_state(
         llm_models_cache: Arc::new(RwLock::new(None)),
         selected_device: Arc::new(RwLock::new(None)),
         app_handle: Arc::new(RwLock::new(None)),
-        speaker: Arc::new(RwLock::new(SpeakerState::default())),
     }
 }
 
@@ -696,89 +458,10 @@ pub fn run() {
         }
     }
 
-    // Load persisted speaker-gating config, then build the extractor off-thread.
-    {
-        let db_opt = {
-            let g = mutex_lock(&state.db);
-            g.as_ref().cloned()
-        };
-        if let Some(db) = db_opt {
-            let (enabled, threshold, target) =
-                tauri::async_runtime::block_on(settings::load_speaker_config_from_db(&db));
-            let mut sp = write_lock(&state.speaker);
-            sp.enabled = enabled;
-            sp.threshold = threshold;
-            sp.target = target;
-        }
-    }
-    {
-        let speaker_arc = Arc::clone(&state.speaker);
-        tauri::async_runtime::spawn(async move {
-            let ext = tauri::async_runtime::spawn_blocking(speaker::build_speaker_extractor)
-                .await
-                .ok()
-                .flatten();
-            if ext.is_some() {
-                info!("[init] speaker extractor ready");
-            }
-            write_lock(&speaker_arc).extractor = ext;
-        });
-    }
-
-    let init_recognizer = Arc::clone(&state.recognizer);
-    let init_vad = Arc::clone(&state.vad);
-    let init_status = Arc::clone(&state.init_status);
-    let init_error = Arc::clone(&state.init_error);
-    let init_num_threads = Arc::clone(&state.num_threads);
-    let init_settings = Arc::clone(&state.settings);
-
-    tauri::async_runtime::spawn(async move {
-        // Redesign / P0: remote mode does recognition on the GB10 orchestrator,
-        // so skip the (heavy, unused) local model init and report ready at once.
-        if let Some(url) = crate::commands::remote::remote_url() {
-            info!("[init] remote mode ({url}): skipping local model init");
-            init_status.store(1, Ordering::Relaxed);
-            return;
-        }
-        info!("[init] starting model initialization...");
-        let settings = read_lock(&init_settings).clone();
-        let join = tauri::async_runtime::spawn_blocking(move || build_models(&settings));
-        match join.await {
-            Ok(Ok((rec, vad, threads))) => {
-                info!("[init] models ready, num_threads={threads}");
-                {
-                    let mut r = write_lock(&init_recognizer);
-                    *r = Some(rec);
-                }
-                {
-                    let mut v = write_lock(&init_vad);
-                    *v = Some(vad);
-                }
-                init_num_threads.store(threads, Ordering::Relaxed);
-                {
-                    let mut s = write_lock(&init_settings);
-                    s.num_threads = threads as i32;
-                }
-                init_status.store(1, Ordering::Relaxed);
-            }
-            Ok(Err(err)) => {
-                error!("[init] model initialization failed: {err}");
-                {
-                    let mut init_err = write_lock(&init_error);
-                    *init_err = err;
-                }
-                init_status.store(2, Ordering::Relaxed);
-            }
-            Err(err) => {
-                error!("[init] join failed: {err}");
-                {
-                    let mut init_err = write_lock(&init_error);
-                    *init_err = "Internal error: init task join failed".to_string();
-                }
-                init_status.store(2, Ordering::Relaxed);
-            }
-        }
-    });
+    // Remote-only client: recognition runs on the GB10 orchestrator.
+    // Report ready immediately; connection errors surface at record time
+    // (run_remote_session sets init_status=error with a message).
+    state.init_status.store(1, Ordering::Relaxed);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -857,11 +540,6 @@ pub fn run() {
             commands::settings::apply_settings,
             commands::settings::list_llm_models,
             commands::settings::list_llm_models_with_url,
-            commands::speaker::get_speaker_status,
-            commands::speaker::enroll_speaker,
-            commands::speaker::clear_speaker,
-            commands::speaker::set_speaker_enabled,
-            commands::speaker::set_speaker_threshold,
             commands::correction_api::list_correction_rules,
             commands::correction_api::create_correction_rule,
             commands::correction_api::update_correction_rule,

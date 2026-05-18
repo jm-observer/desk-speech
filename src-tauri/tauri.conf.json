@@ -32,7 +32,6 @@
     "active": true,
     "targets": ["app", "nsis"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
-    "resources": ["assets"],
     "windows": {
       "nsis": {
         "installMode": "currentUser"
