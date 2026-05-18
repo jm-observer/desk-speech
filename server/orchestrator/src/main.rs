@@ -148,8 +148,14 @@ async fn asr_reader(
 
                 // TODO 并发化:P0 顺序调用(会延后后续段转发);先求对
                 if hello.want_optimize {
-                    if let Ok(opt) =
-                        llm(&c, "请在不改变原意的前提下润色为通顺中文,只输出结果:", &text).await
+                    if let Ok(opt) = llm(
+                        &c,
+                        "你是中文口语转写规整器。把用户这句口语整理成通顺、简洁的书面中文。\
+                         严格要求:只输出整理后的一句话本身;不要解释、不要选项、不要列表、\
+                         不要markdown、不要追问、不要任何前后缀;若已通顺则原样返回。",
+                        &text,
+                    )
+                    .await
                     {
                         let _ = cli_tx
                             .send(Message::Text(ServerEvent::Optimized { r#ref: id, text: opt }.json()))
@@ -157,9 +163,13 @@ async fn asr_reader(
                     }
                 }
                 if hello.want_translate {
-                    if let Ok(en) =
-                        llm(&c, "Translate to natural English, output only the translation:", &text)
-                            .await
+                    if let Ok(en) = llm(
+                        &c,
+                        "Translate the user's sentence into natural English. Output ONLY the \
+                         translation itself — no explanations, no options, no quotes, no markdown.",
+                        &text,
+                    )
+                    .await
                     {
                         let _ = cli_tx
                             .send(Message::Text(ServerEvent::Translated { r#ref: id, text: en }.json()))
@@ -199,7 +209,8 @@ async fn llm(c: &Cfg, sys: &str, user: &str) -> anyhow::Result<String> {
             {"role": "system", "content": sys},
             {"role": "user", "content": user}
         ],
-        "temperature": 0.3,
+        "temperature": 0.2,
+        "max_tokens": 256,
         "stream": false
     });
     let resp = reqwest::Client::new()

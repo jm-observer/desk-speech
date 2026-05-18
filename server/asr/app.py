@@ -31,6 +31,11 @@ VAD_CHUNK_MS = int(os.environ.get("ASR_VAD_CHUNK_MS", "200"))
 # Silence (ms) required to END a speech segment. Larger => fewer, longer
 # segments (short pauses won't split a sentence). Default 800 is too eager.
 VAD_MAX_END_SIL = int(os.environ.get("ASR_VAD_MAX_END_SIL", "1500"))
+# Our own sentence endpointing: VAD speech regions separated by a gap
+# shorter than this are merged into ONE sentence. Only a pause >= this
+# finalizes/emits. This is what actually controls "how often it splits"
+# (FunASR's own max_end_silence_time is not honored in streaming).
+SENTENCE_GAP_MS = int(os.environ.get("ASR_SENTENCE_GAP_MS", "1500"))
 SR = 16000
 SAMPLES_PER_MS = SR // 1000
 
@@ -44,13 +49,18 @@ print("[asr] models ready", flush=True)
 
 
 class Session:
-    """Per-connection streaming state."""
+    """Per-connection streaming state with sentence-level endpointing."""
 
     def __init__(self):
         self.buf = np.zeros(0, dtype=np.float32)  # whole session audio @16k
         self.vad_cache = {}
         self.pending = bytearray()  # bytes not yet fed to VAD
-        self.cur_start_ms = None    # open segment start (ms from stream start)
+        self.speech_open = False    # VAD currently inside speech
+        self.sent_beg = None        # accumulating sentence start (ms)
+        self.last_end = None        # end (ms) of last closed speech region
+
+    def now_ms(self) -> int:
+        return len(self.buf) // SAMPLES_PER_MS
 
     def add_pcm(self, raw: bytes):
         self.pending += raw
@@ -102,34 +112,70 @@ async def emit_segment(ws, text, beg_ms, end_ms):
     }, ensure_ascii=False))
 
 
-async def feed_vad(ws, s: Session, chunk: np.ndarray, is_final: bool):
-    """Feed one chunk to streaming VAD; emit any completed segments.
+async def finalize(ws, s: Session):
+    """Recognize and emit the accumulated sentence, then reset it."""
+    if s.sent_beg is None or s.last_end is None or s.last_end <= s.sent_beg:
+        s.sent_beg = None
+        s.last_end = None
+        return
+    beg, end = s.sent_beg, s.last_end
+    seg = s.slice_ms(beg, end)
+    s.sent_beg = None
+    s.last_end = None
+    await emit_segment(ws, recognize(seg), beg, end)
 
-    FSMN-VAD streaming returns value = list of [beg, end] (ms from stream
-    start); a lone [beg, -1] opens a segment, [-1, end] closes it, [beg, end]
-    is a complete one.
+
+async def feed_vad(ws, s: Session, chunk: np.ndarray, is_final: bool):
+    """Streaming VAD + our own sentence endpointing.
+
+    FSMN-VAD streaming yields value entries: [beg,-1] opens speech,
+    [-1,end] closes it, [beg,end] is a complete region (ms from start).
+    We merge regions separated by < SENTENCE_GAP_MS into one sentence and
+    only finalize when silence since last speech reaches SENTENCE_GAP_MS
+    (or on flush).
     """
     if chunk.size == 0 and not is_final:
         return
     res = VAD_MODEL.generate(input=chunk, cache=s.vad_cache,
                              is_final=is_final, chunk_size=VAD_CHUNK_MS)
-    if not res:
-        return
-    val = res[0].get("value", [])
+    val = res[0].get("value", []) if res else []
     if val:
         print(f"[asr][vad] is_final={is_final} value={val} "
-              f"open={s.cur_start_ms}", flush=True)
+              f"sent_beg={s.sent_beg} last_end={s.last_end}", flush=True)
+
     for beg, end in val:
-        if beg >= 0 and end == -1:
-            s.cur_start_ms = beg
-        elif beg == -1 and end >= 0 and s.cur_start_ms is not None:
-            seg = s.slice_ms(s.cur_start_ms, end)
-            await emit_segment(ws, recognize(seg), s.cur_start_ms, end)
-            s.cur_start_ms = None
-        elif beg >= 0 and end >= 0:
-            seg = s.slice_ms(beg, end)
-            await emit_segment(ws, recognize(seg), beg, end)
-            s.cur_start_ms = None
+        if beg >= 0 and end == -1:  # speech opens
+            if (s.sent_beg is not None and s.last_end is not None
+                    and beg - s.last_end >= SENTENCE_GAP_MS):
+                await finalize(ws, s)
+            if s.sent_beg is None:
+                s.sent_beg = beg
+            s.speech_open = True
+        elif beg == -1 and end >= 0:  # speech closes
+            if s.sent_beg is None:
+                s.sent_beg = max(0, (s.last_end if s.last_end else end))
+            s.last_end = end
+            s.speech_open = False
+        elif beg >= 0 and end >= 0:  # complete region
+            if (s.sent_beg is not None and s.last_end is not None
+                    and beg - s.last_end >= SENTENCE_GAP_MS):
+                await finalize(ws, s)
+            if s.sent_beg is None:
+                s.sent_beg = beg
+            s.last_end = end
+            s.speech_open = False
+
+    if is_final:
+        if s.sent_beg is not None and s.last_end is None:
+            s.last_end = s.now_ms()
+        await finalize(ws, s)
+        return
+
+    # Long-enough pause since last speech -> finalize the sentence.
+    if (not s.speech_open and s.sent_beg is not None
+            and s.last_end is not None
+            and s.now_ms() - s.last_end >= SENTENCE_GAP_MS):
+        await finalize(ws, s)
 
 
 async def handle(ws):
@@ -153,12 +199,6 @@ async def handle(ws):
         elif t == "flush":
             tail = s._flush_tail()
             await feed_vad(ws, s, tail, is_final=True)
-            # any still-open segment -> recognize up to end of buffer
-            if s.cur_start_ms is not None:
-                end_ms = len(s.buf) // SAMPLES_PER_MS
-                seg = s.slice_ms(s.cur_start_ms, end_ms)
-                await emit_segment(ws, recognize(seg), s.cur_start_ms, end_ms)
-                s.cur_start_ms = None
             await ws.send(json.dumps({"type": "done"}))
 
 

@@ -1,5 +1,16 @@
 # Rust 编排层 — 多阶段构建,产物极小静态化镜像(arm64 GB10)
 FROM rust:1-bookworm AS build
+# GB10 has poor connectivity to crates.io; use a China mirror (sparse).
+RUN mkdir -p $CARGO_HOME && printf '%s\n' \
+    '[source.crates-io]' \
+    "replace-with = 'rsproxy-sparse'" \
+    '[source.rsproxy-sparse]' \
+    'registry = "sparse+https://rsproxy.cn/index/"' \
+    '[net]' \
+    'retry = 5' \
+    '[http]' \
+    'timeout = 120' \
+    > $CARGO_HOME/config.toml
 WORKDIR /src
 COPY Cargo.toml ./
 COPY src ./src
