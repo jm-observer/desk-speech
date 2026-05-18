@@ -181,18 +181,24 @@ fn asr_model_dir_name(asr_model: &str) -> &'static str {
 /// Build the recognizer config for the selected `asr_model`. SenseVoice reuses
 /// the auto-generated registry; whisper-turbo is constructed inline because the
 /// registry is regenerated externally and does not know the turbo file layout.
-fn build_asr_config(asr_model: &str, model_dir: &Path) -> Result<OfflineRecognizerConfig, String> {
+fn build_asr_config(
+    asr_model: &str,
+    asr_language: &str,
+    model_dir: &Path,
+) -> Result<OfflineRecognizerConfig, String> {
     let p = |sub: &str| -> Option<String> {
         let path = model_dir.join(sub);
         path.exists().then(|| path.to_string_lossy().into_owned())
     };
+    // Empty string => let Whisper auto-detect the language.
+    let language = (!asr_language.is_empty()).then(|| asr_language.to_string());
     match asr_model {
         "whisper-turbo" => {
             let mut config = OfflineRecognizerConfig::default();
             config.model_config.whisper = OfflineWhisperModelConfig {
                 encoder: p("turbo-encoder.onnx"),
                 decoder: p("turbo-decoder.onnx"),
-                language: Some("zh".into()),
+                language,
                 task: Some("transcribe".into()),
                 ..Default::default()
             };
@@ -498,7 +504,7 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
         silero_vad_path.exists()
     );
 
-    let mut asr_config = build_asr_config(&settings.asr_model, &model_dir)?;
+    let mut asr_config = build_asr_config(&settings.asr_model, &settings.asr_language, &model_dir)?;
 
     info!(
         "[build_models] got ASR config, num_threads={}",

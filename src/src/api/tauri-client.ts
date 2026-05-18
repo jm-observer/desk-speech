@@ -53,6 +53,7 @@ export interface AppSettings {
   num_threads: number;
   asr_model: 'sense-voice' | 'whisper-turbo';
   asr_provider: 'cpu' | 'cuda';
+  asr_language: '' | 'zh' | 'en' | 'ja' | 'ko' | 'yue';
   provider_url: string;
   api_key: string;
   selected_model: string;

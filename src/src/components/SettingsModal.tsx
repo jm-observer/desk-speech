@@ -123,6 +123,23 @@ const FIELD_DEFINITIONS: FieldDefinition[] = [
     ],
   },
   {
+    key: 'asr_language',
+    tab: 'asr',
+    label: '识别语言',
+    description: 'Whisper 解码语言。固定语言可减少短句串语言/幻觉；不确定时选自动检测。',
+    helpText: '自动检测：每段自行判定语种（中英混合更灵活，但短句易误判）。SenseVoice 忽略此项。切换后会重建识别器。',
+    kind: 'select',
+    fullWidth: true,
+    options: [
+      { value: 'zh', label: '中文（zh，推荐）' },
+      { value: '', label: '自动检测' },
+      { value: 'en', label: '英文（en）' },
+      { value: 'ja', label: '日语（ja）' },
+      { value: 'ko', label: '韩语（ko）' },
+      { value: 'yue', label: '粤语（yue）' },
+    ],
+  },
+  {
     key: 'num_threads',
     tab: 'asr',
     label: '识别线程数',

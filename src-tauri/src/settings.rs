@@ -22,6 +22,8 @@ pub(crate) struct VadSettings {
     pub(crate) num_threads: i32,
     pub(crate) asr_model: String,
     pub(crate) asr_provider: String,
+    /// Whisper decoding language. Empty string => auto-detect.
+    pub(crate) asr_language: String,
 }
 
 impl Default for VadSettings {
@@ -34,6 +36,7 @@ impl Default for VadSettings {
             num_threads: 2,
             asr_model: "whisper-turbo".to_string(),
             asr_provider: "cuda".to_string(),
+            asr_language: "zh".to_string(),
         }
     }
 }
@@ -47,6 +50,7 @@ pub(crate) struct CombinedSettings {
     num_threads: i32,
     asr_model: String,
     asr_provider: String,
+    asr_language: String,
     provider_url: String,
     api_key: String,
     selected_model: String,
@@ -74,6 +78,7 @@ pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<Combined
         num_threads: vad.num_threads,
         asr_model: vad.asr_model,
         asr_provider: vad.asr_provider,
+        asr_language: vad.asr_language,
         provider_url: llm.provider_url,
         api_key: llm.api_key,
         selected_model: llm.selected_model,
@@ -105,6 +110,9 @@ fn validate_settings(s: &VadSettings) -> Result<(), String> {
     if !matches!(s.asr_provider.as_str(), "cpu" | "cuda") {
         return Err("asr_provider must be 'cpu' or 'cuda'".to_string());
     }
+    if !matches!(s.asr_language.as_str(), "" | "zh" | "en" | "ja" | "ko" | "yue") {
+        return Err("asr_language must be one of '', zh, en, ja, ko, yue".to_string());
+    }
     Ok(())
 }
 
@@ -126,6 +134,7 @@ pub(crate) async fn apply_settings(
         num_threads: new_settings.num_threads,
         asr_model: new_settings.asr_model,
         asr_provider: new_settings.asr_provider,
+        asr_language: new_settings.asr_language,
     };
     let new_llm_settings = LlmSettings {
         provider_url: new_settings.provider_url,
