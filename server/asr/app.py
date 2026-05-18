@@ -30,7 +30,7 @@ PORT = int(os.environ.get("ASR_PORT", "9100"))
 VAD_CHUNK_MS = int(os.environ.get("ASR_VAD_CHUNK_MS", "200"))
 # Silence (ms) required to END a speech segment. Larger => fewer, longer
 # segments (short pauses won't split a sentence). Default 800 is too eager.
-VAD_MAX_END_SIL = int(os.environ.get("ASR_VAD_MAX_END_SIL", "1200"))
+VAD_MAX_END_SIL = int(os.environ.get("ASR_VAD_MAX_END_SIL", "1500"))
 SR = 16000
 SAMPLES_PER_MS = SR // 1000
 
@@ -90,6 +90,9 @@ def recognize(seg: np.ndarray) -> str:
 
 async def emit_segment(ws, text, beg_ms, end_ms):
     text = (text or "").strip()
+    dur = (end_ms - beg_ms) if (beg_ms is not None and end_ms is not None) else -1
+    print(f"[asr][seg] beg={beg_ms} end={end_ms} dur={dur}ms "
+          f"{'DROP(empty)' if not text else ''} text={text!r}", flush=True)
     if not text:
         return
     await ws.send(json.dumps({
@@ -112,7 +115,11 @@ async def feed_vad(ws, s: Session, chunk: np.ndarray, is_final: bool):
                              is_final=is_final, chunk_size=VAD_CHUNK_MS)
     if not res:
         return
-    for beg, end in res[0].get("value", []):
+    val = res[0].get("value", [])
+    if val:
+        print(f"[asr][vad] is_final={is_final} value={val} "
+              f"open={s.cur_start_ms}", flush=True)
+    for beg, end in val:
         if beg >= 0 and end == -1:
             s.cur_start_ms = beg
         elif beg == -1 and end >= 0 and s.cur_start_ms is not None:

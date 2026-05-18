@@ -56,6 +56,10 @@ struct SegState {
 fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
     let optimize_status = if s.opt.is_some() { "success" } else { "running" };
     let translate_status = if s.eng.is_some() { "success" } else { "running" };
+    info!(
+        "[remote][emit] id={id} raw={:?} opt={:?} eng={:?} t=[{:.2},{:.2}]",
+        s.raw, s.opt, s.eng, s.t0, s.t1
+    );
     let _ = app.emit(
         "segment_updated",
         serde_json::json!({
@@ -214,6 +218,9 @@ pub(crate) async fn run_remote_session(
                 Some("segment") => {
                     let id = v.get("id").and_then(|x| x.as_i64()).unwrap_or(0);
                     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                    let t0 = v.get("t_start").and_then(|x| x.as_f64());
+                    let t1 = v.get("t_end").and_then(|x| x.as_f64());
+                    info!("[remote][segment] id={id} t=[{t0:?},{t1:?}] text={text:?}");
                     let st = segs.entry(id).or_default();
                     st.raw = text.to_string();
                     st.t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(st.t0);
@@ -226,6 +233,7 @@ pub(crate) async fn run_remote_session(
                 Some("optimized") => {
                     let id = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(0);
                     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    info!("[remote][optimized] ref={id} text={text:?}");
                     let st = segs.entry(id).or_default();
                     if st.wall.is_empty() {
                         st.wall = now_rfc3339();
@@ -246,6 +254,7 @@ pub(crate) async fn run_remote_session(
                 Some("translated") => {
                     let id = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(0);
                     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    info!("[remote][translated] ref={id} text={text:?}");
                     let st = segs.entry(id).or_default();
                     if st.wall.is_empty() {
                         st.wall = now_rfc3339();
