@@ -127,7 +127,7 @@ ESP32 / 瘦设备 (只采音, 推流, 无 UI)      ├─ 音频流协议(WebSoc
 |---|---|---|
 | 客户端形态 | 桌面原生(采音+剪贴板,主)+ ESP32(采音推流,未来)+ 浏览器(管理控制台:统计/模型切换/配置/历史,不采音) |
 | A 代码仓 | 当前仓拉分支 `redesign/client-server`;复用桌面 Tauri 壳/UI/GPU 成果;服务端为新子目录 |
-| B 服务端 | Python 服务,每服务一个 Docker 容器,GPU 经 nvidia runtime 直通,docker compose 编排;客户端仍 Rust/Tauri |
+| B 服务端 | **编排层 = Rust**(纯业务胶水,不做推理,复用现有 Rust 代码);**模型 sidecar(vLLM/FunASR/未来 GOP·TTS)= 各自原生运行时的独立容器**,你运行/配置而非编写,必要时仅一层很薄的 Python 包装。全部 Docker,GPU 经 nvidia runtime,docker compose 编排;客户端仍 Rust/Tauri |
 | C 桌面客户端 | 继续 Tauri 复用,本地识别改为走协议调服务端 |
 | D P0 ASR | FunASR(中文优先);英语/多语种按 §6 留作可路由扩展 |
 | E VAD 位置 | 服务端 VAD 为主(客户端最薄、ESP32 友好);客户端可选轻量门限后置 |
