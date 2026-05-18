@@ -98,6 +98,7 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         llm_models_cache: Arc::clone(&state.llm_models_cache),
         selected_device: Arc::clone(&state.selected_device),
         app_handle: Arc::new(RwLock::new(Some(app.clone()))),
+        speaker: Arc::clone(&state.speaker),
     });
     let db_writer = state.db_writer.as_ref().clone();
     let next_realtime_segment_id = Arc::clone(&state.next_realtime_segment_id);
@@ -227,18 +228,20 @@ fn run_recording(
                     vad_buf.drain(..window_size);
 
                     while let Some(segment) = vad.front() {
-                        let recognize_ctx = RecognizeContext {
-                            segments: runtime.segments.clone(),
-                            next_realtime_segment_id: runtime.next_realtime_segment_id.clone(),
-                            next_revision: runtime.next_revision.clone(),
-                            correction_engine: runtime.correction_engine.clone(),
-                            state: runtime.app_state.clone(),
-                            app_handle: runtime.app_handle.clone(),
-                            db_writer: runtime.db_writer.clone(),
-                            base_wall: runtime.anchor.base_wall,
-                            audio_offset_samples: runtime.anchor.audio_offset,
-                        };
-                        recognize_segment(&recognizer, &segment, recognize_ctx);
+                        if speaker_allows(runtime.app_state, segment.samples()) {
+                            let recognize_ctx = RecognizeContext {
+                                segments: runtime.segments.clone(),
+                                next_realtime_segment_id: runtime.next_realtime_segment_id.clone(),
+                                next_revision: runtime.next_revision.clone(),
+                                correction_engine: runtime.correction_engine.clone(),
+                                state: runtime.app_state.clone(),
+                                app_handle: runtime.app_handle.clone(),
+                                db_writer: runtime.db_writer.clone(),
+                                base_wall: runtime.anchor.base_wall,
+                                audio_offset_samples: runtime.anchor.audio_offset,
+                            };
+                            recognize_segment(&recognizer, &segment, recognize_ctx);
+                        }
                         vad.pop();
                     }
                 }
@@ -269,18 +272,20 @@ fn run_recording(
 
     vad.flush();
     while let Some(segment) = vad.front() {
-        let recognize_ctx = RecognizeContext {
-            segments: runtime.segments.clone(),
-            next_realtime_segment_id: runtime.next_realtime_segment_id.clone(),
-            next_revision: runtime.next_revision.clone(),
-            correction_engine: runtime.correction_engine.clone(),
-            state: runtime.app_state.clone(),
-            app_handle: runtime.app_handle.clone(),
-            db_writer: runtime.db_writer.clone(),
-            base_wall: runtime.anchor.base_wall,
-            audio_offset_samples: runtime.anchor.audio_offset,
-        };
-        recognize_segment(&recognizer, &segment, recognize_ctx);
+        if speaker_allows(runtime.app_state, segment.samples()) {
+            let recognize_ctx = RecognizeContext {
+                segments: runtime.segments.clone(),
+                next_realtime_segment_id: runtime.next_realtime_segment_id.clone(),
+                next_revision: runtime.next_revision.clone(),
+                correction_engine: runtime.correction_engine.clone(),
+                state: runtime.app_state.clone(),
+                app_handle: runtime.app_handle.clone(),
+                db_writer: runtime.db_writer.clone(),
+                base_wall: runtime.anchor.base_wall,
+                audio_offset_samples: runtime.anchor.audio_offset,
+            };
+            recognize_segment(&recognizer, &segment, recognize_ctx);
+        }
         vad.pop();
     }
 
@@ -290,7 +295,7 @@ fn run_recording(
     Ok((recognizer, vad))
 }
 
-fn build_input_stream(
+pub(crate) fn build_input_stream(
     device: &cpal::Device,
     tx: mpsc::Sender<Vec<f32>>,
     received_audio: Arc<AtomicBool>,
@@ -389,6 +394,38 @@ fn build_input_stream(
     };
 
     Ok(stream)
+}
+
+/// Speaker gate: returns `true` if this 16 kHz `samples` segment should be
+/// transcribed. Passes everything through unless gating is enabled with an
+/// enrolled target; embedding failures fail open (do not drop).
+fn speaker_allows(state: &AppState, samples: &[f32]) -> bool {
+    let sp = read_lock(&state.speaker);
+    if !sp.enabled {
+        return true;
+    }
+    let (Some(ext), Some(target)) = (sp.extractor.as_ref(), sp.target.as_ref()) else {
+        return true;
+    };
+    match crate::speaker::embed(ext, samples) {
+        Some(emb) => {
+            let score = crate::speaker::cosine(&emb, target);
+            let ok = score >= sp.threshold;
+            if ok {
+                debug!("[speaker] accepted score={score:.3} thr={:.3}", sp.threshold);
+            } else {
+                info!(
+                    "[speaker] rejected segment score={score:.3} thr={:.3} (not target voice)",
+                    sp.threshold
+                );
+            }
+            ok
+        }
+        None => {
+            warn!("[speaker] embedding failed; passing segment through");
+            true
+        }
+    }
 }
 
 fn recognize_segment(recognizer: &OfflineRecognizer, segment: &sherpa_onnx::SpeechSegment, ctx: RecognizeContext) {

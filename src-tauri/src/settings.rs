@@ -20,6 +20,8 @@ pub(crate) struct VadSettings {
     pub(crate) min_speech_duration: f32,
     pub(crate) max_speech_duration: f32,
     pub(crate) num_threads: i32,
+    pub(crate) asr_model: String,
+    pub(crate) asr_provider: String,
 }
 
 impl Default for VadSettings {
@@ -30,6 +32,8 @@ impl Default for VadSettings {
             min_speech_duration: 0.2,
             max_speech_duration: 10.0,
             num_threads: 2,
+            asr_model: "whisper-turbo".to_string(),
+            asr_provider: "cuda".to_string(),
         }
     }
 }
@@ -41,6 +45,8 @@ pub(crate) struct CombinedSettings {
     min_speech_duration: f32,
     max_speech_duration: f32,
     num_threads: i32,
+    asr_model: String,
+    asr_provider: String,
     provider_url: String,
     api_key: String,
     selected_model: String,
@@ -66,6 +72,8 @@ pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<Combined
         min_speech_duration: vad.min_speech_duration,
         max_speech_duration: vad.max_speech_duration,
         num_threads: vad.num_threads,
+        asr_model: vad.asr_model,
+        asr_provider: vad.asr_provider,
         provider_url: llm.provider_url,
         api_key: llm.api_key,
         selected_model: llm.selected_model,
@@ -91,6 +99,12 @@ fn validate_settings(s: &VadSettings) -> Result<(), String> {
     if s.num_threads < 1 || s.num_threads > 16 {
         return Err("num_threads must be between 1 and 16".to_string());
     }
+    if !matches!(s.asr_model.as_str(), "sense-voice" | "whisper-turbo") {
+        return Err("asr_model must be 'sense-voice' or 'whisper-turbo'".to_string());
+    }
+    if !matches!(s.asr_provider.as_str(), "cpu" | "cuda") {
+        return Err("asr_provider must be 'cpu' or 'cuda'".to_string());
+    }
     Ok(())
 }
 
@@ -110,6 +124,8 @@ pub(crate) async fn apply_settings(
         min_speech_duration: new_settings.min_speech_duration,
         max_speech_duration: new_settings.max_speech_duration,
         num_threads: new_settings.num_threads,
+        asr_model: new_settings.asr_model,
+        asr_provider: new_settings.asr_provider,
     };
     let new_llm_settings = LlmSettings {
         provider_url: new_settings.provider_url,
@@ -310,6 +326,57 @@ pub(crate) async fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSet
     }
 
     settings
+}
+
+// ─── Speaker (voiceprint) gating persistence ────────────────────────────────
+
+/// Load persisted speaker gating config into `(enabled, threshold, target_embedding)`.
+pub(crate) async fn load_speaker_config_from_db(
+    db: &db::SpeechDatabase,
+) -> (bool, f32, Option<Vec<f32>>) {
+    let mut enabled = false;
+    let mut threshold = crate::speaker::DEFAULT_SPEAKER_THRESHOLD;
+    let mut target = None;
+
+    if let Ok(Some(v)) = db.get_setting("speaker.enabled".to_string()).await {
+        enabled = v == "true" || v == "1";
+    }
+    if let Ok(Some(v)) = db.get_setting("speaker.threshold".to_string()).await {
+        if let Ok(t) = v.parse::<f32>() {
+            if (0.0..=1.0).contains(&t) {
+                threshold = t;
+            }
+        }
+    }
+    if let Ok(Some(v)) = db.get_setting("speaker.embedding".to_string()).await {
+        target = crate::speaker::parse_embedding(&v);
+    }
+    // Gating only makes sense with an enrolled target.
+    if target.is_none() {
+        enabled = false;
+    }
+    (enabled, threshold, target)
+}
+
+pub(crate) async fn save_speaker_config_to_db(
+    db: &db::SpeechDatabase,
+    enabled: bool,
+    threshold: f32,
+    target: Option<&Vec<f32>>,
+) -> Result<(), String> {
+    db.upsert_setting("speaker.enabled".to_string(), enabled.to_string())
+        .await
+        .map_err(|e| e.to_string())?;
+    db.upsert_setting("speaker.threshold".to_string(), threshold.to_string())
+        .await
+        .map_err(|e| e.to_string())?;
+    db.upsert_setting(
+        "speaker.embedding".to_string(),
+        target.map(|t| crate::speaker::embedding_to_csv(t)).unwrap_or_default(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ─── QualityFilterConfig helpers ────────────────────────────────────────────

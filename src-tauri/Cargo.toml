@@ -18,7 +18,7 @@ tauri-plugin-shell = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
-sherpa-onnx = { version = "1.13.0", default-features = false }
+sherpa-onnx = { version = "1.13.0", default-features = false, features = ["shared"] }
 anyhow = "1"
 deadpool-sqlite = { version = "0.13.0", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }

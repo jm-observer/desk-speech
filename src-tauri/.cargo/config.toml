@@ -1,0 +1,6 @@
+[env]
+# GPU build: link the prebuilt CUDA sherpa-onnx/onnxruntime shared libs instead
+# of the crate's default CPU-only download. The directory holds the .lib import
+# libraries plus every runtime .dll (sherpa, onnxruntime CUDA providers, cuDNN 9,
+# CUDA 12 runtime); sherpa-onnx-sys copies the DLLs next to the built exe.
+SHERPA_ONNX_LIB_DIR = 'D:\git\streaming-speech\src-tauri\sherpa-gpu\lib'

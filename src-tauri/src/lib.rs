@@ -9,12 +9,16 @@ mod llm_settings;
 mod lock_utils;
 mod model_registry;
 mod settings;
+mod speaker;
 mod versioning;
 
 use audio_buffer::RollingAudioBuffer;
 use model_registry::get_model_config;
 use serde::Serialize;
-use sherpa_onnx::{OfflineRecognizer, SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
+use sherpa_onnx::{
+    OfflineRecognizer, OfflineRecognizerConfig, OfflineWhisperModelConfig, SileroVadModelConfig,
+    VadModelConfig, VoiceActivityDetector,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::SyncSender;
@@ -27,6 +31,7 @@ use crate::llm_client::CachedModels;
 use crate::llm_settings::LlmSettings;
 use crate::lock_utils::{mutex_lock, read_lock, write_lock};
 use crate::settings::VadSettings;
+use crate::speaker::SpeakerState;
 use chrono::Local;
 use log::{debug, error, info, warn};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -156,9 +161,54 @@ mod tests {
     }
 }
 
-/// Which ASR model to bundle. Build scripts patch these via sed.
+/// Default SenseVoice model bundled in assets. Build scripts patch these via sed.
 const MODEL_TYPE: u32 = 15;
 const MODEL_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
+
+/// Whisper large-v3-turbo (int8) directory under assets.
+const WHISPER_TURBO_DIR: &str = "sherpa-onnx-whisper-turbo";
+/// Whisper processes audio in 30s windows; segments longer than this are truncated.
+const WHISPER_MAX_SPEECH_SECS: f32 = 30.0;
+
+/// Map an `asr_model` setting to its assets subdirectory name.
+fn asr_model_dir_name(asr_model: &str) -> &'static str {
+    match asr_model {
+        "whisper-turbo" => WHISPER_TURBO_DIR,
+        _ => MODEL_NAME,
+    }
+}
+
+/// Build the recognizer config for the selected `asr_model`. SenseVoice reuses
+/// the auto-generated registry; whisper-turbo is constructed inline because the
+/// registry is regenerated externally and does not know the turbo file layout.
+fn build_asr_config(asr_model: &str, model_dir: &Path) -> Result<OfflineRecognizerConfig, String> {
+    let p = |sub: &str| -> Option<String> {
+        let path = model_dir.join(sub);
+        path.exists().then(|| path.to_string_lossy().into_owned())
+    };
+    match asr_model {
+        "whisper-turbo" => {
+            let mut config = OfflineRecognizerConfig::default();
+            config.model_config.whisper = OfflineWhisperModelConfig {
+                encoder: p("turbo-encoder.onnx"),
+                decoder: p("turbo-decoder.onnx"),
+                language: Some("zh".into()),
+                task: Some("transcribe".into()),
+                ..Default::default()
+            };
+            config.model_config.tokens = p("turbo-tokens.txt");
+            config.model_config.model_type = Some("whisper".into());
+            config.model_config.num_threads = 2;
+            Ok(config)
+        }
+        _ => get_model_config(MODEL_TYPE, model_dir).ok_or_else(|| {
+            format!(
+                "Unknown MODEL_TYPE: {MODEL_TYPE}. model_dir={model_dir:?}, exists={}",
+                model_dir.exists()
+            )
+        }),
+    }
+}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -299,6 +349,7 @@ pub(crate) struct AppState {
     llm_models_cache: Arc<RwLock<Option<CachedModels>>>,
     selected_device: Arc<RwLock<Option<String>>>,
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
+    speaker: Arc<RwLock<SpeakerState>>,
 }
 
 pub(crate) struct RecordingAnchor {
@@ -363,7 +414,7 @@ fn should_prefer_manifest_assets(exe: &Path) -> bool {
     exe.starts_with(manifest_dir.join("target"))
 }
 
-fn resource_dir() -> PathBuf {
+pub(crate) fn resource_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         debug!("[resource_dir] current_exe: {exe:?}");
 
@@ -415,9 +466,13 @@ fn resource_dir() -> PathBuf {
 
 fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActivityDetector, u32), String> {
     let dir = resource_dir();
-    let model_dir = dir.join(MODEL_NAME);
+    let model_dir = dir.join(asr_model_dir_name(&settings.asr_model));
     let silero_vad_path = dir.join("silero_vad.onnx");
 
+    debug!(
+        "[build_models] asr_model={}, provider={}",
+        settings.asr_model, settings.asr_provider
+    );
     debug!("[build_models] MODEL_TYPE={MODEL_TYPE}, MODEL_NAME={MODEL_NAME}");
     debug!("[build_models] resource_dir: {dir:?}");
     debug!("[build_models] model_dir: {model_dir:?}, exists={}", model_dir.exists());
@@ -443,12 +498,7 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
         silero_vad_path.exists()
     );
 
-    let mut asr_config = get_model_config(MODEL_TYPE, &model_dir).ok_or_else(|| {
-        format!(
-            "Unknown MODEL_TYPE: {MODEL_TYPE}. model_dir={model_dir:?}, exists={}",
-            model_dir.exists()
-        )
-    })?;
+    let mut asr_config = build_asr_config(&settings.asr_model, &model_dir)?;
 
     info!(
         "[build_models] got ASR config, num_threads={}",
@@ -467,7 +517,14 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
     }
 
     asr_config.model_config.num_threads = settings.num_threads;
+    asr_config.model_config.provider = Some(settings.asr_provider.clone());
     let num_threads = settings.num_threads as u32;
+
+    let max_speech_duration = if settings.asr_model == "whisper-turbo" {
+        settings.max_speech_duration.min(WHISPER_MAX_SPEECH_SECS)
+    } else {
+        settings.max_speech_duration
+    };
 
     let silero_vad_str = silero_vad_path
         .to_str()
@@ -481,7 +538,7 @@ fn build_models(settings: &VadSettings) -> Result<(OfflineRecognizer, VoiceActiv
             min_silence_duration: settings.min_silence_duration,
             min_speech_duration: settings.min_speech_duration,
             window_size: 512,
-            max_speech_duration: settings.max_speech_duration,
+            max_speech_duration,
         },
         sample_rate: 16000,
         num_threads: 1,
@@ -546,6 +603,7 @@ fn build_app_state(
         llm_models_cache: Arc::new(RwLock::new(None)),
         selected_device: Arc::new(RwLock::new(None)),
         app_handle: Arc::new(RwLock::new(None)),
+        speaker: Arc::new(RwLock::new(SpeakerState::default())),
     }
 }
 
@@ -630,6 +688,35 @@ pub fn run() {
                 &state.correction_engine,
             ));
         }
+    }
+
+    // Load persisted speaker-gating config, then build the extractor off-thread.
+    {
+        let db_opt = {
+            let g = mutex_lock(&state.db);
+            g.as_ref().cloned()
+        };
+        if let Some(db) = db_opt {
+            let (enabled, threshold, target) =
+                tauri::async_runtime::block_on(settings::load_speaker_config_from_db(&db));
+            let mut sp = write_lock(&state.speaker);
+            sp.enabled = enabled;
+            sp.threshold = threshold;
+            sp.target = target;
+        }
+    }
+    {
+        let speaker_arc = Arc::clone(&state.speaker);
+        tauri::async_runtime::spawn(async move {
+            let ext = tauri::async_runtime::spawn_blocking(speaker::build_speaker_extractor)
+                .await
+                .ok()
+                .flatten();
+            if ext.is_some() {
+                info!("[init] speaker extractor ready");
+            }
+            write_lock(&speaker_arc).extractor = ext;
+        });
     }
 
     let init_recognizer = Arc::clone(&state.recognizer);
@@ -757,6 +844,11 @@ pub fn run() {
             commands::settings::apply_settings,
             commands::settings::list_llm_models,
             commands::settings::list_llm_models_with_url,
+            commands::speaker::get_speaker_status,
+            commands::speaker::enroll_speaker,
+            commands::speaker::clear_speaker,
+            commands::speaker::set_speaker_enabled,
+            commands::speaker::set_speaker_threshold,
             commands::correction_api::list_correction_rules,
             commands::correction_api::create_correction_rule,
             commands::correction_api::update_correction_rule,

@@ -7,3 +7,4 @@ assets
 .idea
 src-tauri/target
 tmp
+/src-tauri/sherpa-gpu/

@@ -51,6 +51,8 @@ export interface AppSettings {
   min_speech_duration: number;
   max_speech_duration: number;
   num_threads: number;
+  asr_model: 'sense-voice' | 'whisper-turbo';
+  asr_provider: 'cpu' | 'cuda';
   provider_url: string;
   api_key: string;
   selected_model: string;
@@ -125,6 +127,13 @@ export interface AppVersionInfo {
   first_run_after_upgrade: boolean;
 }
 
+export interface SpeakerStatus {
+  enrolled: boolean;
+  enabled: boolean;
+  threshold: number;
+  model_available: boolean;
+}
+
 export const TauriAPI = {
   startRecording: () => invoke('start_recording'),
   stopRecording: () => invoke('stop_recording'),
@@ -155,4 +164,9 @@ export const TauriAPI = {
   saveQualityFilterConfig: (payload: Omit<QualityFilterConfig, 'version'>) => invoke('save_quality_filter_config', { payload }),
   resetQualityFilterConfig: () => invoke<QualityFilterConfig>('reset_quality_filter_config'),
   getAppVersionInfo: () => invoke<AppVersionInfo>('get_app_version_info'),
+  getSpeakerStatus: () => invoke<SpeakerStatus>('get_speaker_status'),
+  enrollSpeaker: () => invoke<SpeakerStatus>('enroll_speaker'),
+  clearSpeaker: () => invoke<SpeakerStatus>('clear_speaker'),
+  setSpeakerEnabled: (enabled: boolean) => invoke<SpeakerStatus>('set_speaker_enabled', { enabled }),
+  setSpeakerThreshold: (threshold: number) => invoke<SpeakerStatus>('set_speaker_threshold', { threshold }),
 };
