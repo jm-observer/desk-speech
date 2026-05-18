@@ -1,0 +1,34 @@
+# GB10 服务端编排(P0)。vLLM 维持主机现状,不在此 compose 内。
+services:
+  asr:
+    build: ./asr
+    image: funasr-asr:arm64
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      # 换模型只改这里 / 改挂载,代码与协议不变
+      - ASR_PARAFORMER_DIR=/models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
+      - ASR_VAD_DIR=/models/speech_fsmn_vad_zh-cn-16k-common-pytorch
+      - ASR_PUNC_DIR=/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
+      - ASR_DEVICE=cuda
+      - ASR_PORT=9100
+    volumes:
+      - ${MODELS_DIR:-/home/fengqi/funasr-prep/models}:/models:ro
+    expose:
+      - "9100"
+
+  orchestrator:
+    build: ./orchestrator
+    image: orchestrator:latest
+    depends_on:
+      - asr
+    environment:
+      - ORCH_BIND=0.0.0.0:8090          # 对客户端的 WebSocket
+      - ASR_WS=ws://asr:9100            # 内部 ASR 服务
+      # vLLM 在主机上;host.docker.internal 经 extra_hosts 解析
+      - VLLM_BASE=http://host.docker.internal:1234/v1
+      - VLLM_MODEL=google/gemma-4-26B-A4B-it
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8090:8090"

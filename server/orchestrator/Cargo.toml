@@ -1,0 +1,19 @@
+[package]
+name = "orchestrator"
+version = "0.1.0"
+edition = "2021"
+
+# P0 编排层:对客户端的 WebSocket(protocol-draft.md)+ 串 ASR + vLLM。
+# 纯业务胶水,不做推理。后续可复用现有 Tauri 后端的分段/词修正逻辑。
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
