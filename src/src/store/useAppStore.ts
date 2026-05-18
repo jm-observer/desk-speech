@@ -228,15 +228,12 @@ export const useAppStore = () => {
       }
       console.debug('[segment_updated]', { revision: next.revision, segmentId: next.segment_id });
       setSegments((prev) => {
-        const updated = prev.map((segment) => {
-          if (segment.revision !== next.revision) {
-            return segment;
-          }
-          return {
-            ...segment,
-            ...next,
-          };
-        });
+        const exists = prev.some((segment) => segment.revision === next.revision);
+        const updated = exists
+          ? prev.map((segment) =>
+              segment.revision === next.revision ? { ...segment, ...next } : segment,
+            )
+          : [...prev, next];
 
         return updated.sort((a, b) => {
           if (a.wall_start !== b.wall_start) {

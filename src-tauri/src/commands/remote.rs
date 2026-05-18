@@ -36,7 +36,8 @@ pub(crate) fn remote_url() -> Option<String> {
 }
 
 fn now_rfc3339() -> String {
-    Local::now().to_rfc3339()
+    // Second precision only (no sub-second noise in the UI).
+    Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
 
 /// Accumulated state of one segment (so updates never clobber prior fields).
