@@ -28,7 +28,13 @@ services:
       # vLLM 在主机上;host.docker.internal 经 extra_hosts 解析
       - VLLM_BASE=http://host.docker.internal:8085/v1
       - VLLM_MODEL=gemma-4-26B-A4B-it
+      - DATA_DIR=/data                  # SQLite persistence (sessions/segments/speakers/config)
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - orch-data:/data
     ports:
       - "8090:8090"
+
+volumes:
+  orch-data:
