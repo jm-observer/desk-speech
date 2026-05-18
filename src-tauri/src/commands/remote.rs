@@ -6,7 +6,7 @@
 //! `segment_updated` frontend event so the UI is unchanged.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -155,6 +155,16 @@ fn spawn_capture(
 }
 
 /// Run one remote recording session. Returns when stopped or the socket closes.
+#[derive(PartialEq)]
+enum Outcome {
+    Stopped,      // user stopped recording -> end session
+    Disconnected, // socket dropped while still recording -> try to reconnect
+}
+
+/// Max consecutive connect failures before giving up and showing an error.
+const MAX_CONN_FAILS: u32 = 4;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_remote_session(
     url: String,
     app: tauri::AppHandle,
@@ -163,6 +173,8 @@ pub(crate) async fn run_remote_session(
     llm_settings: Arc<RwLock<LlmSettings>>,
     stop_signal: Arc<AtomicBool>,
     recording: Arc<AtomicBool>,
+    init_status: Arc<AtomicU8>,
+    init_error: Arc<RwLock<String>>,
 ) {
     let device_name = read_lock(&selected_device).clone();
     let language = {
@@ -175,23 +187,12 @@ pub(crate) async fn run_remote_session(
         Ok(rx) => rx,
         Err(e) => {
             error!("[remote] capture init failed: {e}");
+            *init_error.write().unwrap() = format!("麦克风初始化失败: {e}");
+            init_status.store(2, Ordering::Relaxed);
             recording.store(false, Ordering::SeqCst);
             return;
         }
     };
-
-    let conn = tokio_tungstenite::connect_async(&url).await;
-    let ws = match conn {
-        Ok((ws, _)) => ws,
-        Err(e) => {
-            error!("[remote] connect {url} failed: {e}");
-            stop.store(true, Ordering::Relaxed);
-            recording.store(false, Ordering::SeqCst);
-            return;
-        }
-    };
-    info!("[remote] connected {url}");
-    let (mut wr, mut rd) = ws.split();
 
     let hello = serde_json::json!({
         "type": "hello", "protocol": "1", "sample_rate": 16000,
@@ -199,17 +200,65 @@ pub(crate) async fn run_remote_session(
         "want_optimize": true, "want_translate": true,
     })
     .to_string();
-    if wr.send(Message::Text(hello)).await.is_err() {
-        error!("[remote] failed to send hello");
-        stop.store(true, Ordering::Relaxed);
-        recording.store(false, Ordering::SeqCst);
-        return;
+
+    let mut fails: u32 = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match tokio_tungstenite::connect_async(&url).await {
+            Ok((ws, _)) => {
+                fails = 0;
+                info!("[remote] connected {url}");
+                let outcome = run_one_connection(
+                    ws, &hello, &mut pcm_rx, &app, &llm_settings, &stop,
+                )
+                .await;
+                if outcome == Outcome::Stopped || stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                warn!("[remote] disconnected mid-session; reconnecting...");
+            }
+            Err(e) => {
+                fails += 1;
+                error!("[remote] connect {url} failed ({fails}/{MAX_CONN_FAILS}): {e}");
+                if fails >= MAX_CONN_FAILS {
+                    *init_error.write().unwrap() =
+                        format!("无法连接识别服务 {url}: {e}");
+                    init_status.store(2, Ordering::Relaxed);
+                    break;
+                }
+                let backoff = Duration::from_secs(1u64 << fails.min(3));
+                tokio::time::sleep(backoff).await;
+            }
+        }
     }
 
-    // Reader: map protocol events -> segment_updated (+ clipboard auto-copy)
+    stop.store(true, Ordering::Relaxed); // stop capture thread
+    recording.store(false, Ordering::SeqCst);
+    info!("[remote] session ended");
+}
+
+/// One WebSocket connection: hello -> stream PCM, forward events. Returns
+/// whether the user stopped (end) or the socket dropped (reconnect).
+async fn run_one_connection(
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    hello: &str,
+    pcm_rx: &mut tok_mpsc::UnboundedReceiver<Vec<u8>>,
+    app: &tauri::AppHandle,
+    llm_settings: &Arc<RwLock<LlmSettings>>,
+    stop: &Arc<AtomicBool>,
+) -> Outcome {
+    let (mut wr, mut rd) = ws.split();
+    if wr.send(Message::Text(hello.to_string())).await.is_err() {
+        return Outcome::Disconnected;
+    }
+
     let app_r = app.clone();
-    let llm_settings_r = Arc::clone(&llm_settings);
-    let reader = tokio::spawn(async move {
+    let llm_settings_r = Arc::clone(llm_settings);
+    let mut reader = tokio::spawn(async move {
         let mut segs: HashMap<i64, SegState> = HashMap::new();
         while let Some(Ok(msg)) = rd.next().await {
             let Message::Text(t) = msg else { continue };
@@ -285,24 +334,32 @@ pub(crate) async fn run_remote_session(
         }
     });
 
-    // Writer: pump PCM until stop, then send stop and let reader drain.
+    // Writer: pump PCM. Returns Stopped if the user stopped, Disconnected if
+    // the socket dropped (so the caller can reconnect).
     loop {
         if stop.load(Ordering::Relaxed) {
-            let _ = wr.send(Message::Text(r#"{"type":"stop"}"#.to_string())).await;
-            break;
+            let _ = wr
+                .send(Message::Text(r#"{"type":"stop"}"#.to_string()))
+                .await;
+            let _ = tokio::time::timeout(Duration::from_secs(20), &mut reader).await;
+            return Outcome::Stopped;
+        }
+        if reader.is_finished() {
+            // server closed / socket dropped while still recording
+            return Outcome::Disconnected;
         }
         match tokio::time::timeout(Duration::from_millis(200), pcm_rx.recv()).await {
             Ok(Some(bytes)) => {
                 if wr.send(Message::Binary(bytes)).await.is_err() {
-                    break;
+                    reader.abort();
+                    return Outcome::Disconnected;
                 }
             }
-            Ok(None) => break,
-            Err(_) => continue, // timeout: re-check stop
+            Ok(None) => {
+                reader.abort();
+                return Outcome::Disconnected;
+            }
+            Err(_) => continue, // timeout: re-check stop / reader
         }
     }
-
-    let _ = tokio::time::timeout(Duration::from_secs(20), reader).await;
-    recording.store(false, Ordering::SeqCst);
-    info!("[remote] session ended");
 }

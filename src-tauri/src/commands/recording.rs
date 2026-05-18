@@ -38,15 +38,21 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
     if let Some(url) = crate::commands::remote::remote_url() {
         info!("[start_recording] remote mode -> {url}");
         state.stop_signal.store(false, Ordering::Relaxed);
+        // Clear any prior error state so the UI returns to ready on (re)start.
+        state.init_status.store(1, Ordering::Relaxed);
+        *write_lock(&state.init_error) = String::new();
         let app2 = app.clone();
         let selected_device = Arc::clone(&state.selected_device);
         let settings = Arc::clone(&state.settings);
         let llm_settings = Arc::clone(&state.llm_settings);
         let stop_signal = Arc::clone(&state.stop_signal);
         let recording = Arc::clone(&state.recording);
+        let init_status = Arc::clone(&state.init_status);
+        let init_error = Arc::clone(&state.init_error);
         tauri::async_runtime::spawn(async move {
             crate::commands::remote::run_remote_session(
-                url, app2, selected_device, settings, llm_settings, stop_signal, recording,
+                url, app2, selected_device, settings, llm_settings, stop_signal,
+                recording, init_status, init_error,
             )
             .await;
         });
