@@ -28,12 +28,16 @@ DEVICE = os.environ.get("ASR_DEVICE", "cuda")
 PORT = int(os.environ.get("ASR_PORT", "9100"))
 # Streaming VAD chunk in ms (how often we poll VAD for endpoints).
 VAD_CHUNK_MS = int(os.environ.get("ASR_VAD_CHUNK_MS", "200"))
+# Silence (ms) required to END a speech segment. Larger => fewer, longer
+# segments (short pauses won't split a sentence). Default 800 is too eager.
+VAD_MAX_END_SIL = int(os.environ.get("ASR_VAD_MAX_END_SIL", "1200"))
 SR = 16000
 SAMPLES_PER_MS = SR // 1000
 
 print(f"[asr] loading vad={VAD} (streaming) asr={PARAFORMER} punc={PUNC} "
       f"device={DEVICE}", flush=True)
-VAD_MODEL = AutoModel(model=VAD, device=DEVICE, disable_update=True)
+VAD_MODEL = AutoModel(model=VAD, device=DEVICE, disable_update=True,
+                      max_end_silence_time=VAD_MAX_END_SIL)
 ASR_MODEL = AutoModel(model=PARAFORMER, punc_model=PUNC, device=DEVICE,
                       disable_update=True)
 print("[asr] models ready", flush=True)

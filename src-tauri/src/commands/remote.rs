@@ -5,6 +5,7 @@
 //! sherpa-onnx locally. Incoming protocol events are mapped to the existing
 //! `segment_updated` frontend event so the UI is unchanged.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
@@ -38,34 +39,39 @@ fn now_rfc3339() -> String {
     Local::now().to_rfc3339()
 }
 
-/// Emit a `segment_updated` event shaped like `DbSegmentDto` (frontend unchanged).
-#[allow(clippy::too_many_arguments)]
-fn emit_segment(
-    app: &tauri::AppHandle,
-    id: i64,
-    text_raw: &str,
-    text_optimized: Option<&str>,
-    text_english: Option<&str>,
-    optimize_status: &str,
-    translate_status: &str,
-) {
-    let ts = now_rfc3339();
+/// Accumulated state of one segment (so updates never clobber prior fields).
+#[derive(Default, Clone)]
+struct SegState {
+    raw: String,
+    opt: Option<String>,
+    eng: Option<String>,
+    t0: f64,
+    t1: f64,
+    wall: String,
+}
+
+/// Emit the *full current* segment state as `segment_updated` (DbSegmentDto
+/// shape). Frontend merges by id; we always send the complete state so
+/// optimized/translated never blank the raw text.
+fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
+    let optimize_status = if s.opt.is_some() { "success" } else { "running" };
+    let translate_status = if s.eng.is_some() { "success" } else { "running" };
     let _ = app.emit(
         "segment_updated",
         serde_json::json!({
             "id": id,
             "segment_id": id,
             "revision": id,
-            "start_sec": 0.0,
-            "end_sec": 0.0,
-            "wall_start": ts,
-            "wall_end": ts,
-            "text_raw": text_raw,
+            "start_sec": s.t0,
+            "end_sec": s.t1,
+            "wall_start": s.wall,
+            "wall_end": s.wall,
+            "text_raw": s.raw,
             "optimize_status": optimize_status,
             "translate_status": translate_status,
-            "text_optimized": text_optimized,
-            "text_english": text_english,
-            "created_at": ts,
+            "text_optimized": s.opt,
+            "text_english": s.eng,
+            "created_at": s.wall,
         }),
     );
 }
@@ -199,6 +205,7 @@ pub(crate) async fn run_remote_session(
     let app_r = app.clone();
     let llm_settings_r = Arc::clone(&llm_settings);
     let reader = tokio::spawn(async move {
+        let mut segs: HashMap<i64, SegState> = HashMap::new();
         while let Some(Ok(msg)) = rd.next().await {
             let Message::Text(t) = msg else { continue };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { continue };
@@ -207,18 +214,30 @@ pub(crate) async fn run_remote_session(
                 Some("segment") => {
                     let id = v.get("id").and_then(|x| x.as_i64()).unwrap_or(0);
                     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
-                    emit_segment(&app_r, id, text, None, None, "running", "running");
+                    let st = segs.entry(id).or_default();
+                    st.raw = text.to_string();
+                    st.t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(st.t0);
+                    st.t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(st.t1);
+                    if st.wall.is_empty() {
+                        st.wall = now_rfc3339();
+                    }
+                    emit_state(&app_r, id, st);
                 }
                 Some("optimized") => {
                     let id = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(0);
-                    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
-                    emit_segment(&app_r, id, "", Some(text), None, "success", "running");
+                    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let st = segs.entry(id).or_default();
+                    if st.wall.is_empty() {
+                        st.wall = now_rfc3339();
+                    }
+                    st.opt = Some(text.clone());
+                    emit_state(&app_r, id, st);
                     let copy = matches!(
                         read_lock(&llm_settings_r).auto_copy_mode,
                         AutoCopyMode::OptimizedZh
                     );
                     if copy && !text.is_empty() {
-                        match app_r.clipboard().write_text(text.to_string()) {
+                        match app_r.clipboard().write_text(text) {
                             Ok(_) => info!("[remote] auto copy (优化中文) ref={id}"),
                             Err(e) => error!("[remote] clipboard 优化中文 failed: {e}"),
                         }
@@ -226,14 +245,19 @@ pub(crate) async fn run_remote_session(
                 }
                 Some("translated") => {
                     let id = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(0);
-                    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
-                    emit_segment(&app_r, id, "", None, Some(text), "success", "success");
+                    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let st = segs.entry(id).or_default();
+                    if st.wall.is_empty() {
+                        st.wall = now_rfc3339();
+                    }
+                    st.eng = Some(text.clone());
+                    emit_state(&app_r, id, st);
                     let copy = matches!(
                         read_lock(&llm_settings_r).auto_copy_mode,
                         AutoCopyMode::English
                     );
                     if copy && !text.is_empty() {
-                        match app_r.clipboard().write_text(text.to_string()) {
+                        match app_r.clipboard().write_text(text) {
                             Ok(_) => info!("[remote] auto copy (英文) ref={id}"),
                             Err(e) => error!("[remote] clipboard 英文 failed: {e}"),
                         }
