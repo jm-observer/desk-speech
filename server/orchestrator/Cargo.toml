@@ -17,3 +17,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"
+# Embedded persistence (sessions/segments/speakers/config) on a GB10 volume.
+rusqlite = { version = "0.32", features = ["bundled"] }

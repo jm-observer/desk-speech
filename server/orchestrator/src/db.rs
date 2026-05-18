@@ -1,0 +1,267 @@
+//! Embedded persistence for the management console: sessions (recording-time
+//! stats), segments (history), speakers (voiceprint library), config.
+//!
+//! rusqlite is sync; calls are short and traffic is low (single-user console
+//! + modest segment rate), so a `Mutex<Connection>` is fine.
+
+use std::sync::Mutex;
+
+use rusqlite::Connection;
+use serde::Serialize;
+
+pub struct Db {
+    conn: Mutex<Connection>,
+}
+
+#[derive(Serialize)]
+pub struct Speaker {
+    pub id: i64,
+    pub name: String,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct SegmentRow {
+    pub id: i64,
+    pub session_id: String,
+    pub ts: String,
+    pub text: String,
+    pub optimized: Option<String>,
+    pub english: Option<String>,
+    pub speaker: Option<String>,
+}
+
+#[derive(Serialize, Default)]
+pub struct Stats {
+    pub sessions: i64,
+    pub segments: i64,
+    pub total_recording_sec: f64,
+    pub today_recording_sec: f64,
+}
+
+impl Db {
+    pub fn open(path: &str) -> anyhow::Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS speakers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                embedding TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                text TEXT NOT NULL,
+                optimized TEXT,
+                english TEXT,
+                t_start REAL,
+                t_end REAL,
+                speaker TEXT
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                dur_sec REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            "#,
+        )?;
+        Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // ── sessions ────────────────────────────────────────────────────────
+    pub fn session_start(&self, id: &str) {
+        let _ = self.lock().execute(
+            "INSERT OR IGNORE INTO sessions(id, started_at) \
+             VALUES(?1, datetime('now','localtime'))",
+            [id],
+        );
+    }
+    pub fn session_end(&self, id: &str, dur_sec: f64) {
+        let _ = self.lock().execute(
+            "UPDATE sessions SET ended_at=datetime('now','localtime'), dur_sec=?2 \
+             WHERE id=?1",
+            (id, dur_sec),
+        );
+    }
+
+    // ── segments ────────────────────────────────────────────────────────
+    #[allow(clippy::too_many_arguments)]
+    pub fn segment_upsert(
+        &self,
+        sid: i64,
+        session_id: &str,
+        text: &str,
+        optimized: Option<&str>,
+        english: Option<&str>,
+        t0: f64,
+        t1: f64,
+        speaker: Option<&str>,
+    ) {
+        let c = self.lock();
+        // sid is the orchestrator's global segment id (stable per segment).
+        let _ = c.execute(
+            "INSERT INTO segments(id,session_id,ts,text,optimized,english,t_start,t_end,speaker)
+             VALUES(?1,?2,datetime('now','localtime'),?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(id) DO UPDATE SET text=?3, optimized=COALESCE(?4,optimized),
+               english=COALESCE(?5,english), speaker=COALESCE(?8,speaker)",
+            rusqlite::params![sid, session_id, text, optimized, english, t0, t1, speaker],
+        );
+    }
+
+    pub fn segment_set_optimized(&self, sid: i64, opt: &str) {
+        let _ = self
+            .lock()
+            .execute("UPDATE segments SET optimized=?2 WHERE id=?1", (sid, opt));
+    }
+    pub fn segment_set_english(&self, sid: i64, eng: &str) {
+        let _ = self
+            .lock()
+            .execute("UPDATE segments SET english=?2 WHERE id=?1", (sid, eng));
+    }
+
+    pub fn segments_recent(&self, limit: i64) -> Vec<SegmentRow> {
+        let c = self.lock();
+        let mut stmt = match c.prepare(
+            "SELECT id,session_id,ts,text,optimized,english,speaker
+             FROM segments ORDER BY id DESC LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([limit], |r| {
+            Ok(SegmentRow {
+                id: r.get(0)?,
+                session_id: r.get(1)?,
+                ts: r.get(2)?,
+                text: r.get(3)?,
+                optimized: r.get(4)?,
+                english: r.get(5)?,
+                speaker: r.get(6)?,
+            })
+        });
+        rows.map(|it| it.filter_map(Result::ok).collect()).unwrap_or_default()
+    }
+
+    pub fn stats(&self) -> Stats {
+        let c = self.lock();
+        let g = |sql: &str| -> f64 {
+            c.query_row(sql, [], |r| r.get::<_, f64>(0)).unwrap_or(0.0)
+        };
+        Stats {
+            sessions: g("SELECT COUNT(*) FROM sessions") as i64,
+            segments: g("SELECT COUNT(*) FROM segments") as i64,
+            total_recording_sec: g("SELECT COALESCE(SUM(dur_sec),0) FROM sessions"),
+            today_recording_sec: g(
+                "SELECT COALESCE(SUM(dur_sec),0) FROM sessions \
+                 WHERE substr(started_at,1,10)=date('now','localtime')",
+            ),
+        }
+    }
+
+    // ── speakers ────────────────────────────────────────────────────────
+    pub fn speaker_add(&self, name: &str, embedding_csv: &str) -> anyhow::Result<i64> {
+        let c = self.lock();
+        c.execute(
+            "INSERT INTO speakers(name,embedding,enabled,created_at) \
+             VALUES(?1,?2,1,datetime('now','localtime'))",
+            (name, embedding_csv),
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+    pub fn speaker_delete(&self, id: i64) {
+        let _ = self.lock().execute("DELETE FROM speakers WHERE id=?1", [id]);
+    }
+    pub fn speaker_rename(&self, id: i64, name: &str) {
+        let _ = self
+            .lock()
+            .execute("UPDATE speakers SET name=?2 WHERE id=?1", (id, name));
+    }
+    pub fn speaker_set_enabled(&self, id: i64, enabled: bool) {
+        let _ = self.lock().execute(
+            "UPDATE speakers SET enabled=?2 WHERE id=?1",
+            (id, enabled as i64),
+        );
+    }
+    pub fn speakers_list(&self) -> Vec<Speaker> {
+        let c = self.lock();
+        let mut stmt = match c
+            .prepare("SELECT id,name,enabled,created_at FROM speakers ORDER BY id")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| {
+            Ok(Speaker {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                enabled: r.get::<_, i64>(2)? != 0,
+                created_at: r.get(3)?,
+            })
+        });
+        rows.map(|it| it.filter_map(Result::ok).collect()).unwrap_or_default()
+    }
+    /// (name, embedding) for all enabled speakers — pushed to asr for gating.
+    pub fn enabled_voiceprints(&self) -> Vec<(String, Vec<f32>)> {
+        let c = self.lock();
+        let mut stmt = match c
+            .prepare("SELECT name,embedding FROM speakers WHERE enabled=1")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| {
+            let name: String = r.get(0)?;
+            let csv: String = r.get(1)?;
+            Ok((name, csv))
+        });
+        rows.map(|it| {
+            it.filter_map(Result::ok)
+                .map(|(n, csv)| {
+                    let v = csv
+                        .split(',')
+                        .filter_map(|x| x.trim().parse::<f32>().ok())
+                        .collect();
+                    (n, v)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    // ── config ──────────────────────────────────────────────────────────
+    pub fn config_get(&self, key: &str) -> Option<String> {
+        self.lock()
+            .query_row("SELECT value FROM config WHERE key=?1", [key], |r| r.get(0))
+            .ok()
+    }
+    pub fn config_set(&self, key: &str, value: &str) {
+        let _ = self.lock().execute(
+            "INSERT INTO config(key,value) VALUES(?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value=?2",
+            (key, value),
+        );
+    }
+    pub fn config_all(&self) -> Vec<(String, String)> {
+        let c = self.lock();
+        let mut stmt = match c.prepare("SELECT key,value FROM config ORDER BY key") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)));
+        rows.map(|it| it.filter_map(Result::ok).collect()).unwrap_or_default()
+    }
+}
