@@ -41,11 +41,12 @@ pub async fn start_recording(app: tauri::AppHandle, state: tauri::State<'_, AppS
         let app2 = app.clone();
         let selected_device = Arc::clone(&state.selected_device);
         let settings = Arc::clone(&state.settings);
+        let llm_settings = Arc::clone(&state.llm_settings);
         let stop_signal = Arc::clone(&state.stop_signal);
         let recording = Arc::clone(&state.recording);
         tauri::async_runtime::spawn(async move {
             crate::commands::remote::run_remote_session(
-                url, app2, selected_device, settings, stop_signal, recording,
+                url, app2, selected_device, settings, llm_settings, stop_signal, recording,
             )
             .await;
         });

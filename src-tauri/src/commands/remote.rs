@@ -21,8 +21,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 use std::sync::RwLock;
 
+use tauri_plugin_clipboard_manager::ClipboardExt;
+
 use crate::audio_buffer::SAMPLE_RATE;
 use crate::commands::recording::build_input_stream;
+use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::lock_utils::read_lock;
 use crate::settings::VadSettings;
 
@@ -146,6 +149,7 @@ pub(crate) async fn run_remote_session(
     app: tauri::AppHandle,
     selected_device: Arc<RwLock<Option<String>>>,
     settings: Arc<RwLock<VadSettings>>,
+    llm_settings: Arc<RwLock<LlmSettings>>,
     stop_signal: Arc<AtomicBool>,
     recording: Arc<AtomicBool>,
 ) {
@@ -191,8 +195,9 @@ pub(crate) async fn run_remote_session(
         return;
     }
 
-    // Reader: map protocol events -> segment_updated
+    // Reader: map protocol events -> segment_updated (+ clipboard auto-copy)
     let app_r = app.clone();
+    let llm_settings_r = Arc::clone(&llm_settings);
     let reader = tokio::spawn(async move {
         while let Some(Ok(msg)) = rd.next().await {
             let Message::Text(t) = msg else { continue };
@@ -208,11 +213,31 @@ pub(crate) async fn run_remote_session(
                     let id = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(0);
                     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
                     emit_segment(&app_r, id, "", Some(text), None, "success", "running");
+                    let copy = matches!(
+                        read_lock(&llm_settings_r).auto_copy_mode,
+                        AutoCopyMode::OptimizedZh
+                    );
+                    if copy && !text.is_empty() {
+                        match app_r.clipboard().write_text(text.to_string()) {
+                            Ok(_) => info!("[remote] auto copy (优化中文) ref={id}"),
+                            Err(e) => error!("[remote] clipboard 优化中文 failed: {e}"),
+                        }
+                    }
                 }
                 Some("translated") => {
                     let id = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(0);
                     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
                     emit_segment(&app_r, id, "", None, Some(text), "success", "success");
+                    let copy = matches!(
+                        read_lock(&llm_settings_r).auto_copy_mode,
+                        AutoCopyMode::English
+                    );
+                    if copy && !text.is_empty() {
+                        match app_r.clipboard().write_text(text.to_string()) {
+                            Ok(_) => info!("[remote] auto copy (英文) ref={id}"),
+                            Err(e) => error!("[remote] clipboard 英文 failed: {e}"),
+                        }
+                    }
                 }
                 Some("error") => {
                     warn!("[remote] server error: {}", v.get("message").and_then(|x| x.as_str()).unwrap_or(""));
