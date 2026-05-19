@@ -409,7 +409,11 @@ async function render(){
   h.map(r=>`<tr><td>${r.ts}</td><td>${esc(r.text)}</td><td>${esc(r.optimized||'')}</td><td>${esc(r.english||'')}</td><td>${esc(r.speaker||'')}</td></tr>`).join('')+'</table></div>'}
  else if(tab=='sp'){const sp=await j('/api/speakers');
   V.innerHTML='<div class=card><p class=note>注册:点"录制注册"→对麦克风清晰说约5秒。仅"启用"的声纹参与门控:命中才识别,其余丢弃。</p>'+
-  '<p><button class="s ren" onclick="enroll()">● 录制注册</button> <span id=est></span></p>'+
+  '<p>注册名:<input id=enm placeholder="如:张三"> '+
+  '<button class="s ren" onclick="enrollFile()">⬆ 上传音频注册</button> '+
+  '<input type=file id=enf accept="audio/*" style="display:none">'+
+  '<button class="s ren" onclick="enroll()">● 录制注册(需HTTPS)</button> '+
+  '<span id=est></span></p>'+
   '<table><tr><th>名称</th><th>启用</th><th>创建</th><th></th></tr>'+
   sp.map(s=>`<tr><td>${esc(s.name)}</td><td><input type=checkbox ${s.enabled?'checked':''} onchange="en(${s.id},this.checked)"></td><td>${s.created_at}</td>
   <td><button class="s ren" onclick="rn(${s.id})">改名</button> <button class="s del" onclick="dl(${s.id})">删除</button></td></tr>`).join('')+'</table></div>'}
@@ -422,19 +426,28 @@ async function dl(id){if(confirm('删除该声纹?')){await j('/api/speakers/'+i
 async function rn(id){const n=prompt('新名称');if(n){await j('/api/speakers/'+id+'/rename','POST',{name:n});render()}}
 async function en(id,e){await j('/api/speakers/'+id+'/enabled','POST',{enabled:e})}
 async function cs(k){const val=document.getElementById('cf_'+k).value;await j('/api/config','POST',{[k]:val});alert('已保存')}
+function enName(){const n=(document.getElementById('enm')||{}).value;return (n||'').trim()}
+async function doEnroll(blob,name){
+ const est=document.getElementById('est');est.textContent='上传中...';
+ const r=await fetch('/api/speakers/enroll?name='+encodeURIComponent(name),{method:'POST',body:blob});
+ const d=await r.json();est.textContent='';
+ if(d.ok){alert('注册成功');render()}else{alert('注册失败:'+(d.error||'?'))}
+}
+function enrollFile(){
+ const name=enName();if(!name){alert('请先填注册名');return}
+ const f=document.getElementById('enf');
+ f.onchange=()=>{if(f.files[0])doEnroll(f.files[0],name)};
+ f.click();
+}
 async function enroll(){
- const name=prompt('声纹名称(如:张三)');if(!name)return;
+ const name=enName();if(!name){alert('请先填注册名');return}
+ if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+  alert('浏览器麦克风需 HTTPS 或 localhost。请改用"上传音频注册",或用 HTTPS 访问。');return}
  const est=document.getElementById('est');
  let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(e){alert('无法访问麦克风:'+e);return}
  const mr=new MediaRecorder(stream);const chunks=[];
  mr.ondataavailable=e=>chunks.push(e.data);
- mr.onstop=async()=>{
-  stream.getTracks().forEach(t=>t.stop());est.textContent='上传中...';
-  const blob=new Blob(chunks);
-  const r=await fetch('/api/speakers/enroll?name='+encodeURIComponent(name),{method:'POST',body:blob});
-  const d=await r.json();est.textContent='';
-  if(d.ok){alert('注册成功');render()}else{alert('注册失败:'+(d.error||'?'))}
- };
+ mr.onstop=()=>{stream.getTracks().forEach(t=>t.stop());doEnroll(new Blob(chunks),name)};
  mr.start();est.textContent='录音中…(5秒)';setTimeout(()=>mr.stop(),5000);
 }
 render();
