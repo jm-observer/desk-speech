@@ -134,10 +134,27 @@ def _refresh_voiceprints():
         pass  # keep last known set on transient failure
 
 
+def _refresh_asr_config():
+    """Pull runtime-tunable config (threshold/gap) from the orchestrator."""
+    global SPK_THRESHOLD, SENTENCE_GAP_MS
+    try:
+        with urllib.request.urlopen(f"{ORCH_BASE}/api/asr-config", timeout=5) as r:
+            d = json.loads(r.read().decode())
+        if "spk_threshold" in d:
+            SPK_THRESHOLD = float(d["spk_threshold"])
+        if "sentence_gap_ms" in d:
+            SENTENCE_GAP_MS = int(d["sentence_gap_ms"])
+    except Exception:
+        pass  # keep current values on transient failure
+
+
 async def voiceprint_loop():
     while True:
-        await asyncio.get_event_loop().run_in_executor(None, _refresh_voiceprints)
-        print(f"[asr][spk] voiceprints={len(ENABLED_VPS)}", flush=True)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _refresh_voiceprints)
+        await loop.run_in_executor(None, _refresh_asr_config)
+        print(f"[asr][cfg] voiceprints={len(ENABLED_VPS)} "
+              f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms", flush=True)
         await asyncio.sleep(VP_REFRESH_SEC)
 
 

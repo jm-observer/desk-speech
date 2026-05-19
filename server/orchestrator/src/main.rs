@@ -63,6 +63,15 @@ async fn main() {
     let db = Arc::new(
         Db::open(&format!("{data_dir}/app.db")).expect("open app.db"),
     );
+    // Seed runtime-tunable defaults (editable in the console "配置" tab).
+    for (k, v) in [
+        ("asr.spk_threshold", "0.35"),
+        ("asr.sentence_gap_ms", "1500"),
+    ] {
+        if db.config_get(k).is_none() {
+            db.config_set(k, v);
+        }
+    }
     let ctx = AppCtx { cfg: c.clone(), db };
 
     let app = Router::new()
@@ -73,6 +82,7 @@ async fn main() {
         .route("/api/speakers", get(api_speakers))
         .route("/api/speakers/enroll", post(api_speaker_enroll))
         .route("/api/voiceprints", get(api_voiceprints))
+        .route("/api/asr-config", get(api_asr_config))
         .route("/api/speakers/:id", delete(api_speaker_delete))
         .route("/api/speakers/:id/rename", post(api_speaker_rename))
         .route("/api/speakers/:id/enabled", post(api_speaker_enabled))
@@ -271,6 +281,17 @@ async fn api_history(State(ctx): State<AppCtx>) -> Json<Vec<db::SegmentRow>> {
 async fn api_speakers(State(ctx): State<AppCtx>) -> Json<Vec<db::Speaker>> {
     Json(ctx.db.speakers_list())
 }
+/// Runtime-tunable asr config the asr service polls (threshold/gap).
+async fn api_asr_config(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
+    let f = |k: &str, d: f64| -> f64 {
+        ctx.db.config_get(k).and_then(|v| v.parse().ok()).unwrap_or(d)
+    };
+    Json(json!({
+        "spk_threshold": f("asr.spk_threshold", 0.35),
+        "sentence_gap_ms": f("asr.sentence_gap_ms", 1500.0) as i64,
+    }))
+}
+
 /// Enabled voiceprints for the asr service to pull (gating source of truth).
 async fn api_voiceprints(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
     let vps: Vec<serde_json::Value> = ctx
