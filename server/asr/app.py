@@ -53,6 +53,9 @@ SAMPLES_PER_MS = SR // 1000
 # Speaker (voiceprint) gating — best model picked: CAM++ zh+en.
 SPK_DIR = os.environ.get("ASR_SPK_DIR") or None
 SPK_THRESHOLD = float(os.environ.get("ASR_SPK_THRESHOLD", "0.35"))
+# True  -> only recognize enrolled+enabled speakers (drop others)
+# False -> recognize everyone (gating off, even if voiceprints exist)
+GATE_TO_ENROLLED = os.environ.get("ASR_GATE_TO_ENROLLED", "1") not in ("0", "off", "false")
 ORCH_BASE = os.environ.get("ORCH_BASE", "http://orchestrator:8090")
 HTTP_PORT = int(os.environ.get("ASR_HTTP_PORT", "9101"))
 VP_REFRESH_SEC = int(os.environ.get("ASR_VP_REFRESH_SEC", "15"))
@@ -168,7 +171,7 @@ def _refresh_asr_config():
     An in-progress recognize() snapshots the old model, so live sessions are
     not interrupted (the new model takes effect from the next sentence).
     """
-    global SPK_THRESHOLD, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND
+    global SPK_THRESHOLD, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND, GATE_TO_ENROLLED
     try:
         with urllib.request.urlopen(f"{ORCH_BASE}/api/asr-config", timeout=5) as r:
             d = json.loads(r.read().decode())
@@ -178,6 +181,9 @@ def _refresh_asr_config():
         SPK_THRESHOLD = float(d["spk_threshold"])
     if "sentence_gap_ms" in d:
         SENTENCE_GAP_MS = int(d["sentence_gap_ms"])
+    if "gate_to_enrolled" in d:
+        GATE_TO_ENROLLED = str(d["gate_to_enrolled"]).strip().lower() \
+            not in ("0", "off", "false", "no")
     want = str(d.get("model", "")).strip().lower()
     if want and want in ("paraformer", "sensevoice") and want != ASR_KIND:
         print(f"[asr][cfg] switching ASR model {ASR_KIND} -> {want} ...",
@@ -198,6 +204,7 @@ async def voiceprint_loop():
         await loop.run_in_executor(None, _refresh_voiceprints)
         await loop.run_in_executor(None, _refresh_asr_config)
         print(f"[asr][cfg] model={ASR_KIND} voiceprints={len(ENABLED_VPS)} "
+              f"gate={'on' if GATE_TO_ENROLLED else 'off'} "
               f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms", flush=True)
         await asyncio.sleep(VP_REFRESH_SEC)
 
@@ -302,11 +309,14 @@ async def finalize(ws, s: Session):
     s.last_end = None
     text = recognize(seg)
     spk, score = best_speaker(seg)
-    if ENABLED_VPS and spk and score < SPK_THRESHOLD:
+    gated = GATE_TO_ENROLLED and bool(ENABLED_VPS)
+    if gated and spk and score < SPK_THRESHOLD:
         print(f"[asr][spk] DROP non-target best={spk} score={score:.3f} "
               f"thr={SPK_THRESHOLD} text={text!r}", flush=True)
         return  # gated out: not an enrolled/enabled speaker
-    speaker = spk if (ENABLED_VPS and spk) else None
+    # Label the speaker when a known voiceprint matches confidently —
+    # informational even when gating is off.
+    speaker = spk if (ENABLED_VPS and spk and score >= SPK_THRESHOLD) else None
     await emit_segment(ws, text, beg, end, speaker)
 
 

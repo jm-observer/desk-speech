@@ -77,6 +77,7 @@ async fn main() {
         ("asr.spk_threshold", "0.35"),
         ("asr.sentence_gap_ms", "1500"),
         ("asr.model", "paraformer"), // paraformer | sensevoice (hot-switch)
+        ("asr.gate_to_enrolled", "on"), // on=仅识别已启用声纹 | off=识别所有人
         // LLM config — defaults from env/const, then live-editable in console.
         ("vllm.model", c.vllm_model.as_str()),
         ("vllm.base", c.vllm_base.as_str()),
@@ -368,10 +369,15 @@ async fn api_asr_config(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
         .db
         .config_get("asr.model")
         .unwrap_or_else(|| "paraformer".into());
+    let gate_to_enrolled = ctx
+        .db
+        .config_get("asr.gate_to_enrolled")
+        .unwrap_or_else(|| "on".into());
     Json(json!({
         "spk_threshold": f("asr.spk_threshold", 0.35),
         "sentence_gap_ms": f("asr.sentence_gap_ms", 1500.0) as i64,
         "model": model,
+        "gate_to_enrolled": gate_to_enrolled,
     }))
 }
 
@@ -548,8 +554,13 @@ async function render(){
    `<td>${esc(r.optimized||'')}</td><td>${esc(r.english||'')}</td><td>${esc(r.speaker||'')}</td>`+
    `<td style="white-space:nowrap">${r.has_audio?`<button class="s ren" onclick="playSeg(${r.id})">▶</button> <a class="s ren" style="text-decoration:none" href="/api/segments/${r.id}/audio">⬇</a> `:'<span class=note>已过期 </span>'}<button class="s ren" onclick="saveSeg(${r.id})">保存</button></td>`+
    `</tr>`).join('')+'</table></div>'}
- else if(tab=='sp'){const sp=await j('/api/speakers');
-  V.innerHTML='<div class=card><p class=note>注册:点"录制注册"→对麦克风清晰说约5秒。仅"启用"的声纹参与门控:命中才识别,其余丢弃。</p>'+
+ else if(tab=='sp'){const sp=await j('/api/speakers');const ac=await j('/api/asr-config');
+  const gv=String(ac.gate_to_enrolled==null?'on':ac.gate_to_enrolled).toLowerCase();
+  const gate=!(gv==='off'||gv==='0'||gv==='false'||gv==='no');
+  V.innerHTML='<div class=card>'+
+  `<p><label style="cursor:pointer"><input type=checkbox ${gate?'checked':''} onchange="setGate(this.checked)"> <b>仅识别声纹列表中已启用的用户</b></label></p>`+
+  '<p class=note>勾选=只识别命中已启用声纹的语音,其余丢弃;取消=识别所有人(命中已启用声纹时仍标注说话人)。未注册任何声纹时恒等于识别所有人。</p>'+
+  '<p class=note>注册:点"录制注册"→对麦克风清晰说约5秒,或上传音频。</p>'+
   '<p>注册名:<input id=enm placeholder="如:张三"> '+
   '<button class="s ren" onclick="enrollFile()">⬆ 上传音频注册</button> '+
   '<input type=file id=enf accept="audio/*" style="display:none">'+
@@ -570,6 +581,7 @@ async function dl(id){if(confirm('删除该声纹?')){await j('/api/speakers/'+i
 async function rn(id){const n=prompt('新名称');if(n){await j('/api/speakers/'+id+'/rename','POST',{name:n});render()}}
 async function en(id,e){await j('/api/speakers/'+id+'/enabled','POST',{enabled:e})}
 async function cs(k){const val=document.getElementById('cf_'+k).value;await j('/api/config','POST',{[k]:val});alert('已保存')}
+async function setGate(on){await j('/api/config','POST',{'asr.gate_to_enrolled':on?'on':'off'});render()}
 function enName(){const n=(document.getElementById('enm')||{}).value;return (n||'').trim()}
 async function doEnroll(blob,name){
  const est=document.getElementById('est');est.textContent='上传中...';
