@@ -3,28 +3,29 @@
 @tailwind utilities;
 
 :root {
-  --bg-canvas: #f6f8f6;
-  --bg-app: #fbfcfb;
-  --bg-card: #ffffff;
-  --bg-soft: #f1f5f2;
-  --bg-softer: #f7f9f7;
-  --line: #e6ece7;
-  --line-strong: #d6ddd7;
-  --ink: #1d2622;
-  --ink-2: #4a5651;
-  --ink-3: #7a857f;
-  --ink-4: #a4ada8;
-  --primary: #1aa181;        /* mint/teal */
-  --primary-soft: #e6f6f0;
-  --primary-softer: #f1faf6;
-  --primary-deep: #138a6d;
+  /* Dark theme — matches the GB10 web console (#0f1115 / #171a21 / #2563eb). */
+  --bg-canvas: #0b0e13;
+  --bg-app: #0f1115;
+  --bg-card: #171a21;
+  --bg-soft: #1c212b;
+  --bg-softer: #20262f;
+  --line: #232838;
+  --line-strong: #313a52;
+  --ink: #e6e6e6;
+  --ink-2: #c5ccd6;
+  --ink-3: #94a3b8;
+  --ink-4: #6b7585;
+  --primary: #2563eb;        /* console accent blue */
+  --primary-soft: #16233f;
+  --primary-softer: #121a2c;
+  --primary-deep: #1d4ed8;
   --accent: #f6c46a;
-  --danger: #e0584a;
-  --danger-soft: #fbeae7;
-  --warning: #c98a2b;
-  --shadow-sm: 0 1px 2px rgba(20, 40, 32, 0.04), 0 1px 1px rgba(20, 40, 32, 0.03);
-  --shadow-md: 0 4px 14px rgba(20, 40, 32, 0.05), 0 1px 2px rgba(20, 40, 32, 0.04);
-  --shadow-lg: 0 18px 50px rgba(20, 40, 32, 0.10), 0 4px 14px rgba(20, 40, 32, 0.05);
+  --danger: #ef4444;
+  --danger-soft: #3b1d1d;
+  --warning: #f59e0b;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40), 0 1px 1px rgba(0, 0, 0, 0.30);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.40);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.55), 0 6px 18px rgba(0, 0, 0, 0.45);
   --radius-sm: 8px;
   --radius: 12px;
   --radius-lg: 16px;
@@ -77,12 +78,12 @@ input, select, textarea {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(30, 50, 40, 0.1);
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(30, 50, 40, 0.2);
+  background: rgba(255, 255, 255, 0.22);
 }
 
 ::-webkit-scrollbar-track {

@@ -17,6 +17,8 @@ interface ControlPanelProps {
   onAutoRecordingEnabledChange: (val: boolean) => void;
   onStart: () => void;
   onStop: () => void;
+  onRetry: () => void;
+  errorMessage: string;
   onClear: () => void;
   onShowSettings: () => void;
   onShowRules: () => void;
@@ -35,6 +37,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onAutoRecordingEnabledChange,
   onStart,
   onStop,
+  onRetry,
+  errorMessage,
   onClear,
   onShowSettings,
   onShowRules,
@@ -74,6 +78,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
         status={status}
         onStart={onStart}
         onStop={onStop}
+        onRetry={onRetry}
+        errorMessage={errorMessage}
         disabled={devices.length === 0 || disabled}
       />
 

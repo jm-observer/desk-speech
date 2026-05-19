@@ -7,12 +7,12 @@ interface StatusChipProps {
 
 export const StatusChip: React.FC<StatusChipProps> = ({ status }) => {
   const configs: Record<string, { label: string; bg: string; text: string; dot: string; pulse?: boolean }> = {
-    idle: { label: '就绪', bg: 'var(--bg-soft)', text: 'var(--ink-2)', dot: '#7a857f' },
-    initializing: { label: '模型加载中', bg: '#fef4e2', text: 'var(--warning)', dot: '#c98a2b' },
-    recording: { label: '正在录音', bg: 'var(--primary-soft)', text: 'var(--primary-deep)', dot: 'var(--primary)', pulse: true },
-    processing: { label: '处理中', bg: '#fef4e2', text: 'var(--warning)', dot: '#c98a2b' },
-    error: { label: '异常', bg: 'var(--danger-soft)', text: 'var(--danger)', dot: 'var(--danger)' },
-    finished: { label: '已完成', bg: 'var(--primary-soft)', text: 'var(--primary-deep)', dot: 'var(--primary)' },
+    idle: { label: '就绪', bg: 'rgba(148,163,184,0.16)', text: '#94a3b8', dot: '#94a3b8' },
+    initializing: { label: '模型加载中', bg: 'rgba(245,158,11,0.16)', text: '#fbbf24', dot: '#f59e0b' },
+    recording: { label: '正在录音', bg: 'rgba(239,68,68,0.18)', text: '#f87171', dot: '#ef4444', pulse: true },
+    processing: { label: '处理中', bg: 'rgba(245,158,11,0.16)', text: '#fbbf24', dot: '#f59e0b' },
+    error: { label: '异常', bg: 'rgba(239,68,68,0.18)', text: '#f87171', dot: '#ef4444' },
+    finished: { label: '已完成', bg: 'rgba(34,197,94,0.16)', text: '#4ade80', dot: '#22c55e' },
   };
 
   const config = configs[status] || configs.idle;

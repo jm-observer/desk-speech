@@ -7,6 +7,7 @@ export type AppStatus = 'idle' | 'initializing' | 'recording' | 'processing' | '
 
 export const useAppStore = () => {
   const [status, setStatus] = useState<AppStatus>('initializing');
+  const [errorMessage, setErrorMessage] = useState<string>('');
   const [segments, setSegments] = useState<Segment[]>([]);
   const [devices, setDevices] = useState<{ label: string; value: string }[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>('');
@@ -164,11 +165,12 @@ export const useAppStore = () => {
       const res = await TauriAPI.getInitStatus();
       if (canceled) return;
       if (res.status === 1) {
-        const loaded = await loadSegments();
-        if (!loaded) {
-          setStatus((prev) => (prev === 'initializing' ? 'idle' : prev));
-        }
+        // Start clean — do NOT preload old local-DB history into the live
+        // list. This session's results stream in via `segment_updated`;
+        // past history lives on the server console (:8090 历史).
+        setStatus((prev) => (prev === 'initializing' ? 'idle' : prev));
       } else if (res.status === 2) {
+        setErrorMessage(res.error || '初始化失败');
         setStatus('error');
       } else {
         initTimer = window.setTimeout(pollInit, 500);
@@ -315,6 +317,7 @@ export const useAppStore = () => {
 
   return {
     status, setStatus,
+    errorMessage, setErrorMessage,
     segments, setSegments,
     loadSegments,
     deleteSegment,

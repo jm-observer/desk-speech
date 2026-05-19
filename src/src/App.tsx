@@ -186,6 +186,16 @@ function App() {
       if (pollInFlightRef.current) return;
       pollInFlightRef.current = true;
       try {
+        // Surface async connection failures (run_remote_session sets
+        // init_status=2 + a message after giving up reconnecting).
+        const init = await TauriAPI.getInitStatus();
+        if (init.status === 2) {
+          store.setErrorMessage(init.error || '无法连接识别服务');
+          store.setStatus('error');
+          stopPolling();
+          return;
+        }
+
         const state = await TauriAPI.getRecordingState();
 
         const mappedSegments: Segment[] = state.segments.map((s: RawSegment) => ({
@@ -345,15 +355,24 @@ function App() {
   const startRecording = async () => {
     try {
       setIsBusy(true);
+      store.setErrorMessage('');
       await TauriAPI.startRecording();
       store.setStatus('recording');
       startPolling();
     } catch (err) {
       console.error("Start failed", err);
+      store.setErrorMessage(typeof err === 'string' ? err : (err as Error)?.message || String(err));
       store.setStatus('error');
     } finally {
       setIsBusy(false);
     }
+  };
+
+  const retryRecording = () => {
+    autoStartTriggeredRef.current = true; // a manual retry shouldn't re-arm auto-start
+    store.setErrorMessage('');
+    store.setStatus('idle');
+    startRecording();
   };
   const isSimpleMode = store.uiMode === 'simple';
 
@@ -551,6 +570,8 @@ function App() {
               status={store.status}
               onStart={startRecording}
               onStop={stopRecording}
+              onRetry={retryRecording}
+              errorMessage={store.errorMessage}
               disabled={store.devices.length === 0 || isBusy}
             />
           </section>
@@ -570,6 +591,8 @@ function App() {
             onAutoRecordingEnabledChange={setAutoRecordingEnabled}
             onStart={startRecording}
             onStop={stopRecording}
+            onRetry={retryRecording}
+            errorMessage={store.errorMessage}
             onClear={handleClear}
             onShowSettings={() => setShowSettingsModal(true)}
             onShowRules={() => setShowCorrectionModal(true)}
