@@ -1,0 +1,63 @@
+# GPT-SoVITS v2Pro — per-voice fine-tune arm of the TTS bake-off.
+# Same strategy as Dockerfile.cosyvoice: layer on funasr-asr:arm64 (only
+# torch that supports GB10 sm_121/cu130), install deps WITHOUT torch/
+# torchaudio. Pretrained models are NOT baked — mounted from a host volume
+# (see compose.tts.yaml) to keep the image small and rebuilds fast.
+#
+# Dep set proven in the tts-scratch2 container (GS_PIP_RC=0).
+FROM funasr-asr:arm64
+
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates build-essential python3-dev cmake ffmpeg unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# github.com is unreachable/throttled from the GB10 box (China network), so
+# the repo is vendored from the proven tts-scratch2 checkout instead of
+# git-cloned at build time. server/tts/GPT-SoVITS = code only (pretrained
+# models + G2PWModel excluded; they are mounted from a host volume).
+COPY GPT-SoVITS /app/GPT-SoVITS
+
+# numpy<2 is REQUIRED by GPT-SoVITS; verified harmless to the base cu130
+# torch/torchaudio. torch/torchaudio/pyopenjtalk/python_mecab_ko omitted
+# (base torch kept; JP/KO G2P not needed for Chinese). Aliyun mirror —
+# pypi.org/Tsinghua are SSL-flaky from the GB10 box.
+RUN pip3 install --break-system-packages --no-cache-dir --default-timeout=600 --retries 15 \
+      -i https://mirrors.aliyun.com/pypi/simple/ \
+      "numpy<2.0" scipy tensorboard librosa==0.10.2 numba pytorch-lightning \
+      g2p_en cn2an pypinyin jieba jieba_fast wordsegment split-lang \
+      "fast_langdetect>=0.3.1" rotary_embedding_torch ToJyutping g2pk2 ko_pron \
+      opencc chardet PyYAML psutil tqdm sentencepiece \
+      "transformers>=4.43,<=4.50" "peft<0.18.0" x_transformers \
+      "torchmetrics<=1.5" "pydantic<=2.10.6" "ctranslate2>=4.0,<5" "av>=11" \
+      ffmpeg-python "fastapi[standard]>=0.115.2" onnxruntime matplotlib \
+      "gradio<5"
+# gradio<5: api_v2 itself doesn't need it, but the fine-tune pipeline
+# (tools/my_utils.py, imported by slice/ASR/feature scripts) does.
+
+# Point the api_v2 default profile (custom) at v2Pro on cuda.
+RUN cd GPT-SoVITS && python3 - <<'PY'
+p = "GPT_SoVITS/configs/tts_infer.yaml"
+out, incustom = [], False
+for ln in open(p).read().split("\n"):
+    if ln.startswith("custom:"):
+        incustom = True; out.append(ln); continue
+    if incustom and ln and not ln.startswith(" "):
+        incustom = False
+    if incustom:
+        if "t2s_weights_path:" in ln: ln = "  t2s_weights_path: GPT_SoVITS/pretrained_models/s1v3.ckpt"
+        elif "vits_weights_path:" in ln: ln = "  vits_weights_path: GPT_SoVITS/pretrained_models/v2Pro/s2Gv2Pro.pth"
+        elif "version:" in ln: ln = "  version: v2Pro"
+        elif "is_half:" in ln: ln = "  is_half: false"
+        elif "device:" in ln: ln = "  device: cuda"
+    out.append(ln)
+open(p, "w").write("\n".join(out))
+PY
+
+COPY gptsovits_sitecustomize.py /app/GPT-SoVITS/sitecustomize.py
+ENV NLTK_DATA=/root/nltk_data \
+    PYTHONPATH=/app/GPT-SoVITS
+WORKDIR /app/GPT-SoVITS
+EXPOSE 9880
+CMD ["python3", "api_v2.py", "-a", "0.0.0.0", "-p", "9880", "-c", "GPT_SoVITS/configs/tts_infer.yaml"]

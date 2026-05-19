@@ -1,0 +1,37 @@
+# CosyVoice 2 zero-shot/instruct synth — bake-off harness.
+# Layered on funasr-asr:arm64 because that base carries the only torch that
+# actually supports GB10 (sm_121 / cu130). We therefore install CosyVoice's
+# deps WITHOUT torch/torchaudio (keep the base build) and use CPU onnxruntime
+# (no arm64 onnxruntime-gpu wheel); tensorrt/deepspeed are training/accel-only.
+#
+# Dep set is the one proven in the tts-scratch container (see chat session).
+FROM funasr-asr:arm64
+
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends git ca-certificates build-essential python3-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN git config --global http.postBuffer 524288000 \
+ && for i in 1 2 3; do git clone --depth 1 --recurse-submodules --shallow-submodules \
+      https://github.com/FunAudioLLM/CosyVoice.git && break || { rm -rf CosyVoice; sleep 3; }; done
+
+# Aliyun mirror — Tsinghua/pypi.org are SSL-flaky from the GB10 box.
+RUN pip3 install --break-system-packages --default-timeout=600 --retries 15 \
+      -i https://mirrors.aliyun.com/pypi/simple/ \
+      conformer==0.3.2 diffusers==0.29.0 hydra-core==1.3.2 HyperPyYAML==1.2.3 \
+      inflect==7.3.1 librosa==0.10.2 lightning==2.2.4 omegaconf==2.3.0 \
+      onnx==1.16.0 onnxruntime transformers==4.51.3 gdown rich networkx \
+      wetext==0.0.4 x-transformers openai-whisper matplotlib wget pyarrow \
+      pyworld==0.3.4 fastapi "uvicorn[standard]" python-multipart
+# Notes: torch/torchaudio NOT installed (base's cu130 build is the only one
+# that supports GB10). pyworld IS required — cosyvoice.dataset.processor
+# imports it at module load even for inference — hence python3-dev above.
+
+ENV COSYVOICE_DIR=/app/CosyVoice \
+    COSYVOICE_MODEL=/models/CosyVoice2-0.5B \
+    COSYVOICE_FP16=0 \
+    TTS_PORT=8095
+COPY cosy_server.py /app/cosy_server.py
+EXPOSE 8095
+CMD ["python3", "/app/cosy_server.py"]

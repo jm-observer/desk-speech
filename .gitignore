@@ -8,3 +8,11 @@ assets
 src-tauri/target
 tmp
 /src-tauri/sherpa-gpu/
+
+# Rust build artifacts under server/ (e.g. orchestrator/target, ~234M)
+server/**/target/
+
+# TTS bake-off: vendored third-party GPT-SoVITS source is NOT committed.
+# Deploy uses the pre-built gptsovits:bakeoff image; only a rebuild needs
+# this dir present in the build context (see server/tts/README.md).
+server/tts/GPT-SoVITS/

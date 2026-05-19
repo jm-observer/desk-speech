@@ -174,3 +174,17 @@ npm run dev
 4. P0 + Stage3-A/B/C + 质量 C **均已完成**。剩余只有「暂缓:声纹注册端到端实测」
    和「杂项(可选)」——按用户当时指示挑选;按"改→本地 cargo check→scp→
    compose build/up→冒烟→commit"节奏,逐片提交
+
+---
+
+## 8. TTS bake-off(新增能力,独立于主链路)
+
+为给项目选 TTS 方案而搭的两个**独立服务**(与生产 asr/orchestrator 隔离):
+**CosyVoice 2 :8095**(零样本+情感)与 **GPT-SoVITS v2Pro :8096**(零样本+每人微调)。
+两镜像已在 GB10 构建;日常用已构建镜像 `docker compose -f compose.tts.yaml up -d`。
+
+- **单一文档:`server/tts/README.md`**(拓扑/端口/卷、日常部署、重建流程+GB10 坑、
+  微调用法、文件清单)。续作 TTS 先读它。
+- vendor 的 `server/tts/GPT-SoVITS/` 第三方源码**不入 git**(`.gitignore` 已配),
+  仅重建镜像时需要;日常部署不需要。
+- 记忆:`memory/project_tts_bakeoff.md`(为何做、已搭什么、如何续作)。
