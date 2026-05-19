@@ -15,6 +15,7 @@ interface, the orchestrator, the protocol, or the client.
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -23,7 +24,12 @@ import numpy as np
 import websockets
 from aiohttp import web
 from funasr import AutoModel
-from funasr.utils.postprocess_utils import rich_transcription_postprocess
+
+# SenseVoice emits leading meta tokens like <|zh|><|NEUTRAL|><|BGM|><|withitn|>.
+# We strip them to plain text. (funasr's rich_transcription_postprocess instead
+# turns emotion/audio-event tokens into emoji like 😡/🎼 — unwanted noise for a
+# transcription tool; the ITN punctuation we want is already in the body text.)
+_SV_TAG_RE = re.compile(r"<\|[^|]*\|>")
 
 PARAFORMER = os.environ["ASR_PARAFORMER_DIR"]
 SENSEVOICE = os.environ.get("ASR_SENSEVOICE_DIR") or None
@@ -260,8 +266,7 @@ def recognize(seg: np.ndarray) -> str:
                              use_itn=True, batch_size_s=300)
         if not res:
             return ""
-        # SenseVoice emits rich tags (<|zh|><|EMO|>…); strip to plain text.
-        return rich_transcription_postprocess(res[0].get("text", ""))
+        return _SV_TAG_RE.sub("", res[0].get("text", "")).strip()
     res = model.generate(input=seg, batch_size_s=300)
     return res[0].get("text", "") if res else ""
 
