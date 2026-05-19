@@ -45,8 +45,11 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
   `llm.translate_prompt`(默认取 env/常量)。`asr_reader` 每段从 DB 读这 4 键
   (回退 env/常量);`llm()` 签名改为 `llm(base,model,sys,user)`。提示词/模型/base
   在「配置」页实时可编,已实测改提示词**免重部署即时生效**、可还原
+- C(识别质量)A/B 已做:`server/ab_asr.py`(容器内裸跑两模型对比)。结论见 §3。
+  代码侧落地:SenseVoice 改为正则剥 `<|...|>` 标签(弃 `rich_transcription_postprocess`,
+  它会把 `<|BGM|>`/`<|ANGRY|>` 注成 🎼/😡 噪声),正文已自带 ITN 标点
 
-关键提交(`git log --oneline`,新到旧):`ddd8e15` LLM 配置入台;`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
+关键提交(`git log --oneline`,新到旧):`e5861fa` SV去标签;`ddd8e15` LLM 配置入台;`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
 `7009450` 声纹门控;`3c588a1` 持久卷;`11c9b6a` 持久化+Web台;`72f7ca3` E 清理;
 `6d167ba` D 健壮;P0 系列在更早。
 
@@ -54,9 +57,18 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
 
 ## 3. 剩余任务(优先级从高到低)
 
-### C:识别质量(用户最初定为最后做)
-- Paraformer vs SenseVoice A/B(靠 Stage3-B 切换后对比);提示词调优
-- 已知:Paraformer-large 中文好;turbo/sherpa 已弃用
+### C:识别质量 —— A/B 已完成,结论如下(剩提示词微调,可选)
+A/B 工具:`server/ab_asr.py`(scp 到 `~/server`→`docker compose cp` 进 asr→
+`docker compose exec -T asr python3 /tmp/ab_asr.py`)。基于 bundled zh/yue/en 片段:
+- **Paraformer-large**:纯普通话内容词略稳(如 "开放时间" vs SV 误 "开饭时间");
+  但**裸输出无标点**(本项目靠 punc/LLM 优化补),且**仅中文**(粤/英严重乱码),慢 ~5-25x
+- **SenseVoice**:快很多、原生标点、ITN 阿拉伯数字、多语(粤/英/日/韩 OK);
+  偶发个别内容词错。原 emoji 噪声已在代码侧修掉
+- **建议**:默认保持 `paraformer`(中文最稳,输出过 LLM 优化补标点);需低延迟/
+  多语场景一键切 `sensevoice`(管理台「配置」`asr.model`)。两者用户都可用自己
+  声音在管理台 A/B
+- 提示词调优:当前优化/翻译提示词够用,无具体抱怨不盲改;`llm.optimize_prompt`/
+  `llm.translate_prompt` 现已是管理台实时可编(Stage3-C),按需现场调即可
 
 ### 暂缓:声纹注册端到端实测
 - 浏览器麦克风需 HTTPS/localhost;明文 http LAN 下 `getUserMedia` 不可用
@@ -125,5 +137,6 @@ npm run dev
 2. 读本文 + `docs/redesign-architecture-overview.md` §9(已定决策)
 3. `ssh -o BatchMode=yes fengqi@192.168.0.68 'cd ~/server && docker compose ps && curl -s localhost:8090/api/stats'`
    确认服务在跑
-4. 从 **C:识别质量**(Paraformer vs SenseVoice A/B + 提示词调优)开始,或按用户当时指示;
-   按"改→本地 cargo check→scp→compose build/up→冒烟→commit"节奏,逐片提交
+4. P0 + Stage3-A/B/C + 质量 C **均已完成**。剩余只有「暂缓:声纹注册端到端实测」
+   和「杂项(可选)」——按用户当时指示挑选;按"改→本地 cargo check→scp→
+   compose build/up→冒烟→commit"节奏,逐片提交
