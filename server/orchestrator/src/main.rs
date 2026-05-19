@@ -9,12 +9,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
+    body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::{Html, Response},
     routing::{delete, get, post},
     Json, Router,
 };
+use std::collections::HashMap;
 use db::Db;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientControl, Hello, ServerEvent};
@@ -25,6 +27,7 @@ use tokio_tungstenite::tungstenite::Message as TMessage;
 struct Cfg {
     bind: String,
     asr_ws: String,
+    asr_embed: String,
     vllm_base: String,
     vllm_model: String,
 }
@@ -39,6 +42,8 @@ fn cfg() -> Cfg {
     Cfg {
         bind: std::env::var("ORCH_BIND").unwrap_or_else(|_| "0.0.0.0:8090".into()),
         asr_ws: std::env::var("ASR_WS").unwrap_or_else(|_| "ws://asr:9100".into()),
+        asr_embed: std::env::var("ASR_EMBED")
+            .unwrap_or_else(|_| "http://asr:9101/embed".into()),
         vllm_base: std::env::var("VLLM_BASE")
             .unwrap_or_else(|_| "http://host.docker.internal:1234/v1".into()),
         vllm_model: std::env::var("VLLM_MODEL").unwrap_or_else(|_| "default".into()),
@@ -66,6 +71,8 @@ async fn main() {
         .route("/api/stats", get(api_stats))
         .route("/api/history", get(api_history))
         .route("/api/speakers", get(api_speakers))
+        .route("/api/speakers/enroll", post(api_speaker_enroll))
+        .route("/api/voiceprints", get(api_voiceprints))
         .route("/api/speakers/:id", delete(api_speaker_delete))
         .route("/api/speakers/:id/rename", post(api_speaker_rename))
         .route("/api/speakers/:id/enabled", post(api_speaker_enabled))
@@ -179,7 +186,8 @@ async fn asr_reader(
                 let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                db.segment_upsert(id as i64, &session_id, &text, None, None, t0, t1, None);
+                let speaker = v.get("speaker").and_then(|x| x.as_str());
+                db.segment_upsert(id as i64, &session_id, &text, None, None, t0, t1, speaker);
                 let _ = cli_tx
                     .send(Message::Text(
                         ServerEvent::Segment {
@@ -263,6 +271,56 @@ async fn api_history(State(ctx): State<AppCtx>) -> Json<Vec<db::SegmentRow>> {
 async fn api_speakers(State(ctx): State<AppCtx>) -> Json<Vec<db::Speaker>> {
     Json(ctx.db.speakers_list())
 }
+/// Enabled voiceprints for the asr service to pull (gating source of truth).
+async fn api_voiceprints(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
+    let vps: Vec<serde_json::Value> = ctx
+        .db
+        .enabled_voiceprints()
+        .into_iter()
+        .map(|(name, emb)| json!({ "name": name, "embedding": emb }))
+        .collect();
+    Json(serde_json::Value::Array(vps))
+}
+
+/// Enroll: `?name=` + raw audio body -> asr /embed -> store voiceprint.
+async fn api_speaker_enroll(
+    State(ctx): State<AppCtx>,
+    Query(q): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Json<serde_json::Value> {
+    let name = q.get("name").cloned().unwrap_or_default();
+    if name.trim().is_empty() {
+        return Json(json!({"ok": false, "error": "缺少名称"}));
+    }
+    let resp = reqwest::Client::new()
+        .post(&ctx.cfg.asr_embed)
+        .body(body.to_vec())
+        .send()
+        .await;
+    let j = match resp {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(j) => j,
+            Err(e) => return Json(json!({"ok": false, "error": format!("embed 解析失败: {e}")})),
+        },
+        Err(e) => return Json(json!({"ok": false, "error": format!("asr 不可达: {e}")})),
+    };
+    let emb: Vec<f32> = match j.get("embedding").and_then(|x| x.as_array()) {
+        Some(a) => a.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect(),
+        None => {
+            let e = j.get("error").and_then(|x| x.as_str()).unwrap_or("embed 失败");
+            return Json(json!({"ok": false, "error": e}));
+        }
+    };
+    if emb.is_empty() {
+        return Json(json!({"ok": false, "error": "空声纹向量"}));
+    }
+    let csv = emb.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+    match ctx.db.speaker_add(&name, &csv) {
+        Ok(id) => Json(json!({"ok": true, "id": id})),
+        Err(e) => Json(json!({"ok": false, "error": format!("保存失败(名称重复?): {e}")})),
+    }
+}
+
 async fn api_speaker_delete(
     State(ctx): State<AppCtx>,
     Path(id): Path<i64>,
@@ -350,7 +408,9 @@ async function render(){
   V.innerHTML='<div class=card><table><tr><th>时间</th><th>原文</th><th>优化</th><th>英文</th><th>说话人</th></tr>'+
   h.map(r=>`<tr><td>${r.ts}</td><td>${esc(r.text)}</td><td>${esc(r.optimized||'')}</td><td>${esc(r.english||'')}</td><td>${esc(r.speaker||'')}</td></tr>`).join('')+'</table></div>'}
  else if(tab=='sp'){const sp=await j('/api/speakers');
-  V.innerHTML='<div class=card><p class=note>声纹注册(浏览器录音)将在下一阶段接入;现可改名/启停/删除已有声纹。</p><table><tr><th>名称</th><th>启用</th><th>创建</th><th></th></tr>'+
+  V.innerHTML='<div class=card><p class=note>注册:点"录制注册"→对麦克风清晰说约5秒。仅"启用"的声纹参与门控:命中才识别,其余丢弃。</p>'+
+  '<p><button class="s ren" onclick="enroll()">● 录制注册</button> <span id=est></span></p>'+
+  '<table><tr><th>名称</th><th>启用</th><th>创建</th><th></th></tr>'+
   sp.map(s=>`<tr><td>${esc(s.name)}</td><td><input type=checkbox ${s.enabled?'checked':''} onchange="en(${s.id},this.checked)"></td><td>${s.created_at}</td>
   <td><button class="s ren" onclick="rn(${s.id})">改名</button> <button class="s del" onclick="dl(${s.id})">删除</button></td></tr>`).join('')+'</table></div>'}
  else if(tab=='cf'){const c=await j('/api/config');const ks=Object.keys(c);
@@ -362,6 +422,21 @@ async function dl(id){if(confirm('删除该声纹?')){await j('/api/speakers/'+i
 async function rn(id){const n=prompt('新名称');if(n){await j('/api/speakers/'+id+'/rename','POST',{name:n});render()}}
 async function en(id,e){await j('/api/speakers/'+id+'/enabled','POST',{enabled:e})}
 async function cs(k){const val=document.getElementById('cf_'+k).value;await j('/api/config','POST',{[k]:val});alert('已保存')}
+async function enroll(){
+ const name=prompt('声纹名称(如:张三)');if(!name)return;
+ const est=document.getElementById('est');
+ let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(e){alert('无法访问麦克风:'+e);return}
+ const mr=new MediaRecorder(stream);const chunks=[];
+ mr.ondataavailable=e=>chunks.push(e.data);
+ mr.onstop=async()=>{
+  stream.getTracks().forEach(t=>t.stop());est.textContent='上传中...';
+  const blob=new Blob(chunks);
+  const r=await fetch('/api/speakers/enroll?name='+encodeURIComponent(name),{method:'POST',body:blob});
+  const d=await r.json();est.textContent='';
+  if(d.ok){alert('注册成功');render()}else{alert('注册失败:'+(d.error||'?'))}
+ };
+ mr.start();est.textContent='录音中…(5秒)';setTimeout(()=>mr.stop(),5000);
+}
 render();
 </script></body></html>"#;
 
