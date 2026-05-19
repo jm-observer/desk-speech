@@ -41,21 +41,18 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
   并原子替换全局;`recognize()` 快照 model+kind,进行中会话用旧模型收尾不中断。
   SenseVoice 输出经 `rich_transcription_postprocess` 去富标签。已实测双向切换
   (无重启、两侧端到端识别均正常)。配置键直接在「配置」页通用 kv 编辑即可改
+- Stage3-C:LLM 配置移入管理台。seed `vllm.model`/`vllm.base`/`llm.optimize_prompt`/
+  `llm.translate_prompt`(默认取 env/常量)。`asr_reader` 每段从 DB 读这 4 键
+  (回退 env/常量);`llm()` 签名改为 `llm(base,model,sys,user)`。提示词/模型/base
+  在「配置」页实时可编,已实测改提示词**免重部署即时生效**、可还原
 
-关键提交(`git log --oneline`,新到旧):`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
+关键提交(`git log --oneline`,新到旧):`ddd8e15` LLM 配置入台;`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
 `7009450` 声纹门控;`3c588a1` 持久卷;`11c9b6a` 持久化+Web台;`72f7ca3` E 清理;
 `6d167ba` D 健壮;P0 系列在更早。
 
 ---
 
 ## 3. 剩余任务(优先级从高到低)
-
-### Stage3-C:LLM 配置移入管理台
-- orchestrator seed 默认键:`vllm.model`、`vllm.base`、`llm.optimize_prompt`、`llm.translate_prompt`
-- `asr_reader`/`llm()` 改为优先读 DB config(回退 env/常量);`asr_reader` 已持有 `db`,
-  直接 `db.config_get(...)`;模型/base 注入 `llm()`(现签名 `llm(&Cfg,sys,user)`,
-  可加 model/base 参数或临时 Cfg)
-- 提示词当前硬编码在 `server/orchestrator/src/main.rs` `asr_reader` 内(优化/翻译两段)
 
 ### C:识别质量(用户最初定为最后做)
 - Paraformer vs SenseVoice A/B(靠 Stage3-B 切换后对比);提示词调优
@@ -128,4 +125,5 @@ npm run dev
 2. 读本文 + `docs/redesign-architecture-overview.md` §9(已定决策)
 3. `ssh -o BatchMode=yes fengqi@192.168.0.68 'cd ~/server && docker compose ps && curl -s localhost:8090/api/stats'`
    确认服务在跑
-4. 从 **Stage3-C** 开始(或按用户当时指示);按"改→本地 cargo check→scp→compose build/up→冒烟→commit"节奏,逐片提交
+4. 从 **C:识别质量**(Paraformer vs SenseVoice A/B + 提示词调优)开始,或按用户当时指示;
+   按"改→本地 cargo check→scp→compose build/up→冒烟→commit"节奏,逐片提交
