@@ -63,9 +63,14 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
 - LLM 并发(commit `5a58436`):段事件立即转发,optimize/translate 每段独立
   task 内 `tokio::join!` 并发;段 N+1 不被 N 的 LLM 阻塞;Done 前 drain-await
   在飞任务(乱序按 ref id 归并安全)
-- 日志降噪(`838e5bc`)、文案/lint 小修(`2144ba8`)
+- 日志降噪(`838e5bc`)、文案/lint 小修(`2144ba8`)、PCM限长(`bb80d0b`)
+- 声纹门控开关(commit `c5046bf`):新 config 键 `asr.gate_to_enrolled`
+  (`on`|`off`,seed `on`,入 `/api/asr-config`,asr ~15s 轮询)。on=仅识别
+  已启用声纹(其余丢弃);off=识别所有人(命中仍标说话人)。管理台「声纹」
+  页加复选框开关。已端到端实测(异己 clip:on 丢弃 score0.016 / off 识别 spk=None)
 
-关键提交(`git log --oneline`,新到旧):`2144ba8` 文案/lint;`838e5bc` 日志降噪;
+关键提交(`git log --oneline`,新到旧):`c5046bf` 门控开关;`341cd8d`/`bb80d0b` PCM限长;
+`2144ba8` 文案/lint;`838e5bc` 日志降噪;
 `5a58436` SEG_ID修复+LLM并发;`6825614` 深色重做+错误UX;`f9a6d7d` 音频留存;`acc253b` orch零警告;
 `b626f2e` speaker入UI;`859036c` spk_embed修复;`dbd74e0` 客户端死码清理;
 `e5861fa` SV去标签;`ddd8e15` LLM 配置入台;`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
