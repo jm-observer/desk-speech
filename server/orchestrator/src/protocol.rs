@@ -4,7 +4,10 @@
 use serde::{Deserialize, Serialize};
 
 /// 客户端 → 服务端:连接后第一帧。
+/// `protocol`/`sample_rate`/`format`/`language` 是协议契约字段(客户端必发,
+/// 见 protocol-draft.md),编排层目前只用 `want_*`;保留以备 language 路由等。
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct Hello {
     pub protocol: String,
     pub sample_rate: u32, // 固定 16000
@@ -37,7 +40,6 @@ pub enum ServerEvent {
     },
     Optimized { r#ref: u64, text: String },
     Translated { r#ref: u64, text: String },
-    Status { state: String },
     Error { code: String, message: String, fatal: bool },
     Done { session_id: String },
 }
