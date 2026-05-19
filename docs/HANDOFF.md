@@ -48,8 +48,15 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
 - C(识别质量)A/B 已做:`server/ab_asr.py`(容器内裸跑两模型对比)。结论见 §3。
   代码侧落地:SenseVoice 改为正则剥 `<|...|>` 标签(弃 `rich_transcription_postprocess`,
   它会把 `<|BGM|>`/`<|ANGRY|>` 注成 🎼/😡 噪声),正文已自带 ITN 标点
+- 逐段音频留存(commit `f9a6d7d`):orchestrator 缓存上行 PCM,asr 定段时按
+  [t0,t1] 切片存 WAV(`segment_audio` 表),**asr/协议零改动**。留 1 天;管理台
+  「历史」每行 ▶试听 / ⬇下载(可作声纹注册输入)/ 改原文+保存(生成纠错样本)。
+  端点 `GET|POST /api/segments/:id/audio|text`;每小时清理过期音频,文本保留。
+  已端到端实测(切片字节数精确、改文持久、回填过期后被清且文本留存)
 
-关键提交(`git log --oneline`,新到旧):`e5861fa` SV去标签;`ddd8e15` LLM 配置入台;`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
+关键提交(`git log --oneline`,新到旧):`f9a6d7d` 音频留存;`acc253b` orch零警告;
+`b626f2e` speaker入UI;`859036c` spk_embed修复;`dbd74e0` 客户端死码清理;
+`e5861fa` SV去标签;`ddd8e15` LLM 配置入台;`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
 `7009450` 声纹门控;`3c588a1` 持久卷;`11c9b6a` 持久化+Web台;`72f7ca3` E 清理;
 `6d167ba` D 健壮;P0 系列在更早。
 
@@ -86,7 +93,13 @@ A/B 工具:`server/ab_asr.py`(scp 到 `~/server`→`docker compose cp` 进 asr�
 - ~~`speaker` 字段透传桌面 UI~~ **已做**(commit `b626f2e`):协议加可选 speaker→
   orchestrator 填→remote.rs 透传→store→SegmentCard 显示说话人 chip(新增 user 图标);
   端到端实测段事件含 `"speaker":"测试说话人"`
-- 剩:`protocol.rs` 的 `Hello` 未读字段告警(orchestrator 仍有 2 条无害 dead_code 警告)
+- ~~orchestrator dead_code 警告~~ **已清**(commit `acc253b`):删 `ServerEvent::Status`,
+  `Hello` 加 `#[allow(dead_code)]`(协议契约字段);`cargo check` 0 警告
+- ⚠️ **已知问题(早于本次,未修)**:`SEG_ID` 是内存 `AtomicU64`,orchestrator
+  每次重启从 1 重数 → 新段 id 与旧库行 id 撞;`segment_upsert`/`audio_put` 均
+  `ON CONFLICT(id) DO UPDATE`,故重启后新段会**覆盖**旧 segment 行及其音频。
+  影响:跨重启的历史/音频可能被覆盖。修法(单独任务):启动时 `SEG_ID` 从
+  `SELECT MAX(id)+1 FROM segments` 初始化,或改用 DB 自增 id
 
 ---
 
