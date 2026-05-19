@@ -67,6 +67,7 @@ async fn main() {
     for (k, v) in [
         ("asr.spk_threshold", "0.35"),
         ("asr.sentence_gap_ms", "1500"),
+        ("asr.model", "paraformer"), // paraformer | sensevoice (hot-switch)
     ] {
         if db.config_get(k).is_none() {
             db.config_set(k, v);
@@ -286,9 +287,14 @@ async fn api_asr_config(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
     let f = |k: &str, d: f64| -> f64 {
         ctx.db.config_get(k).and_then(|v| v.parse().ok()).unwrap_or(d)
     };
+    let model = ctx
+        .db
+        .config_get("asr.model")
+        .unwrap_or_else(|| "paraformer".into());
     Json(json!({
         "spk_threshold": f("asr.spk_threshold", 0.35),
         "sentence_gap_ms": f("asr.sentence_gap_ms", 1500.0) as i64,
+        "model": model,
     }))
 }
 

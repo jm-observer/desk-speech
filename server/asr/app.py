@@ -23,8 +23,10 @@ import numpy as np
 import websockets
 from aiohttp import web
 from funasr import AutoModel
+from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
 PARAFORMER = os.environ["ASR_PARAFORMER_DIR"]
+SENSEVOICE = os.environ.get("ASR_SENSEVOICE_DIR") or None
 VAD = os.environ["ASR_VAD_DIR"]
 PUNC = os.environ.get("ASR_PUNC_DIR") or None
 DEVICE = os.environ.get("ASR_DEVICE", "cuda")
@@ -49,15 +51,31 @@ ORCH_BASE = os.environ.get("ORCH_BASE", "http://orchestrator:8090")
 HTTP_PORT = int(os.environ.get("ASR_HTTP_PORT", "9101"))
 VP_REFRESH_SEC = int(os.environ.get("ASR_VP_REFRESH_SEC", "15"))
 
+def _build_asr(kind: str):
+    """Construct the offline recognizer for `kind` (paraformer|sensevoice).
+
+    Heavy (loads weights onto GPU); called at startup and on hot-switch.
+    """
+    if kind == "sensevoice":
+        if not SENSEVOICE:
+            raise RuntimeError("ASR_SENSEVOICE_DIR not set")
+        return AutoModel(model=SENSEVOICE, device=DEVICE, disable_update=True)
+    return AutoModel(model=PARAFORMER, punc_model=PUNC, device=DEVICE,
+                     disable_update=True)
+
+
 print(f"[asr] loading vad={VAD} (streaming) asr={PARAFORMER} punc={PUNC} "
       f"spk={SPK_DIR} device={DEVICE}", flush=True)
 VAD_MODEL = AutoModel(model=VAD, device=DEVICE, disable_update=True,
                       max_end_silence_time=VAD_MAX_END_SIL)
-ASR_MODEL = AutoModel(model=PARAFORMER, punc_model=PUNC, device=DEVICE,
-                      disable_update=True)
+# Currently loaded recognizer. ASR_KIND is reconciled at runtime against the
+# orchestrator's `asr.model` config (hot-switch, see _refresh_asr_config).
+ASR_KIND = "paraformer"
+ASR_MODEL = _build_asr(ASR_KIND)
 SPK_MODEL = (AutoModel(model=SPK_DIR, device=DEVICE, disable_update=True)
              if SPK_DIR else None)
-print(f"[asr] models ready (speaker={'on' if SPK_MODEL else 'off'})", flush=True)
+print(f"[asr] models ready (asr={ASR_KIND} speaker="
+      f"{'on' if SPK_MODEL else 'off'})", flush=True)
 
 # Enabled voiceprints pulled from the orchestrator: list[(name, np.ndarray)].
 ENABLED_VPS: list = []
@@ -135,17 +153,35 @@ def _refresh_voiceprints():
 
 
 def _refresh_asr_config():
-    """Pull runtime-tunable config (threshold/gap) from the orchestrator."""
-    global SPK_THRESHOLD, SENTENCE_GAP_MS
+    """Pull runtime-tunable config from the orchestrator and reconcile.
+
+    Threshold/gap apply immediately. `model` triggers a hot-switch of the
+    recognizer: we rebuild on a poll thread and atomically swap the globals.
+    An in-progress recognize() snapshots the old model, so live sessions are
+    not interrupted (the new model takes effect from the next sentence).
+    """
+    global SPK_THRESHOLD, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND
     try:
         with urllib.request.urlopen(f"{ORCH_BASE}/api/asr-config", timeout=5) as r:
             d = json.loads(r.read().decode())
-        if "spk_threshold" in d:
-            SPK_THRESHOLD = float(d["spk_threshold"])
-        if "sentence_gap_ms" in d:
-            SENTENCE_GAP_MS = int(d["sentence_gap_ms"])
     except Exception:
-        pass  # keep current values on transient failure
+        return  # keep current values on transient failure
+    if "spk_threshold" in d:
+        SPK_THRESHOLD = float(d["spk_threshold"])
+    if "sentence_gap_ms" in d:
+        SENTENCE_GAP_MS = int(d["sentence_gap_ms"])
+    want = str(d.get("model", "")).strip().lower()
+    if want and want in ("paraformer", "sensevoice") and want != ASR_KIND:
+        print(f"[asr][cfg] switching ASR model {ASR_KIND} -> {want} ...",
+              flush=True)
+        try:
+            m = _build_asr(want)
+        except Exception as e:  # noqa: BLE001
+            print(f"[asr][cfg] switch to {want} FAILED: {e} "
+                  f"(keeping {ASR_KIND})", flush=True)
+            return  # retried on next poll
+        ASR_MODEL, ASR_KIND = m, want
+        print(f"[asr][cfg] ASR model now: {ASR_KIND}", flush=True)
 
 
 async def voiceprint_loop():
@@ -153,7 +189,7 @@ async def voiceprint_loop():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _refresh_voiceprints)
         await loop.run_in_executor(None, _refresh_asr_config)
-        print(f"[asr][cfg] voiceprints={len(ENABLED_VPS)} "
+        print(f"[asr][cfg] model={ASR_KIND} voiceprints={len(ENABLED_VPS)} "
               f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms", flush=True)
         await asyncio.sleep(VP_REFRESH_SEC)
 
@@ -217,7 +253,16 @@ class Session:
 def recognize(seg: np.ndarray) -> str:
     if seg.size == 0:
         return ""
-    res = ASR_MODEL.generate(input=seg, batch_size_s=300)
+    # Snapshot the globals once: a hot-switch may swap them concurrently.
+    model, kind = ASR_MODEL, ASR_KIND
+    if kind == "sensevoice":
+        res = model.generate(input=seg, cache={}, language="auto",
+                             use_itn=True, batch_size_s=300)
+        if not res:
+            return ""
+        # SenseVoice emits rich tags (<|zh|><|EMO|>…); strip to plain text.
+        return rich_transcription_postprocess(res[0].get("text", ""))
+    res = model.generate(input=seg, batch_size_s=300)
     return res[0].get("text", "") if res else ""
 
 
