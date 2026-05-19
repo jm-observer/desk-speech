@@ -103,6 +103,8 @@ def spk_embed(audio: np.ndarray):
         emb = res[0].get("embedding")
     if emb is None:
         return None
+    if hasattr(emb, "detach"):  # torch tensor (CAM++ returns it on cuda)
+        emb = emb.detach().cpu().numpy()
     v = np.asarray(emb, dtype=np.float32).reshape(-1)
     n = np.linalg.norm(v)
     return v / n if n > 0 else None
