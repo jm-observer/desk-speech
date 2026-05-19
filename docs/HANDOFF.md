@@ -52,9 +52,21 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
   [t0,t1] 切片存 WAV(`segment_audio` 表),**asr/协议零改动**。留 1 天;管理台
   「历史」每行 ▶试听 / ⬇下载(可作声纹注册输入)/ 改原文+保存(生成纠错样本)。
   端点 `GET|POST /api/segments/:id/audio|text`;每小时清理过期音频,文本保留。
-  已端到端实测(切片字节数精确、改文持久、回填过期后被清且文本留存)
+  已端到端实测(切片字节数精确、改文持久、回填过期后被清且文本留存)。
+  会话 PCM 缓冲已改 `PcmBuf`(~180s 上限,带 base 偏移),长会话不再无限涨内存
+- 客户端深色重做 + 连接错误可视化(commit `6825614`):主题翻深色对齐管理台;
+  启动错误/异步连接失败明确提示原因 + 重试按钮(不再只一个"异常");**不再
+  预载本地旧库历史**(开机空,本会话经 `segment_updated` 实时填;历史看 :8090);
+  录音按钮收敛(去掉报警式大红圆);去掉 RecordCard 重复状态块
+- SEG_ID 重启撞 id **已修**(commit `5a58436`):启动 `SEG_ID=MAX(id)+1`,
+  重启不再覆盖旧 segment/音频。实测 max=11→新段 id=12,旧行完好
+- LLM 并发(commit `5a58436`):段事件立即转发,optimize/translate 每段独立
+  task 内 `tokio::join!` 并发;段 N+1 不被 N 的 LLM 阻塞;Done 前 drain-await
+  在飞任务(乱序按 ref id 归并安全)
+- 日志降噪(`838e5bc`)、文案/lint 小修(`2144ba8`)
 
-关键提交(`git log --oneline`,新到旧):`f9a6d7d` 音频留存;`acc253b` orch零警告;
+关键提交(`git log --oneline`,新到旧):`2144ba8` 文案/lint;`838e5bc` 日志降噪;
+`5a58436` SEG_ID修复+LLM并发;`6825614` 深色重做+错误UX;`f9a6d7d` 音频留存;`acc253b` orch零警告;
 `b626f2e` speaker入UI;`859036c` spk_embed修复;`dbd74e0` 客户端死码清理;
 `e5861fa` SV去标签;`ddd8e15` LLM 配置入台;`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
 `7009450` 声纹门控;`3c588a1` 持久卷;`11c9b6a` 持久化+Web台;`72f7ca3` E 清理;
@@ -95,11 +107,8 @@ A/B 工具:`server/ab_asr.py`(scp 到 `~/server`→`docker compose cp` 进 asr�
   端到端实测段事件含 `"speaker":"测试说话人"`
 - ~~orchestrator dead_code 警告~~ **已清**(commit `acc253b`):删 `ServerEvent::Status`,
   `Hello` 加 `#[allow(dead_code)]`(协议契约字段);`cargo check` 0 警告
-- ⚠️ **已知问题(早于本次,未修)**:`SEG_ID` 是内存 `AtomicU64`,orchestrator
-  每次重启从 1 重数 → 新段 id 与旧库行 id 撞;`segment_upsert`/`audio_put` 均
-  `ON CONFLICT(id) DO UPDATE`,故重启后新段会**覆盖**旧 segment 行及其音频。
-  影响:跨重启的历史/音频可能被覆盖。修法(单独任务):启动时 `SEG_ID` 从
-  `SELECT MAX(id)+1 FROM segments` 初始化,或改用 DB 自增 id
+- ~~SEG_ID 重启撞 id~~ **已修**(commit `5a58436`):启动时
+  `SEG_ID=MAX(segments.id)+1`,重启不再覆盖旧 segment/音频(实测 §2)
 
 ---
 
