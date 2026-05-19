@@ -36,21 +36,19 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
   orchestrator `/api/speakers/enroll`→asr `/embed`→存库
 - Stage3-A:管理台「配置」页可实时调 `asr.spk_threshold` / `asr.sentence_gap_ms`
   (asr ~15s 轮询 `/api/asr-config` 生效,免重部署)
+- Stage3-B:ASR 模型热切换。配置键 `asr.model`(`paraformer`|`sensevoice`,
+  已 seed,入 `/api/asr-config`)。asr 轮询检测变化→在 worker 线程重建识别器
+  并原子替换全局;`recognize()` 快照 model+kind,进行中会话用旧模型收尾不中断。
+  SenseVoice 输出经 `rich_transcription_postprocess` 去富标签。已实测双向切换
+  (无重启、两侧端到端识别均正常)。配置键直接在「配置」页通用 kv 编辑即可改
 
-关键提交(`git log --oneline`,新到旧):`9c54be1` 实时配置;`5981b9e` 文件上传注册;
+关键提交(`git log --oneline`,新到旧):`18d4db5` ASR 热切换;`9c54be1` 实时配置;`5981b9e` 文件上传注册;
 `7009450` 声纹门控;`3c588a1` 持久卷;`11c9b6a` 持久化+Web台;`72f7ca3` E 清理;
 `6d167ba` D 健壮;P0 系列在更早。
 
 ---
 
 ## 3. 剩余任务(优先级从高到低)
-
-### Stage3-B:ASR 模型热切换(Paraformer ↔ SenseVoice)
-- 加配置键 `asr.model`(`paraformer`|`sensevoice`);`/api/asr-config` 带上它
-- asr 轮询检测变化时**重载** `ASR_MODEL`(`AutoModel` 重新构造并替换全局;
-  SenseVoiceSmall 已在 `~/funasr-prep/models/SenseVoiceSmall`,加 env `ASR_SENSEVOICE_DIR`)
-- 管理台「配置」加下拉(或直接编辑该键即可,已是通用 kv 编辑)
-- 注意:重载需在不打断进行中会话时做(简单起见:下次会话生效,或加锁)
 
 ### Stage3-C:LLM 配置移入管理台
 - orchestrator seed 默认键:`vllm.model`、`vllm.base`、`llm.optimize_prompt`、`llm.translate_prompt`
@@ -130,4 +128,4 @@ npm run dev
 2. 读本文 + `docs/redesign-architecture-overview.md` §9(已定决策)
 3. `ssh -o BatchMode=yes fengqi@192.168.0.68 'cd ~/server && docker compose ps && curl -s localhost:8090/api/stats'`
    确认服务在跑
-4. 从 **Stage3-B** 开始(或按用户当时指示);按"改→本地 cargo check→scp→compose build/up→冒烟→commit"节奏,逐片提交
+4. 从 **Stage3-C** 开始(或按用户当时指示);按"改→本地 cargo check→scp→compose build/up→冒烟→commit"节奏,逐片提交
