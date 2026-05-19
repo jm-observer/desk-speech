@@ -1,49 +1,19 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use anyhow::{anyhow, Result};
 
 use crate::db::repository::CorrectionRule;
 
-fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    match lock.read() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    match lock.write() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct RuleSnapshot {
-    pub rules: Vec<CorrectionRule>,
-}
-
+/// Stateless validator/checksummer for correction rules. The remote client no
+/// longer applies corrections itself (the server owns ASR); this only validates
+/// rule edits and produces a checksum for DB rule-version bookkeeping.
 #[derive(Clone, Default)]
-pub struct CorrectionEngine {
-    snapshot: Arc<RwLock<RuleSnapshot>>,
-}
+pub struct CorrectionEngine;
 
 impl CorrectionEngine {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn apply(&self, text: &str) -> String {
-        let snapshot = read_lock(&self.snapshot);
-
-        let mut output = text.to_string();
-        for rule in snapshot.rules.iter().filter(|rule| rule.enabled) {
-            output = output.replace(&rule.source, &rule.target);
-        }
-        output
+        Self
     }
 
     pub fn reload(&self, mut rules: Vec<CorrectionRule>) -> Result<String> {
@@ -52,12 +22,7 @@ impl CorrectionEngine {
         }
 
         rules.sort_by_key(|rule| (rule.priority, rule.id));
-        let checksum = checksum_rules(&rules);
-        let snapshot = RuleSnapshot { rules };
-        let mut guard = write_lock(&self.snapshot);
-        *guard = snapshot;
-
-        Ok(checksum)
+        Ok(checksum_rules(&rules))
     }
 }
 
@@ -90,18 +55,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_by_priority() {
-        let engine = CorrectionEngine::new();
-        engine
-            .reload(vec![mk_rule(1, "abc", "x", true, 20), mk_rule(2, "ab", "y", true, 10)])
-            .unwrap();
-        assert_eq!(engine.apply("abc"), "yc");
-    }
-
-    #[test]
     fn reject_empty_source() {
         let engine = CorrectionEngine::new();
         let err = engine.reload(vec![mk_rule(1, " ", "x", true, 10)]).unwrap_err();
         assert!(err.to_string().contains("source cannot be empty"));
+    }
+
+    #[test]
+    fn checksum_is_stable_regardless_of_input_order() {
+        let engine = CorrectionEngine::new();
+        let a = engine
+            .reload(vec![mk_rule(1, "abc", "x", true, 20), mk_rule(2, "ab", "y", true, 10)])
+            .unwrap();
+        let b = engine
+            .reload(vec![mk_rule(2, "ab", "y", true, 10), mk_rule(1, "abc", "x", true, 20)])
+            .unwrap();
+        assert_eq!(a, b);
     }
 }

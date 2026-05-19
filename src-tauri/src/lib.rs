@@ -3,7 +3,6 @@ mod commands;
 pub mod config;
 mod correction;
 pub mod db;
-mod db_worker;
 mod llm_client;
 mod llm_settings;
 mod lock_utils;
@@ -13,8 +12,7 @@ mod versioning;
 use audio_buffer::RollingAudioBuffer;
 use serde::Serialize;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -29,49 +27,17 @@ use log::{error, info, warn};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
-/// Max gap (seconds) between two consecutive VAD segments to merge them into one logical sentence.
-/// Tuned for natural speech pauses within a sentence (breathing, hesitation).
-const MERGE_MAX_GAP_SEC: f32 = 5.6;
-/// How long to wait (ms) after the last segment before running quality/finalization checks.
-/// Ensures the speaker has truly stopped before committing the segment.
-pub(crate) const FINALIZE_SILENCE_MS: u64 = 10_000;
-
-pub(crate) fn merge_segment_in_place(segments: &mut [SegmentResult], incoming: &SegmentResult) -> bool {
-    let Some(last) = segments.last_mut() else {
-        return false;
-    };
-
-    let gap_sec = incoming.start - last.end;
-    if !(0.0..=MERGE_MAX_GAP_SEC).contains(&gap_sec) {
-        return false;
-    }
-
-    last.end = incoming.end;
-    last.revision = incoming.revision;
-    last.wall_end = incoming.wall_end.clone();
-    last.text = format!("{} {}", last.text, incoming.text).trim().to_string();
-    // Merged transcript invalidates previous LLM output.
-    last.text_optimized = None;
-    last.text_english = None;
-    last.optimize_status = "pending".to_string();
-    last.translate_status = "blocked".to_string();
-    last.finalization_check_state = "not_ready".to_string();
-    last.update_type = SegmentUpdateType::Replace;
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, RwLock};
 
-    use super::{merge_segment_in_place, remove_segment_from_memory, SegmentResult, SegmentUpdateType};
+    use super::{remove_segment_from_memory, SegmentResult};
     use crate::lock_utils::read_lock;
 
     fn seg(start: f32, end: f32, text: &str, revision: i64) -> SegmentResult {
         SegmentResult {
             segment_id: 1,
             revision,
-            update_type: SegmentUpdateType::Append,
             start,
             end,
             wall_start: "2026-01-01 00:00:00".to_string(),
@@ -89,34 +55,6 @@ mod tests {
             quality_check_status: "pending".to_string(),
             text_raw: text.to_string(),
         }
-    }
-
-    #[test]
-    fn merge_keeps_working_for_long_running_sentence_when_gap_is_small() {
-        let mut segments = vec![seg(0.0, 29.0, "前半段", 1)];
-        let incoming = seg(29.2, 31.0, "后半段", 2);
-        let merged = merge_segment_in_place(&mut segments, &incoming);
-
-        assert!(merged);
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].text, "前半段 后半段");
-        assert_eq!(segments[0].end, 31.0);
-        assert_eq!(segments[0].revision, 2);
-        assert!(segments[0].text_optimized.is_none());
-        assert!(segments[0].text_english.is_none());
-        assert_eq!(segments[0].optimize_status, "pending");
-        assert_eq!(segments[0].translate_status, "blocked");
-    }
-
-    #[test]
-    fn merge_rejects_when_gap_exceeds_threshold() {
-        let mut segments = vec![seg(0.0, 5.0, "第一句", 1)];
-        let incoming = seg(10.7, 11.0, "第二句", 2);
-        let merged = merge_segment_in_place(&mut segments, &incoming);
-
-        assert!(!merged);
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].text, "第一句");
     }
 
     #[test]
@@ -154,17 +92,9 @@ mod tests {
 }
 
 #[derive(Serialize, Clone)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SegmentUpdateType {
-    Append,
-    Replace,
-}
-
-#[derive(Serialize, Clone)]
 pub(crate) struct SegmentResult {
     segment_id: u64,
     revision: i64,
-    update_type: SegmentUpdateType,
     start: f32,
     end: f32,
     wall_start: String,
@@ -210,54 +140,11 @@ pub(crate) fn update_segment_llm_state(
     }
 }
 
-pub(crate) fn set_segment_finalization_state(segments: &Arc<RwLock<Vec<SegmentResult>>>, revision: i64, state: &str) {
-    let mut segs = write_lock(segments);
-    if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
-        seg.finalization_check_state = state.to_string();
-    }
-}
-
-pub(crate) fn set_segment_discard_state(
-    segments: &Arc<RwLock<Vec<SegmentResult>>>,
-    revision: i64,
-    is_discarded: bool,
-    discard_reason: Option<String>,
-    discard_source: Option<String>,
-    discard_confidence: Option<f32>,
-    quality_check_status: &str,
-) {
-    let mut segs = write_lock(segments);
-    if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
-        seg.is_discarded = is_discarded;
-        seg.discard_reason = discard_reason;
-        seg.discard_source = discard_source;
-        seg.discard_confidence = discard_confidence;
-        seg.quality_check_status = quality_check_status.to_string();
-    }
-}
-
 pub(crate) fn remove_segment_from_memory(segments: &Arc<RwLock<Vec<SegmentResult>>>, segment_id: u64) -> bool {
     let mut segs = write_lock(segments);
     let original_len = segs.len();
     segs.retain(|seg| seg.segment_id != segment_id);
     segs.len() != original_len
-}
-
-pub(crate) fn can_start_finalization_check(segments: &Arc<RwLock<Vec<SegmentResult>>>, revision: i64) -> bool {
-    let segs = read_lock(segments);
-    let Some(seg) = segs.iter().rev().find(|seg| seg.revision == revision) else {
-        return false;
-    };
-    if seg.text.trim().is_empty() {
-        return false;
-    }
-    if matches!(seg.optimize_status.as_str(), "pending" | "running") {
-        return false;
-    }
-    if matches!(seg.translate_status.as_str(), "pending" | "running") {
-        return false;
-    }
-    seg.finalization_check_state == "not_ready"
 }
 
 #[derive(Serialize, Clone)]
@@ -275,52 +162,17 @@ pub(crate) struct AppState {
     segments: Arc<RwLock<Vec<SegmentResult>>>,
     recorded_audio: Arc<RwLock<RollingAudioBuffer>>,
     db: Arc<Mutex<Option<db::SpeechDatabase>>>,
-    db_writer: Arc<SyncSender<db_worker::DbEvent>>,
     correction_engine: Arc<CorrectionEngine>,
     start_wall_clock: Arc<RwLock<Option<chrono::DateTime<Local>>>>,
     start_instant: Arc<RwLock<Option<Instant>>>,
     init_status: Arc<AtomicU8>,
     init_error: Arc<RwLock<String>>,
     num_threads: Arc<AtomicU32>,
-    next_realtime_segment_id: Arc<AtomicU64>,
-    next_revision: Arc<AtomicU64>,
     settings: Arc<RwLock<VadSettings>>,
     llm_settings: Arc<RwLock<LlmSettings>>,
     quality_filter_config: Arc<RwLock<QualityFilterConfig>>,
     llm_models_cache: Arc<RwLock<Option<CachedModels>>>,
     selected_device: Arc<RwLock<Option<String>>>,
-    app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
-}
-
-pub(crate) struct RecordingAnchor {
-    base_wall: chrono::DateTime<Local>,
-    audio_offset: u64,
-}
-
-pub(crate) struct RecordingRuntime<'a> {
-    stop_signal: &'a AtomicBool,
-    segments: &'a Arc<RwLock<Vec<SegmentResult>>>,
-    next_realtime_segment_id: Arc<AtomicU64>,
-    next_revision: Arc<AtomicU64>,
-    correction_engine: Arc<CorrectionEngine>,
-    app_state: &'a Arc<AppState>,
-    app_handle: &'a tauri::AppHandle,
-    db_writer: SyncSender<db_worker::DbEvent>,
-    recorded_audio: &'a Arc<RwLock<RollingAudioBuffer>>,
-    anchor: &'a RecordingAnchor,
-    selected_device: Option<&'a str>,
-}
-
-pub(crate) struct RecognizeContext {
-    segments: Arc<RwLock<Vec<SegmentResult>>>,
-    next_realtime_segment_id: Arc<AtomicU64>,
-    next_revision: Arc<AtomicU64>,
-    correction_engine: Arc<CorrectionEngine>,
-    state: Arc<AppState>,
-    app_handle: tauri::AppHandle,
-    db_writer: SyncSender<db_worker::DbEvent>,
-    base_wall: chrono::DateTime<Local>,
-    audio_offset_samples: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -345,11 +197,8 @@ pub(crate) struct RecognizeContext {
 
 fn build_app_state(
     db: db::SpeechDatabase,
-    db_writer: SyncSender<db_worker::DbEvent>,
     llm_settings: LlmSettings,
     quality_filter_config: QualityFilterConfig,
-    next_segment_id: u64,
-    next_revision: u64,
 ) -> AppState {
     AppState {
         recording: Arc::new(AtomicBool::new(false)),
@@ -357,21 +206,17 @@ fn build_app_state(
         segments: Arc::new(RwLock::new(Vec::new())),
         recorded_audio: Arc::new(RwLock::new(RollingAudioBuffer::new())),
         db: Arc::new(Mutex::new(Some(db))),
-        db_writer: Arc::new(db_writer),
         correction_engine: Arc::new(CorrectionEngine::new()),
         start_wall_clock: Arc::new(RwLock::new(None)),
         start_instant: Arc::new(RwLock::new(None)),
         init_status: Arc::new(AtomicU8::new(0)),
         init_error: Arc::new(RwLock::new(String::new())),
         num_threads: Arc::new(AtomicU32::new(0)),
-        next_realtime_segment_id: Arc::new(AtomicU64::new(next_segment_id)),
-        next_revision: Arc::new(AtomicU64::new(next_revision)),
         settings: Arc::new(RwLock::new(VadSettings::default())),
         llm_settings: Arc::new(RwLock::new(llm_settings)),
         quality_filter_config: Arc::new(RwLock::new(quality_filter_config)),
         llm_models_cache: Arc::new(RwLock::new(None)),
         selected_device: Arc::new(RwLock::new(None)),
-        app_handle: Arc::new(RwLock::new(None)),
     }
 }
 
@@ -399,20 +244,6 @@ pub fn run() {
 
     let llm_settings = tauri::async_runtime::block_on(settings::load_llm_settings_from_db(&db));
     let quality_filter_config = tauri::async_runtime::block_on(settings::load_quality_filter_config_from_db(&db));
-    let next_segment_id = match tauri::async_runtime::block_on(db.get_next_segment_id()) {
-        Ok(next_segment_id) => next_segment_id,
-        Err(err) => {
-            error!("[db] query next segment_id failed: {err}");
-            return;
-        }
-    };
-    let next_revision = match tauri::async_runtime::block_on(db.get_next_revision()) {
-        Ok(next_revision) => next_revision,
-        Err(err) => {
-            error!("[db] query next revision failed: {err}");
-            return;
-        }
-    };
     let version_info = match tauri::async_runtime::block_on(versioning::AppVersionInfo::new(&db)) {
         Ok(info) => info,
         Err(err) => {
@@ -439,15 +270,7 @@ pub fn run() {
         version_info.schema_version,
         version_info.first_run_after_upgrade
     );
-    let db_writer = db_worker::start_db_worker(db.clone());
-    let state = build_app_state(
-        db,
-        db_writer,
-        llm_settings,
-        quality_filter_config,
-        next_segment_id,
-        next_revision,
-    );
+    let state = build_app_state(db, llm_settings, quality_filter_config);
     {
         let db_guard = mutex_lock(&state.db);
         if let Some(db) = db_guard.as_ref() {

@@ -23,18 +23,6 @@ impl RollingAudioBuffer {
         self.global_start_sample = 0;
     }
 
-    pub(crate) fn push_samples(&mut self, input: &[f32]) {
-        if input.is_empty() {
-            return;
-        }
-
-        self.samples.extend(input.iter().copied());
-        while self.samples.len() > MAX_AUDIO_SAMPLES {
-            self.samples.pop_front();
-            self.global_start_sample += 1;
-        }
-    }
-
     pub(crate) fn len(&self) -> usize {
         self.samples.len()
     }
@@ -65,26 +53,5 @@ impl RollingAudioBuffer {
         let start = (global_start - window_start) as usize;
         let end = (global_end - window_start) as usize;
         Some(self.samples.range(start..end).copied().collect())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keeps_fixed_window() {
-        let mut buf = RollingAudioBuffer::new();
-        let input = vec![1.0_f32; MAX_AUDIO_SAMPLES + 32];
-        buf.push_samples(&input);
-        assert_eq!(buf.len(), MAX_AUDIO_SAMPLES);
-        assert_eq!(buf.global_start_sample(), 32);
-    }
-
-    #[test]
-    fn range_outside_window_is_none() {
-        let mut buf = RollingAudioBuffer::new();
-        buf.push_samples(&vec![1.0; 100]);
-        assert!(buf.snapshot_range(0, 101).is_none());
     }
 }
