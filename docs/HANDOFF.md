@@ -70,16 +70,23 @@ A/B 工具:`server/ab_asr.py`(scp 到 `~/server`→`docker compose cp` 进 asr�
 - 提示词调优:当前优化/翻译提示词够用,无具体抱怨不盲改;`llm.optimize_prompt`/
   `llm.translate_prompt` 现已是管理台实时可编(Stage3-C),按需现场调即可
 
-### 暂缓:声纹注册端到端实测
-- 浏览器麦克风需 HTTPS/localhost;明文 http LAN 下 `getUserMedia` 不可用
-- 现已提供「上传音频注册」(任意格式,asr ffmpeg 解码)——用音频文件即可测
-- 可选改进:给 orchestrator 加自签 HTTPS 以支持浏览器实时录音注册
+### 声纹注册端到端 —— 已打通(原"暂缓"已解决)
+- 修了潜伏 bug:`spk_embed` 把 CAM++ 的 cuda 张量直接 `np.asarray` 会崩
+  (`can't convert cuda:0 tensor to numpy`)——这正是当初"暂缓"的原因。已加
+  `.detach().cpu()`(commit `859036c`)。实测:上传音频注册→`/embed`→存库→
+  门控对"重说同一人"命中,段带 speaker
+- 浏览器麦克风仍需 HTTPS/localhost;明文 http LAN 用「上传音频注册」即可(已验证)
 - 阈值 `ASR_SPK_THRESHOLD` 默认 0.35(CAM++ 余弦),经管理台配置页调
+- 可选改进(未做):给 orchestrator 加自签 HTTPS 以支持浏览器实时录音注册
 
-### 杂项(可选)
-- 客户端 ~27 条 dead-code 警告(E 删 legacy 残留),可清
-- `protocol-draft` 预留的 `speaker` 字段透传到桌面 UI 显示说话人(现仅入库/历史可见)
-- `protocol.rs` 的 `Hello` 未读字段告警
+### 杂项
+- ~~客户端 dead-code 警告~~ **已清**(commit `dbd74e0`):删 db_worker/判定子系统/
+  CorrectionEngine.apply/push_samples/lib.rs 死结构等;`cargo check` 24→0 警告,
+  `cargo test` 70 通过(删了只测已删功能的 legacy 测试文件)
+- ~~`speaker` 字段透传桌面 UI~~ **已做**(commit `b626f2e`):协议加可选 speaker→
+  orchestrator 填→remote.rs 透传→store→SegmentCard 显示说话人 chip(新增 user 图标);
+  端到端实测段事件含 `"speaker":"测试说话人"`
+- 剩:`protocol.rs` 的 `Hello` 未读字段告警(orchestrator 仍有 2 条无害 dead_code 警告)
 
 ---
 
