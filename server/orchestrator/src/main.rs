@@ -12,7 +12,8 @@ use axum::{
     body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path, Query, State},
-    response::{Html, Response},
+    http::{header, StatusCode},
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -83,6 +84,19 @@ async fn main() {
             db.config_set(k, v);
         }
     }
+    // 每小时清理过期(>1天)的逐段音频 blob;文本记录保留。启动即跑一次。
+    {
+        let dbp = db.clone();
+        tokio::spawn(async move {
+            loop {
+                let n = dbp.audio_purge_expired();
+                if n > 0 {
+                    tracing::info!("[retention] purged {n} audio blob(s) older than 1 day");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+    }
     let ctx = AppCtx { cfg: c.clone(), db };
 
     let app = Router::new()
@@ -97,6 +111,8 @@ async fn main() {
         .route("/api/speakers/:id", delete(api_speaker_delete))
         .route("/api/speakers/:id/rename", post(api_speaker_rename))
         .route("/api/speakers/:id/enabled", post(api_speaker_enabled))
+        .route("/api/segments/:id/audio", get(api_segment_audio))
+        .route("/api/segments/:id/text", post(api_segment_set_text))
         .route("/api/config", get(api_config_get).post(api_config_set))
         .with_state(ctx);
 
@@ -140,6 +156,11 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
     let (cli_tx, mut cli_rx) = sock.split();
     let (mut asr_tx, asr_rx) = asr.split();
 
+    // 本会话上行 PCM 的滚动缓冲(16k mono s16le)。asr_reader 收到段时按
+    // t_start/t_end 切片存为 WAV(留 1 天,供试听/下载/声纹/纠错样本)。
+    // 与 asr 同一字节流、同一时钟;reset 时一起清零保持对齐。
+    let pcm_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+
     // asr_reader:全程并发读 ASR(流式 VAD 会在过程中持续吐 segment),
     // 转发并按需调 vLLM,收到 done 则发 Done 结束。
     let reader = tokio::spawn(asr_reader(
@@ -149,18 +170,25 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
         c.clone(),
         session_id.clone(),
         db.clone(),
+        pcm_buf.clone(),
     ));
 
     // 主循环:客户端音频/控制 -> ASR
     loop {
         match cli_rx.next().await {
             Some(Ok(Message::Binary(pcm))) => {
+                if let Ok(mut b) = pcm_buf.lock() {
+                    b.extend_from_slice(&pcm);
+                }
                 if asr_tx.send(TMessage::Binary(pcm)).await.is_err() {
                     break;
                 }
             }
             Some(Ok(Message::Text(t))) => match serde_json::from_str::<ClientControl>(&t) {
                 Ok(ClientControl::Reset) => {
+                    if let Ok(mut b) = pcm_buf.lock() {
+                        b.clear();
+                    }
                     let _ = asr_tx.send(TMessage::text(r#"{"type":"reset"}"#)).await;
                 }
                 Ok(ClientControl::Stop) => {
@@ -194,6 +222,7 @@ async fn asr_reader(
     c: Cfg,
     session_id: String,
     db: Arc<Db>,
+    pcm_buf: Arc<std::sync::Mutex<Vec<u8>>>,
 ) {
     while let Some(Ok(msg)) = asr_rx.next().await {
         let TMessage::Text(t) = msg else { continue };
@@ -221,6 +250,21 @@ async fn asr_reader(
                         .json(),
                     ))
                     .await;
+
+                // 逐段音频留存(尽力):按 [t0,t1] 从会话 PCM 缓冲切片存 WAV。
+                // 16k mono s16le => 32000 B/s;字节对齐到采样边界。
+                {
+                    const BPS: f64 = 16000.0 * 2.0;
+                    let a = (((t0 * BPS) as usize) / 2) * 2;
+                    let b = ((t1 * BPS).ceil() as usize).div_ceil(2) * 2;
+                    let wav = pcm_buf.lock().ok().and_then(|buf| {
+                        let end = b.min(buf.len());
+                        (a < end).then(|| pcm16_to_wav(&buf[a..end]))
+                    });
+                    if let Some(w) = wav {
+                        db.audio_put(id as i64, &w);
+                    }
+                }
 
                 // TODO 并发化:P0 顺序调用(会延后后续段转发);先求对
                 if hello.want_optimize || hello.want_translate {
@@ -384,6 +428,37 @@ async fn api_speaker_enabled(
     ctx.db.speaker_set_enabled(id, e);
     Json(json!({"ok": true}))
 }
+
+/// Download/play a segment's retained audio (WAV). 404 once purged (>1 day).
+async fn api_segment_audio(State(ctx): State<AppCtx>, Path(id): Path<i64>) -> Response {
+    match ctx.db.audio_get(id) {
+        Some(wav) => (
+            [
+                (header::CONTENT_TYPE, "audio/wav".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"seg-{id}.wav\""),
+                ),
+            ],
+            wav,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "audio expired or not found").into_response(),
+    }
+}
+
+/// Correct a segment's text (builds a corrected (audio,text) sample).
+async fn api_segment_set_text(
+    State(ctx): State<AppCtx>,
+    Path(id): Path<i64>,
+    Json(b): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    match b.get("text").and_then(|x| x.as_str()) {
+        Some(t) => Json(json!({"ok": ctx.db.segment_set_text(id, t)})),
+        None => Json(json!({"ok": false, "error": "缺少 text"})),
+    }
+}
+
 async fn api_config_get(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
     let m: serde_json::Map<String, serde_json::Value> = ctx
         .db
@@ -442,8 +517,14 @@ async function render(){
   <div>累计录音<b>${(s.total_recording_sec/60).toFixed(1)}分</b></div>
   <div>今日录音<b>${(s.today_recording_sec/60).toFixed(1)}分</b></div></div></div>`}
  else if(tab=='hi'){const h=await j('/api/history');
-  V.innerHTML='<div class=card><table><tr><th>时间</th><th>原文</th><th>优化</th><th>英文</th><th>说话人</th></tr>'+
-  h.map(r=>`<tr><td>${r.ts}</td><td>${esc(r.text)}</td><td>${esc(r.optimized||'')}</td><td>${esc(r.english||'')}</td><td>${esc(r.speaker||'')}</td></tr>`).join('')+'</table></div>'}
+  V.innerHTML='<div class=card><audio id=hap controls style="width:100%;margin-bottom:10px;display:none"></audio>'+
+  '<p class=note>音频保留1天:▶试听、⬇下载(可作声纹注册输入),改「原文」后点保存生成纠错样本(供后续提取/优化参考)。</p>'+
+  '<table><tr><th>时间</th><th>原文(可改)</th><th>优化</th><th>英文</th><th>说话人</th><th>音频</th></tr>'+
+  h.map(r=>`<tr><td>${r.ts}</td>`+
+   `<td><input id="tx_${r.id}" value="${escA(r.text)}" style="width:97%"></td>`+
+   `<td>${esc(r.optimized||'')}</td><td>${esc(r.english||'')}</td><td>${esc(r.speaker||'')}</td>`+
+   `<td style="white-space:nowrap">${r.has_audio?`<button class="s ren" onclick="playSeg(${r.id})">▶</button> <a class="s ren" style="text-decoration:none" href="/api/segments/${r.id}/audio">⬇</a> `:'<span class=note>已过期 </span>'}<button class="s ren" onclick="saveSeg(${r.id})">保存</button></td>`+
+   `</tr>`).join('')+'</table></div>'}
  else if(tab=='sp'){const sp=await j('/api/speakers');
   V.innerHTML='<div class=card><p class=note>注册:点"录制注册"→对麦克风清晰说约5秒。仅"启用"的声纹参与门控:命中才识别,其余丢弃。</p>'+
   '<p>注册名:<input id=enm placeholder="如:张三"> '+
@@ -459,6 +540,9 @@ async function render(){
   (ks.length?'':'<tr><td class=note>暂无配置项</td></tr>')+'</table></div>'}
 }
 function esc(s){return (s+'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function escA(s){return esc(s).replace(/"/g,'&quot;')}
+async function saveSeg(id){const t=document.getElementById('tx_'+id).value;const d=await j('/api/segments/'+id+'/text','POST',{text:t});alert(d.ok?'已保存':'保存失败:'+(d.error||'?'))}
+function playSeg(id){const a=document.getElementById('hap');a.style.display='block';a.src='/api/segments/'+id+'/audio';a.play()}
 async function dl(id){if(confirm('删除该声纹?')){await j('/api/speakers/'+id,'DELETE');render()}}
 async function rn(id){const n=prompt('新名称');if(n){await j('/api/speakers/'+id+'/rename','POST',{name:n});render()}}
 async function en(id,e){await j('/api/speakers/'+id+'/enabled','POST',{enabled:e})}
@@ -489,6 +573,29 @@ async function enroll(){
 }
 render();
 </script></body></html>"#;
+
+/// Wrap 16 kHz mono s16le PCM in a canonical 44-byte WAV container so the
+/// stored blob is directly playable in a browser and usable as enroll input.
+fn pcm16_to_wav(pcm: &[u8]) -> Vec<u8> {
+    const SR: u32 = 16000;
+    let data_len = pcm.len() as u32;
+    let mut w = Vec::with_capacity(44 + pcm.len());
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + data_len).to_le_bytes());
+    w.extend_from_slice(b"WAVE");
+    w.extend_from_slice(b"fmt ");
+    w.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    w.extend_from_slice(&1u16.to_le_bytes()); // format = PCM
+    w.extend_from_slice(&1u16.to_le_bytes()); // channels = mono
+    w.extend_from_slice(&SR.to_le_bytes());
+    w.extend_from_slice(&(SR * 2).to_le_bytes()); // byte rate = sr*ch*bytes
+    w.extend_from_slice(&2u16.to_le_bytes()); // block align = ch*bytes
+    w.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&data_len.to_le_bytes());
+    w.extend_from_slice(pcm);
+    w
+}
 
 /// OpenAI 兼容 chat completions(指向主机上的 vLLM)。
 /// base/model 由调用方从 DB config 解析(回退 env),提示词同理。

@@ -30,6 +30,8 @@ pub struct SegmentRow {
     pub optimized: Option<String>,
     pub english: Option<String>,
     pub speaker: Option<String>,
+    /// Whether per-segment audio is still retained (purged after 1 day).
+    pub has_audio: bool,
 }
 
 #[derive(Serialize, Default)]
@@ -72,6 +74,11 @@ impl Db {
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS segment_audio (
+                segment_id INTEGER PRIMARY KEY,
+                wav BLOB NOT NULL,
+                created_at TEXT NOT NULL
             );
             "#,
         )?;
@@ -122,6 +129,45 @@ impl Db {
         );
     }
 
+    /// User correction of the recognized text (builds a corrected sample).
+    pub fn segment_set_text(&self, sid: i64, text: &str) -> bool {
+        self.lock()
+            .execute("UPDATE segments SET text=?2 WHERE id=?1", (sid, text))
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    // ── per-segment audio (retained 1 day, for re-listen / download /
+    //    voiceprint enrollment input / corrected-sample building) ─────────
+    pub fn audio_put(&self, sid: i64, wav: &[u8]) {
+        let _ = self.lock().execute(
+            "INSERT INTO segment_audio(segment_id,wav,created_at)
+             VALUES(?1,?2,datetime('now','localtime'))
+             ON CONFLICT(segment_id) DO UPDATE SET wav=?2,
+               created_at=datetime('now','localtime')",
+            rusqlite::params![sid, wav],
+        );
+    }
+    pub fn audio_get(&self, sid: i64) -> Option<Vec<u8>> {
+        self.lock()
+            .query_row(
+                "SELECT wav FROM segment_audio WHERE segment_id=?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+    /// Purge audio blobs older than one day. Returns number removed.
+    pub fn audio_purge_expired(&self) -> usize {
+        self.lock()
+            .execute(
+                "DELETE FROM segment_audio \
+                 WHERE created_at < datetime('now','localtime','-1 day')",
+                [],
+            )
+            .unwrap_or(0)
+    }
+
     pub fn segment_set_optimized(&self, sid: i64, opt: &str) {
         let _ = self
             .lock()
@@ -136,8 +182,9 @@ impl Db {
     pub fn segments_recent(&self, limit: i64) -> Vec<SegmentRow> {
         let c = self.lock();
         let mut stmt = match c.prepare(
-            "SELECT id,session_id,ts,text,optimized,english,speaker
-             FROM segments ORDER BY id DESC LIMIT ?1",
+            "SELECT s.id,s.session_id,s.ts,s.text,s.optimized,s.english,s.speaker,
+                    EXISTS(SELECT 1 FROM segment_audio a WHERE a.segment_id=s.id)
+             FROM segments s ORDER BY s.id DESC LIMIT ?1",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -151,6 +198,7 @@ impl Db {
                 optimized: r.get(4)?,
                 english: r.get(5)?,
                 speaker: r.get(6)?,
+                has_audio: r.get::<_, i64>(7)? != 0,
             })
         });
         rows.map(|it| it.filter_map(Result::ok).collect()).unwrap_or_default()
