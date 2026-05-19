@@ -179,6 +179,15 @@ impl Db {
             .execute("UPDATE segments SET english=?2 WHERE id=?1", (sid, eng));
     }
 
+    /// Largest segment id on disk (0 if none). Used to seed the in-memory
+    /// SEG_ID counter on startup so a restart never reuses an id and
+    /// overwrites an existing segment row / its retained audio.
+    pub fn max_segment_id(&self) -> i64 {
+        self.lock()
+            .query_row("SELECT COALESCE(MAX(id),0) FROM segments", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
     pub fn segments_recent(&self, limit: i64) -> Vec<SegmentRow> {
         let c = self.lock();
         let mut stmt = match c.prepare(

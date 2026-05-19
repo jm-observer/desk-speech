@@ -69,6 +69,9 @@ async fn main() {
     let db = Arc::new(
         Db::open(&format!("{data_dir}/app.db")).expect("open app.db"),
     );
+    // Resume the segment-id counter past anything on disk so a restart
+    // never reuses an id and overwrites an existing row / its audio.
+    SEG_ID.store(db.max_segment_id() as u64 + 1, Ordering::Relaxed);
     // Seed runtime-tunable defaults (editable in the console "配置" tab).
     for (k, v) in [
         ("asr.spk_threshold", "0.35"),
@@ -152,8 +155,10 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
         Err(e) => return send_fatal(&mut sock, "asr_unreachable", &e.to_string()).await,
     };
 
-    // 拆分:客户端写端交给 asr_reader(唯一写者),asr 读端并发转发。
+    // 拆分:客户端写端交给 asr_reader。LLM(优化/翻译)按段并发后,会有多个
+    // 任务并发写这个 sink,故包一层 async Mutex。
     let (cli_tx, mut cli_rx) = sock.split();
+    let cli_tx = Arc::new(tokio::sync::Mutex::new(cli_tx));
     let (mut asr_tx, asr_rx) = asr.split();
 
     // 本会话上行 PCM 的滚动缓冲(16k mono s16le)。asr_reader 收到段时按
@@ -217,13 +222,18 @@ async fn asr_reader(
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     >,
-    mut cli_tx: futures_util::stream::SplitSink<WebSocket, Message>,
+    cli_tx: Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>,
     hello: Hello,
     c: Cfg,
     session_id: String,
     db: Arc<Db>,
     pcm_buf: Arc<std::sync::Mutex<Vec<u8>>>,
 ) {
+    type CliTx = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
+    async fn send(tx: &CliTx, json: String) {
+        let _ = tx.lock().await.send(Message::Text(json)).await;
+    }
+    let mut llm_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     while let Some(Ok(msg)) = asr_rx.next().await {
         let TMessage::Text(t) = msg else { continue };
         let v: serde_json::Value = match serde_json::from_str(&t) {
@@ -238,18 +248,19 @@ async fn asr_reader(
                 let t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let speaker = v.get("speaker").and_then(|x| x.as_str());
                 db.segment_upsert(id as i64, &session_id, &text, None, None, t0, t1, speaker);
-                let _ = cli_tx
-                    .send(Message::Text(
-                        ServerEvent::Segment {
-                            id,
-                            text: text.clone(),
-                            t_start: Some(t0 as f32),
-                            t_end: Some(t1 as f32),
-                            speaker: speaker.map(str::to_string),
-                        }
-                        .json(),
-                    ))
-                    .await;
+                // forward the segment immediately — never blocked by LLM
+                send(
+                    &cli_tx,
+                    ServerEvent::Segment {
+                        id,
+                        text: text.clone(),
+                        t_start: Some(t0 as f32),
+                        t_end: Some(t1 as f32),
+                        speaker: speaker.map(str::to_string),
+                    }
+                    .json(),
+                )
+                .await;
 
                 // 逐段音频留存(尽力):按 [t0,t1] 从会话 PCM 缓冲切片存 WAV。
                 // 16k mono s16le => 32000 B/s;字节对齐到采样边界。
@@ -266,7 +277,9 @@ async fn asr_reader(
                     }
                 }
 
-                // TODO 并发化:P0 顺序调用(会延后后续段转发);先求对
+                // optimize + translate run concurrently in a detached task so
+                // segment N+1 is forwarded without waiting on N's LLM. Results
+                // are keyed by `ref` id, so out-of-order arrival is fine.
                 if hello.want_optimize || hello.want_translate {
                     let model = db
                         .config_get("vllm.model")
@@ -274,51 +287,64 @@ async fn asr_reader(
                     let base = db
                         .config_get("vllm.base")
                         .unwrap_or_else(|| c.vllm_base.clone());
-                    if hello.want_optimize {
-                        let sys = db
-                            .config_get("llm.optimize_prompt")
-                            .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
-                        if let Ok(opt) = llm(&base, &model, &sys, &text).await {
-                            db.segment_set_optimized(id as i64, &opt);
-                            let _ = cli_tx
-                                .send(Message::Text(ServerEvent::Optimized { r#ref: id, text: opt }.json()))
-                                .await;
+                    let opt_sys = hello.want_optimize.then(|| {
+                        db.config_get("llm.optimize_prompt")
+                            .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into())
+                    });
+                    let tr_sys = hello.want_translate.then(|| {
+                        db.config_get("llm.translate_prompt")
+                            .unwrap_or_else(|| DEFAULT_TRANSLATE_PROMPT.into())
+                    });
+                    let db2 = db.clone();
+                    let tx2 = cli_tx.clone();
+                    llm_tasks.push(tokio::spawn(async move {
+                        let opt_fut = async {
+                            match &opt_sys {
+                                Some(s) => llm(&base, &model, s, &text).await.ok(),
+                                None => None,
+                            }
+                        };
+                        let tr_fut = async {
+                            match &tr_sys {
+                                Some(s) => llm(&base, &model, s, &text).await.ok(),
+                                None => None,
+                            }
+                        };
+                        let (opt, en) = tokio::join!(opt_fut, tr_fut);
+                        if let Some(opt) = opt {
+                            db2.segment_set_optimized(id as i64, &opt);
+                            send(&tx2, ServerEvent::Optimized { r#ref: id, text: opt }.json()).await;
                         }
-                    }
-                    if hello.want_translate {
-                        let sys = db
-                            .config_get("llm.translate_prompt")
-                            .unwrap_or_else(|| DEFAULT_TRANSLATE_PROMPT.into());
-                        if let Ok(en) = llm(&base, &model, &sys, &text).await {
-                            db.segment_set_english(id as i64, &en);
-                            let _ = cli_tx
-                                .send(Message::Text(ServerEvent::Translated { r#ref: id, text: en }.json()))
-                                .await;
+                        if let Some(en) = en {
+                            db2.segment_set_english(id as i64, &en);
+                            send(&tx2, ServerEvent::Translated { r#ref: id, text: en }.json()).await;
                         }
-                    }
+                    }));
                 }
             }
             Some("error") => {
                 let m = v.get("message").and_then(|x| x.as_str()).unwrap_or("asr error");
-                let _ = cli_tx
-                    .send(Message::Text(
-                        ServerEvent::Error {
-                            code: "asr".into(),
-                            message: m.into(),
-                            fatal: false,
-                        }
+                send(
+                    &cli_tx,
+                    ServerEvent::Error { code: "asr".into(), message: m.into(), fatal: false }
                         .json(),
-                    ))
-                    .await;
+                )
+                .await;
             }
             Some("done") => {
-                let _ = cli_tx
-                    .send(Message::Text(ServerEvent::Done { session_id }.json()))
-                    .await;
+                // drain in-flight LLM tasks so optimized/translated all land
+                // before Done.
+                for h in llm_tasks.drain(..) {
+                    let _ = h.await;
+                }
+                send(&cli_tx, ServerEvent::Done { session_id }.json()).await;
                 return;
             }
             _ => {}
         }
+    }
+    for h in llm_tasks.drain(..) {
+        let _ = h.await;
     }
 }
 
