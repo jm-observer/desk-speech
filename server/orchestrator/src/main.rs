@@ -164,7 +164,7 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
     // 本会话上行 PCM 的滚动缓冲(16k mono s16le)。asr_reader 收到段时按
     // t_start/t_end 切片存为 WAV(留 1 天,供试听/下载/声纹/纠错样本)。
     // 与 asr 同一字节流、同一时钟;reset 时一起清零保持对齐。
-    let pcm_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let pcm_buf = std::sync::Arc::new(std::sync::Mutex::new(PcmBuf::new()));
 
     // asr_reader:全程并发读 ASR(流式 VAD 会在过程中持续吐 segment),
     // 转发并按需调 vLLM,收到 done 则发 Done 结束。
@@ -183,7 +183,7 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
         match cli_rx.next().await {
             Some(Ok(Message::Binary(pcm))) => {
                 if let Ok(mut b) = pcm_buf.lock() {
-                    b.extend_from_slice(&pcm);
+                    b.push(&pcm);
                 }
                 if asr_tx.send(TMessage::Binary(pcm)).await.is_err() {
                     break;
@@ -227,7 +227,7 @@ async fn asr_reader(
     c: Cfg,
     session_id: String,
     db: Arc<Db>,
-    pcm_buf: Arc<std::sync::Mutex<Vec<u8>>>,
+    pcm_buf: Arc<std::sync::Mutex<PcmBuf>>,
 ) {
     type CliTx = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
     async fn send(tx: &CliTx, json: String) {
@@ -268,10 +268,7 @@ async fn asr_reader(
                     const BPS: f64 = 16000.0 * 2.0;
                     let a = (((t0 * BPS) as usize) / 2) * 2;
                     let b = ((t1 * BPS).ceil() as usize).div_ceil(2) * 2;
-                    let wav = pcm_buf.lock().ok().and_then(|buf| {
-                        let end = b.min(buf.len());
-                        (a < end).then(|| pcm16_to_wav(&buf[a..end]))
-                    });
+                    let wav = pcm_buf.lock().ok().and_then(|buf| buf.slice_wav(a, b));
                     if let Some(w) = wav {
                         db.audio_put(id as i64, &w);
                     }
@@ -599,6 +596,48 @@ async function enroll(){
 }
 render();
 </script></body></html>"#;
+
+/// Bounded session PCM buffer (16k mono s16le). Keeps only the most recent
+/// ~3 min so a long session can't grow memory without limit; `base` is the
+/// absolute byte offset of `data[0]`. Per-sentence segments finalize shortly
+/// after speech, so their [t0,t1] window is always within this cap.
+struct PcmBuf {
+    data: Vec<u8>,
+    base: usize,
+}
+
+impl PcmBuf {
+    const CAP: usize = 180 * 16000 * 2; // ~180s of 16k mono s16le
+
+    fn new() -> Self {
+        Self { data: Vec::new(), base: 0 }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+        if self.data.len() > Self::CAP {
+            let drop = self.data.len() - Self::CAP;
+            self.data.drain(..drop);
+            self.base += drop;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.data.clear();
+        self.base = 0;
+    }
+
+    /// WAV for the absolute byte range [a, b); None if it was already
+    /// dropped (segment older than the retained window — best-effort).
+    fn slice_wav(&self, a: usize, b: usize) -> Option<Vec<u8>> {
+        if a < self.base {
+            return None;
+        }
+        let la = a - self.base;
+        let lb = (b - self.base).min(self.data.len());
+        (la < lb).then(|| pcm16_to_wav(&self.data[la..lb]))
+    }
+}
 
 /// Wrap 16 kHz mono s16le PCM in a canonical 44-byte WAV container so the
 /// stored blob is directly playable in a browser and usable as enroll input.
