@@ -424,7 +424,7 @@ function App() {
     await TauriAPI.copyToClipboard(text);
   };
 
-  const handleSegmentCopy = (text: string, _source: 'english' | 'optimized' | 'raw') => {
+  const handleSegmentCopy = (text: string) => {
     handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
   };
 
@@ -620,8 +620,8 @@ function App() {
                   key={getSegmentKey(seg)}
                   segment={seg}
                   showEnglish={store.showEnglish}
-                  onCopyChinese={(text) => handleSegmentCopy(text, 'optimized')}
-                  onCopyEnglish={(text) => handleSegmentCopy(text, 'english')}
+                  onCopyChinese={(text) => handleSegmentCopy(text)}
+                  onCopyEnglish={(text) => handleSegmentCopy(text)}
                   onManualOptimizeTranslate={handleManualOptimizeTranslate}
                   onDelete={handleDeleteSegment}
                 />

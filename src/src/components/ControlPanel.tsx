@@ -55,7 +55,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
           </div>
           <div className="flex flex-col">
             <h1 className="text-[14.5px] font-semibold text-[var(--ink)] leading-tight">StreamSpeech</h1>
-            <span className="text-[11px] text-[var(--ink-4)]">离线语音识别 · v1.13.0</span>
+            <span className="text-[11px] text-[var(--ink-4)]">远程语音识别 · v1.13.0</span>
           </div>
         </div>
         <Button variant="ghost" size="icon" onClick={onToggleMode} className="rounded-full w-7 h-7">
