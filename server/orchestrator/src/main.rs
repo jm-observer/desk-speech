@@ -52,6 +52,11 @@ fn cfg() -> Cfg {
 
 static SEG_ID: AtomicU64 = AtomicU64::new(1);
 
+// Defaults for the LLM keys seeded into config (editable in the console
+// "配置" tab). Also the fallback if a key is somehow missing from the DB.
+const DEFAULT_OPTIMIZE_PROMPT: &str = "你是中文口语转写规整器。把用户这句口语整理成通顺、简洁的书面中文。严格要求:只输出整理后的一句话本身;不要解释、不要选项、不要列表、不要markdown、不要追问、不要任何前后缀;若已通顺则原样返回。";
+const DEFAULT_TRANSLATE_PROMPT: &str = "Translate the user's sentence into natural English. Output ONLY the translation itself — no explanations, no options, no quotes, no markdown.";
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -68,6 +73,11 @@ async fn main() {
         ("asr.spk_threshold", "0.35"),
         ("asr.sentence_gap_ms", "1500"),
         ("asr.model", "paraformer"), // paraformer | sensevoice (hot-switch)
+        // LLM config — defaults from env/const, then live-editable in console.
+        ("vllm.model", c.vllm_model.as_str()),
+        ("vllm.base", c.vllm_base.as_str()),
+        ("llm.optimize_prompt", DEFAULT_OPTIMIZE_PROMPT),
+        ("llm.translate_prompt", DEFAULT_TRANSLATE_PROMPT),
     ] {
         if db.config_get(k).is_none() {
             db.config_set(k, v);
@@ -212,35 +222,34 @@ async fn asr_reader(
                     .await;
 
                 // TODO 并发化:P0 顺序调用(会延后后续段转发);先求对
-                if hello.want_optimize {
-                    if let Ok(opt) = llm(
-                        &c,
-                        "你是中文口语转写规整器。把用户这句口语整理成通顺、简洁的书面中文。\
-                         严格要求:只输出整理后的一句话本身;不要解释、不要选项、不要列表、\
-                         不要markdown、不要追问、不要任何前后缀;若已通顺则原样返回。",
-                        &text,
-                    )
-                    .await
-                    {
-                        db.segment_set_optimized(id as i64, &opt);
-                        let _ = cli_tx
-                            .send(Message::Text(ServerEvent::Optimized { r#ref: id, text: opt }.json()))
-                            .await;
+                if hello.want_optimize || hello.want_translate {
+                    let model = db
+                        .config_get("vllm.model")
+                        .unwrap_or_else(|| c.vllm_model.clone());
+                    let base = db
+                        .config_get("vllm.base")
+                        .unwrap_or_else(|| c.vllm_base.clone());
+                    if hello.want_optimize {
+                        let sys = db
+                            .config_get("llm.optimize_prompt")
+                            .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
+                        if let Ok(opt) = llm(&base, &model, &sys, &text).await {
+                            db.segment_set_optimized(id as i64, &opt);
+                            let _ = cli_tx
+                                .send(Message::Text(ServerEvent::Optimized { r#ref: id, text: opt }.json()))
+                                .await;
+                        }
                     }
-                }
-                if hello.want_translate {
-                    if let Ok(en) = llm(
-                        &c,
-                        "Translate the user's sentence into natural English. Output ONLY the \
-                         translation itself — no explanations, no options, no quotes, no markdown.",
-                        &text,
-                    )
-                    .await
-                    {
-                        db.segment_set_english(id as i64, &en);
-                        let _ = cli_tx
-                            .send(Message::Text(ServerEvent::Translated { r#ref: id, text: en }.json()))
-                            .await;
+                    if hello.want_translate {
+                        let sys = db
+                            .config_get("llm.translate_prompt")
+                            .unwrap_or_else(|| DEFAULT_TRANSLATE_PROMPT.into());
+                        if let Ok(en) = llm(&base, &model, &sys, &text).await {
+                            db.segment_set_english(id as i64, &en);
+                            let _ = cli_tx
+                                .send(Message::Text(ServerEvent::Translated { r#ref: id, text: en }.json()))
+                                .await;
+                        }
                     }
                 }
             }
@@ -481,9 +490,10 @@ render();
 </script></body></html>"#;
 
 /// OpenAI 兼容 chat completions(指向主机上的 vLLM)。
-async fn llm(c: &Cfg, sys: &str, user: &str) -> anyhow::Result<String> {
+/// base/model 由调用方从 DB config 解析(回退 env),提示词同理。
+async fn llm(base: &str, model: &str, sys: &str, user: &str) -> anyhow::Result<String> {
     let body = serde_json::json!({
-        "model": c.vllm_model,
+        "model": model,
         "messages": [
             {"role": "system", "content": sys},
             {"role": "user", "content": user}
@@ -493,7 +503,7 @@ async fn llm(c: &Cfg, sys: &str, user: &str) -> anyhow::Result<String> {
         "stream": false
     });
     let resp = reqwest::Client::new()
-        .post(format!("{}/chat/completions", c.vllm_base))
+        .post(format!("{}/chat/completions", base))
         .json(&body)
         .send()
         .await?
