@@ -216,6 +216,7 @@ async fn asr_reader(
                             text: text.clone(),
                             t_start: Some(t0 as f32),
                             t_end: Some(t1 as f32),
+                            speaker: speaker.map(str::to_string),
                         }
                         .json(),
                     ))

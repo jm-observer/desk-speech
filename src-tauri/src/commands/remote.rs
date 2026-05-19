@@ -89,6 +89,7 @@ struct SegState {
     t0: f64,
     t1: f64,
     wall: String,
+    speaker: Option<String>,
 }
 
 /// Emit the *full current* segment state as `segment_updated` (DbSegmentDto
@@ -116,6 +117,7 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
             "translate_status": translate_status,
             "text_optimized": s.opt,
             "text_english": s.eng,
+            "speaker": s.speaker,
             "created_at": s.wall,
         }),
     );
@@ -315,6 +317,9 @@ async fn run_one_connection(
                     st.raw = text.to_string();
                     st.t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(st.t0);
                     st.t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(st.t1);
+                    if let Some(sp) = v.get("speaker").and_then(|x| x.as_str()) {
+                        st.speaker = Some(sp.to_string());
+                    }
                     if st.wall.is_empty() {
                         st.wall = now_rfc3339();
                     }

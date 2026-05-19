@@ -101,6 +101,12 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
             {stripYear(segment.wall_start)} → {stripYear(segment.wall_end)}
           </span>
           <span className="text-[11px] text-[var(--ink-4)]">{duration.toFixed(1)}s</span>
+          {segment.speaker && (
+            <span className="px-2 py-0.5 rounded-md bg-[var(--accent-soft,var(--bg-soft))] text-[11px] text-[var(--accent,var(--ink-2))] inline-flex items-center gap-1">
+              <Icon name="user" size={11} />
+              {segment.speaker}
+            </span>
+          )}
 
           <div className="flex-1" />
 

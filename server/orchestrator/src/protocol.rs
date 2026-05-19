@@ -27,7 +27,14 @@ pub enum ClientControl {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
     Ready { session_id: String },
-    Segment { id: u64, text: String, t_start: Option<f32>, t_end: Option<f32> },
+    Segment {
+        id: u64,
+        text: String,
+        t_start: Option<f32>,
+        t_end: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
+    },
     Optimized { r#ref: u64, text: String },
     Translated { r#ref: u64, text: String },
     Status { state: String },

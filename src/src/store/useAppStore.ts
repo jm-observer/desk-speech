@@ -54,6 +54,7 @@ export const useAppStore = () => {
     text_raw: typeof row.text_raw === 'string' ? row.text_raw : '',
     text_optimized: typeof row.text_optimized === 'string' ? row.text_optimized : undefined,
     text_english: typeof row.text_english === 'string' ? row.text_english : undefined,
+    speaker: typeof row.speaker === 'string' && row.speaker.length > 0 ? row.speaker : undefined,
     optimize_status:
       row.optimize_status === 'pending' ||
       row.optimize_status === 'running' ||

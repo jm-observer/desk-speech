@@ -11,6 +11,7 @@ export interface Segment {
   text_raw: string;
   text_optimized?: string;
   text_english?: string;
+  speaker?: string;
   optimize_status: 'pending' | 'running' | 'success' | 'failed';
   translate_status: 'blocked' | 'pending' | 'running' | 'success' | 'failed';
 }
@@ -97,6 +98,7 @@ export interface SegmentUpdatedEvent {
   translate_status: Segment['translate_status'];
   text_optimized?: string;
   text_english?: string;
+  speaker?: string;
   created_at: string;
 }
 
