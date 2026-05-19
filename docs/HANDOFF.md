@@ -119,6 +119,8 @@ A/B 工具:`server/ab_asr.py`(scp 到 `~/server`→`docker compose cp` 进 asr�
 
 ## 4. 部署 / 运维速查(GB10)
 
+> 完整版(全栈拓扑/端口卷表/重建流程/客户端/冒烟)见 **`docs/DEPLOYMENT.md`**。下面是速查。
+
 - SSH:`ssh fengqi@192.168.0.68`(密钥免密;命令用 `-o BatchMode=yes`)
 - 服务目录:`~/server`(`compose.yaml`、`asr/`、`orchestrator/`、`log/`、`smoke_client.py`)
 - 模型卷:`~/funasr-prep/models` → 容器 `/models:ro`(Paraformer/VAD/标点/SenseVoiceSmall/
