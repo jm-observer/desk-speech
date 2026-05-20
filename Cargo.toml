@@ -2,5 +2,5 @@
 resolver = "2"
 members = [
     "src-tauri",
-    "asr-server",
+    "server/asr-server",
 ]
