@@ -3,6 +3,7 @@ services:
   asr:
     build: ./asr            # 薄层,FROM funasr-asr:arm64(已验证基镜像)
     image: funasr-asr:svc
+    restart: unless-stopped
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -21,6 +22,7 @@ services:
   orchestrator:
     build: ./orchestrator
     image: orchestrator:latest
+    restart: unless-stopped
     depends_on:
       - asr
     environment:
@@ -36,6 +38,21 @@ services:
       - orch-data:/data
     ports:
       - "8090:8090"
+
+  # asr-server:外部 OpenAI 兼容 ASR(/v1/audio/transcriptions),sherpa-onnx 后端。
+  # 默认不参与 `docker compose up -d`,需 `--profile asr-server` 才纳管(避免影响生产栈)。
+  # v1 CPU SenseVoice;GPU/CUDA13 是后续工作(详见 asr-server/Dockerfile 注释)。
+  asr-server:
+    profiles: [asr-server]
+    build: ./asr-server
+    image: asr-server:latest
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ${ASR_SERVER_MODELS_DIR:-/home/fengqi/asr-server-models}:/models:ro
+    ports:
+      - "8091:8091"
 
 volumes:
   orch-data:

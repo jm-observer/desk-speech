@@ -16,3 +16,6 @@ server/**/target/
 # Deploy uses the pre-built gptsovits:bakeoff image; only a rebuild needs
 # this dir present in the build context (see server/tts/README.md).
 server/tts/GPT-SoVITS/
+
+# Claude Code harness state (worktree links, local settings)
+.claude/
