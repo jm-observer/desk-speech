@@ -17,33 +17,6 @@ export const useAppStore = () => {
   const [qualityFilterConfig, setQualityFilterConfig] = useState<QualityFilterConfig | null>(null);
   const [configValidationError, setConfigValidationError] = useState<string | null>(null);
 
-  const deleteSegment = useCallback(async (segment: Segment) => {
-    const segmentId = segment.segment_id ?? segment.id;
-    if (segmentId === null || segmentId === undefined) {
-      console.error('Cannot delete segment: missing segment_id');
-      return;
-    }
-    try {
-      await TauriAPI.deleteSegment(segmentId);
-      setSegments((prev) => {
-        const key = segment.segment_id != null ? `seg-${segment.segment_id}` : `db-${segment.id}`;
-        return prev.filter((s) => {
-          if (s.segment_id != null && `seg-${s.segment_id}` === key) return false;
-          if (s.id != null && `db-${s.id}` === key) return false;
-          return true;
-        }).sort((a, b) => {
-          if (a.wall_start !== b.wall_start) {
-            return a.wall_start.localeCompare(b.wall_start);
-          }
-          return a.start - b.start;
-        });
-      });
-    } catch (err) {
-      console.error('Delete segment failed', err);
-      throw err;
-    }
-  }, []);
-
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
     segment_id: typeof row.segment_id === 'number' ? row.segment_id : null,
@@ -73,56 +46,6 @@ export const useAppStore = () => {
         : 'blocked',
   }), []);
 
-  const loadSegments = useCallback(async (): Promise<boolean> => {
-    try {
-      const rows = await TauriAPI.listSegments(0, 200);
-      const mapped = rows.map(mapDbSegment).filter((seg) => seg.text_raw.trim().length > 0);
-      console.debug('[segments][db-load]', {
-        rowCount: rows.length,
-        mappedCount: mapped.length,
-        firstSegmentId: mapped[0]?.segment_id ?? null,
-        lastSegmentId: mapped[mapped.length - 1]?.segment_id ?? null,
-        firstRevision: mapped[0]?.revision ?? null,
-        lastRevision: mapped[mapped.length - 1]?.revision ?? null,
-      });
-      if (mapped.length > 0) {
-        setSegments((prev) => {
-          const merged = new Map<string, Segment>();
-          // Helper to get key consistent with App.tsx
-          const getInternalKey = (s: Segment) => {
-            if (s.segment_id !== null && s.segment_id !== undefined) {
-              return `seg-${s.segment_id}`;
-            }
-            if (s.id !== null && s.id !== undefined) {
-              return `db-${s.id}`;
-            }
-            return `ts-${s.start.toFixed(3)}`;
-          };
-
-          prev.forEach(s => merged.set(getInternalKey(s), s));
-          mapped.forEach(s => {
-            const key = getInternalKey(s);
-            if (!merged.has(key)) {
-              merged.set(key, s);
-            }
-          });
-
-          return Array.from(merged.values()).sort((a, b) => {
-            if (a.wall_start !== b.wall_start) {
-              return a.wall_start.localeCompare(b.wall_start);
-            }
-            return a.start - b.start;
-          });
-        });
-        setStatus((prev) => (prev === 'initializing' || prev === 'idle' ? 'finished' : prev));
-        return true;
-      }
-    } catch (err) {
-      console.error('Load segments failed', err);
-    }
-    return false;
-  }, [mapDbSegment]);
-
   // Initialize
   useEffect(() => {
     let canceled = false;
@@ -137,7 +60,7 @@ export const useAppStore = () => {
         const devices = await TauriAPI.listDevices();
         if (canceled) return;
         setDevices(devices.map(d => ({ label: d.is_default ? `${d.name} (Default)` : d.name, value: d.name })));
-        
+
         const selected = await TauriAPI.getSelectedDevice();
         if (canceled) return;
         if (selected) setSelectedDevice(selected);
@@ -165,8 +88,7 @@ export const useAppStore = () => {
       const res = await TauriAPI.getInitStatus();
       if (canceled) return;
       if (res.status === 1) {
-        // Start clean — do NOT preload old local-DB history into the live
-        // list. This session's results stream in via `segment_updated`;
+        // Start clean — this session's results stream in via `segment_updated`;
         // past history lives on the server console (:8090 历史).
         setStatus((prev) => (prev === 'initializing' ? 'idle' : prev));
       } else if (res.status === 2) {
@@ -313,14 +235,12 @@ export const useAppStore = () => {
         unsubscribeConfigValidationError();
       }
     };
-  }, [loadSegments]);
+  }, [mapDbSegment]);
 
   return {
     status, setStatus,
     errorMessage, setErrorMessage,
     segments, setSegments,
-    loadSegments,
-    deleteSegment,
     devices, setDevices,
     selectedDevice, setSelectedDevice,
     showEnglish, setShowEnglish,

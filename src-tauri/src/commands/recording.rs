@@ -12,8 +12,7 @@ use cpal::traits::DeviceTrait;
 use cpal::SampleFormat;
 use log::info;
 
-use crate::audio_buffer::SAMPLE_RATE;
-use crate::lock_utils::{read_lock, write_lock};
+use crate::lock_utils::write_lock;
 use crate::{AppState, RecordingState};
 
 #[tauri::command]
@@ -167,34 +166,11 @@ pub fn clear_results(state: tauri::State<'_, AppState>) -> Result<(), String> {
     if state.recording.load(Ordering::SeqCst) {
         return Err("Cannot clear while recording".to_string());
     }
-    write_lock(&state.segments).clear();
-    write_lock(&state.recorded_audio).clear();
-    *write_lock(&state.start_wall_clock) = None;
-    *write_lock(&state.start_instant) = None;
-    info!("[clear_results] cleared all segments and audio");
     Ok(())
 }
 
 #[tauri::command]
 pub fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<RecordingState, String> {
     let recording = state.recording.load(Ordering::Relaxed);
-    let segments = read_lock(&state.segments)
-        .iter()
-        .filter(|seg| !seg.is_discarded)
-        .cloned()
-        .collect();
-    let (audio_window_start_sec, audio_window_end_sec) = {
-        let audio = read_lock(&state.recorded_audio);
-        (
-            audio.global_start_sample() as f32 / SAMPLE_RATE as f32,
-            audio.global_end_sample() as f32 / SAMPLE_RATE as f32,
-        )
-    };
-    Ok(RecordingState {
-        recording,
-        segments,
-        elapsed_secs: 0.0,
-        audio_window_start_sec,
-        audio_window_end_sec,
-    })
+    Ok(RecordingState { recording })
 }

@@ -16,24 +16,8 @@ export interface Segment {
   translate_status: 'blocked' | 'pending' | 'running' | 'success' | 'failed';
 }
 
-export interface RawSegment {
-  segment_id: number | null;
-  revision?: number;
-  start: number;
-  end: number;
-  wall_start: string;
-  wall_end: string;
-  text: string;
-  text_optimized?: string;
-  text_english?: string;
-  optimize_status?: Segment['optimize_status'];
-  translate_status?: Segment['translate_status'];
-}
-
 export interface RecordingState {
   recording: boolean;
-  segments: RawSegment[];
-  elapsed_secs: number;
 }
 
 export interface InputDeviceInfo {
@@ -130,13 +114,6 @@ export interface AppVersionInfo {
   first_run_after_upgrade: boolean;
 }
 
-export interface SpeakerStatus {
-  enrolled: boolean;
-  enabled: boolean;
-  threshold: number;
-  model_available: boolean;
-}
-
 export const TauriAPI = {
   startRecording: () => invoke('start_recording'),
   stopRecording: () => invoke('stop_recording'),
@@ -156,20 +133,8 @@ export const TauriAPI = {
   updateCorrectionRule: (payload: CorrectionRule) => invoke('update_correction_rule', { ...payload }),
   deleteCorrectionRule: (id: number) => invoke('delete_correction_rule', { id }),
   reloadCorrectionRules: () => invoke('reload_correction_rules'),
-  manualOptimizeTranslate: (revision: number) => invoke('manual_optimize_translate', { revision }),
-  listSegments: (page: number, pageSize: number) => invoke<Record<string, unknown>[]>('list_segments', { page, pageSize }),
-  tailSegments: (afterId: number, limit: number) => invoke<Record<string, unknown>[]>('tail_segments', { afterId, limit }),
-  deleteSegment: (segmentId: number) => invoke('delete_segment', { segmentId }),
-  getRecordedAudioPath: () => invoke<string>('get_recorded_audio_path'),
-  saveAllAudio: (path: string) => invoke('save_all_audio', { path }),
-  exportSrt: (path: string) => invoke('export_srt', { path }),
   getQualityFilterConfig: () => invoke<QualityFilterConfig>('get_quality_filter_config'),
   saveQualityFilterConfig: (payload: Omit<QualityFilterConfig, 'version'>) => invoke('save_quality_filter_config', { payload }),
   resetQualityFilterConfig: () => invoke<QualityFilterConfig>('reset_quality_filter_config'),
   getAppVersionInfo: () => invoke<AppVersionInfo>('get_app_version_info'),
-  getSpeakerStatus: () => invoke<SpeakerStatus>('get_speaker_status'),
-  enrollSpeaker: () => invoke<SpeakerStatus>('enroll_speaker'),
-  clearSpeaker: () => invoke<SpeakerStatus>('clear_speaker'),
-  setSpeakerEnabled: (enabled: boolean) => invoke<SpeakerStatus>('set_speaker_enabled', { enabled }),
-  setSpeakerThreshold: (threshold: number) => invoke<SpeakerStatus>('set_speaker_threshold', { threshold }),
 };

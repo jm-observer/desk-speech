@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { TauriAPI } from './api/tauri-client';
 import type { Segment } from './api/tauri-client';
-import type { RawSegment } from './api/tauri-client';
 import { ControlPanel } from './components/ControlPanel';
 import { SegmentCard } from './components/SegmentCard';
 import { useAppStore } from './store/useAppStore';
@@ -18,8 +17,6 @@ const SIMPLE_WINDOW_SIZE = { width: 560, height: 280 };
 const DETAILED_WINDOW_MIN_SIZE = { width: 900, height: 600 };
 const DETAILED_WINDOW_SIZE = { width: 1280, height: 820 };
 const AUTO_RECORDING_STORAGE_KEY = 'streaming-speech:auto-recording';
-const MANUAL_REFRESH_INTERVAL_MS = 800;
-const MANUAL_REFRESH_MAX_ATTEMPTS = 25;
 
 
 async function handleWindowDragStart(event: React.MouseEvent<HTMLElement>) {
@@ -47,7 +44,6 @@ function App() {
   const pollTimer = useRef<number | null>(null);
   const pollInFlightRef = useRef(false);
   const notifiedRevisionsRef = useRef<Set<string>>(new Set());
-  const manualTriggeredRevisionsRef = useRef<Set<number>>(new Set());
   const notificationBaselineReadyRef = useRef(false);
   const autoStartTriggeredRef = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
@@ -132,45 +128,19 @@ function App() {
   }, [logNotificationDebug]);
 
   const getSegmentKey = useCallback((seg: Segment) => {
-    // 优先使用后端分配的稳定 ID
     if (seg.segment_id !== null && seg.segment_id !== undefined) {
       return `seg-${seg.segment_id}`;
     }
-    // 其次使用数据库自增 ID
     if (seg.id !== null && seg.id !== undefined) {
       return `db-${seg.id}`;
     }
-    // 最后使用开始时间戳（保留3位小数防止浮点误差）
     return `ts-${seg.start.toFixed(3)}`;
   }, []);
 
-  const mergeSegmentsByRevision = useCallback((incoming: Segment[]) => {
-    store.setSegments((prev) => {
-      if (prev.length === 0) {
-        return incoming;
-      }
-      const merged = new Map<string, Segment>();
-
-      prev.forEach((seg) => {
-        merged.set(getSegmentKey(seg), seg);
-      });
-
-      incoming.forEach((seg) => {
-        const key = getSegmentKey(seg);
-        const current = merged.get(key);
-        if (!current || (seg.revision ?? 0) >= (current.revision ?? 0)) {
-          merged.set(key, seg);
-        }
-      });
-      
-      return Array.from(merged.values()).sort((a, b) => {
-        if (a.wall_start !== b.wall_start) {
-          return a.wall_start.localeCompare(b.wall_start);
-        }
-        return a.start - b.start;
-      });
-    });
-  }, [getSegmentKey, store]);
+  const segmentsRef = useRef(store.segments);
+  useEffect(() => {
+    segmentsRef.current = store.segments;
+  }, [store.segments]);
 
   // Recording Logic
   const stopPolling = useCallback(() => {
@@ -197,32 +167,7 @@ function App() {
         }
 
         const state = await TauriAPI.getRecordingState();
-
-        const mappedSegments: Segment[] = state.segments.map((s: RawSegment) => ({
-          id: s.segment_id,
-          segment_id: s.segment_id,
-          revision: s.revision,
-          start: s.start,
-          end: s.end,
-          wall_start: s.wall_start,
-          wall_end: s.wall_end,
-          text_raw: s.text,
-          text_optimized: s.text_optimized,
-          text_english: s.text_english,
-          optimize_status: s.optimize_status || 'pending',
-          translate_status: s.translate_status || 'blocked',
-        }));
-        console.debug('[segments][memory-poll]', {
-          recording: state.recording,
-          segmentCount: mappedSegments.length,
-          firstSegmentId: mappedSegments[0]?.segment_id ?? null,
-          lastSegmentId: mappedSegments[mappedSegments.length - 1]?.segment_id ?? null,
-          firstRevision: mappedSegments[0]?.revision ?? null,
-          lastRevision: mappedSegments[mappedSegments.length - 1]?.revision ?? null,
-        });
-        mergeSegmentsByRevision(mappedSegments);
-
-        const hasPending = mappedSegments.some(
+        const hasPending = segmentsRef.current.some(
           (seg) =>
             seg.optimize_status === 'pending' ||
             seg.optimize_status === 'running' ||
@@ -249,7 +194,7 @@ function App() {
         pollInFlightRef.current = false;
       }
     }, 1000);
-  }, [mergeSegmentsByRevision, store, stopPolling]);
+  }, [store, stopPolling]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -305,17 +250,6 @@ function App() {
     store.segments.forEach((segment) => {
       const revision = segment.revision;
       if (revision === undefined) return;
-
-      if (manualTriggeredRevisionsRef.current.has(revision)) {
-        if (
-          segment.optimize_status === 'failed' ||
-          segment.translate_status === 'failed' ||
-          segment.translate_status === 'success'
-        ) {
-          manualTriggeredRevisionsRef.current.delete(revision);
-        }
-        return;
-      }
 
       // Check optimization status
       const optKey = `opt-${revision}`;
@@ -393,9 +327,6 @@ function App() {
     if (!autoRecordingEnabled) {
       return;
     }
-    if (manualTriggeredRevisionsRef.current.size > 0) {
-      return;
-    }
 
     autoStartTriggeredRef.current = true;
     startRecording().catch((err) => {
@@ -428,86 +359,10 @@ function App() {
     handleCopy(text).catch((err) => console.error('Copy segment text failed', err));
   };
 
-  const handleManualOptimizeTranslate = useCallback(
-    async (segment: Segment) => {
-      if (segment.revision === undefined) {
-        return;
-      }
-
-      try {
-        const targetRevision = segment.revision;
-        manualTriggeredRevisionsRef.current.add(segment.revision);
-        await TauriAPI.manualOptimizeTranslate(targetRevision);
-        let attempts = 0;
-        while (attempts < MANUAL_REFRESH_MAX_ATTEMPTS) {
-          await new Promise((resolve) => window.setTimeout(resolve, MANUAL_REFRESH_INTERVAL_MS));
-          attempts += 1;
-
-          const rows = await TauriAPI.listSegments(0, 200);
-          const mapped = rows
-            .map((row) => ({
-              id: typeof row.id === 'number' ? row.id : null,
-              segment_id: typeof row.segment_id === 'number' ? row.segment_id : null,
-              revision: typeof row.revision === 'number' ? row.revision : undefined,
-              start: typeof row.start_sec === 'number' ? row.start_sec : 0,
-              end: typeof row.end_sec === 'number' ? row.end_sec : 0,
-              wall_start: typeof row.wall_start === 'string' ? row.wall_start : '',
-              wall_end: typeof row.wall_end === 'string' ? row.wall_end : '',
-              text_raw: typeof row.text_raw === 'string' ? row.text_raw : '',
-              text_optimized: typeof row.text_optimized === 'string' ? row.text_optimized : undefined,
-              text_english: typeof row.text_english === 'string' ? row.text_english : undefined,
-              optimize_status: (row.optimize_status === 'pending' ||
-              row.optimize_status === 'running' ||
-              row.optimize_status === 'success' ||
-              row.optimize_status === 'failed'
-                ? row.optimize_status
-                : 'pending') as Segment['optimize_status'],
-              translate_status: (row.translate_status === 'blocked' ||
-              row.translate_status === 'pending' ||
-              row.translate_status === 'running' ||
-              row.translate_status === 'success' ||
-              row.translate_status === 'failed'
-                ? row.translate_status
-                : 'blocked') as Segment['translate_status'],
-            }))
-            .filter((seg) => seg.text_raw.trim().length > 0);
-          mergeSegmentsByRevision(mapped);
-
-          const target = mapped.find((item) => item.revision === targetRevision);
-          if (!target) {
-            continue;
-          }
-          const optimizeDone = target.optimize_status === 'success' || target.optimize_status === 'failed';
-          const translateDone = target.translate_status === 'success' || target.translate_status === 'failed' || target.translate_status === 'blocked';
-          if (optimizeDone && translateDone) {
-            break;
-          }
-        }
-      } catch (err) {
-        manualTriggeredRevisionsRef.current.delete(segment.revision);
-        console.error('Manual optimize translate failed', err);
-        alert(`手动优化与翻译失败: ${err}`);
-      }
-    },
-    [mergeSegmentsByRevision, store]
-  );
-
   const handleClear = async () => {
     await TauriAPI.clearResults();
     store.setSegments([]);
   };
-
-  const handleDeleteSegment = useCallback(
-    async (segment: Segment) => {
-      try {
-        await store.deleteSegment(segment);
-      } catch (err) {
-        console.error('Delete segment failed', err);
-        alert(`删除失败: ${err}`);
-      }
-    },
-    [store]
-  );
 
   const handleDeviceChange = async (device: string) => {
     store.setSelectedDevice(device);
@@ -622,8 +477,6 @@ function App() {
                   showEnglish={store.showEnglish}
                   onCopyChinese={(text) => handleSegmentCopy(text)}
                   onCopyEnglish={(text) => handleSegmentCopy(text)}
-                  onManualOptimizeTranslate={handleManualOptimizeTranslate}
-                  onDelete={handleDeleteSegment}
                 />
               ))}
             </div>

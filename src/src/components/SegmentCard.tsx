@@ -9,8 +9,6 @@ interface SegmentCardProps {
   showEnglish?: boolean;
   onCopyChinese: (text: string) => void;
   onCopyEnglish: (text: string) => void;
-  onManualOptimizeTranslate: (segment: Segment) => void;
-  onDelete?: (segment: Segment) => void;
 }
 
 export const SegmentCard: React.FC<SegmentCardProps> = ({
@@ -18,12 +16,9 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
   showEnglish,
   onCopyChinese,
   onCopyEnglish,
-  onManualOptimizeTranslate,
-  onDelete,
 }) => {
   const [copiedZh, setCopiedZh] = useState(false);
   const [copiedEn, setCopiedEn] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const maxHeightRef = useRef(0);
   const [minHeight, setMinHeight] = useState<number | undefined>(undefined);
@@ -40,21 +35,10 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
     setTimeout(() => setCopiedEn(false), 2000);
   };
 
-  const handleDeleteClick = async () => {
-    if (!onDelete || isDeleting) return;
-    setIsDeleting(true);
-    try {
-      await onDelete(segment);
-    } catch {
-      setIsDeleting(false);
-    }
-  };
-
   const optimizeRunning = segment.optimize_status === 'running' || segment.optimize_status === 'pending';
   const translateRunning = segment.translate_status === 'running' || segment.translate_status === 'pending';
   const isProcessing = optimizeRunning || translateRunning;
   const duration = segment.end - segment.start;
-  const canManualRun = segment.revision !== undefined && segment.text_raw.trim().length > 0 && !isProcessing;
 
   useEffect(() => {
     const element = cardRef.current;
@@ -62,16 +46,14 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
       return;
     }
 
-    // 初始高度同步
     const initialHeight = element.offsetHeight;
     if (initialHeight > maxHeightRef.current) {
       maxHeightRef.current = initialHeight;
       setMinHeight(initialHeight);
     }
-    
+
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        // 使用 borderBoxSize 获取包含 padding 和 border 的实际高度
         const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
         if (height > maxHeightRef.current) {
           maxHeightRef.current = height;
@@ -111,30 +93,6 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
           <div className="flex-1" />
 
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            {onDelete && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-[11px] gap-1.5 text-red-400 hover:text-red-500 hover:bg-red-50"
-                disabled={isDeleting}
-                onClick={handleDeleteClick}
-                title="删除此条记录"
-              >
-                <Icon name="trash" size={12} />
-                {isDeleting ? '删除中...' : '删除'}
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-[11px] gap-1.5"
-              disabled={!canManualRun}
-              onClick={() => onManualOptimizeTranslate(segment)}
-              title="手动优化与翻译"
-            >
-              <Icon name={isProcessing ? 'refresh' : 'sparkles'} size={12} className={cn(isProcessing && 'animate-spin')} />
-              {isProcessing ? '处理中...' : '手动优化与翻译'}
-            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -156,9 +114,6 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
             >
               <Icon name={copiedEn ? 'check' : 'languages'} size={12} />
               {copiedEn ? '已复制' : '复制英文'}
-            </Button>
-            <Button variant="ghost" size="icon" className="w-7 h-7">
-              <Icon name="download" size={14} />
             </Button>
           </div>
         </div>

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { listen } from '@tauri-apps/api/event';
-import { TauriAPI, type SegmentDiscardedEvent, type Segment } from '../api/tauri-client';
+import { type SegmentDiscardedEvent, type Segment } from '../api/tauri-client';
 import { useAppStore } from './useAppStore';
 
 // Mock Tauri API
@@ -9,8 +9,7 @@ vi.mock('../api/tauri-client', () => ({
     listDevices: vi.fn(),
     getSelectedDevice: vi.fn(),
     getInitStatus: vi.fn(),
-    listSegments: vi.fn(),
-    tailSegments: vi.fn(),
+    getQualityFilterConfig: vi.fn(),
   },
 }));
 
@@ -143,38 +142,5 @@ describe('useAppStore - segment_discarded event handling', () => {
     expect(store.segments.length).toBe(2);
     expect(store.segments[0].segment_id).toBe(100);
     expect(store.segments[1].segment_id).toBe(300);
-  });
-});
-
-describe('useAppStore - segment loading', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('should filter out empty text segments', async () => {
-    vi.mocked(TauriAPI.getInitStatus).mockResolvedValue({ status: 1 });
-    vi.mocked(TauriAPI.listSegments).mockResolvedValue([
-      { id: 1, segment_id: 1, revision: 1, start_sec: 0, end_sec: 1, wall_start: '2026-01-01 00:00:00', wall_end: '2026-01-01 00:00:01', text_raw: 'hello', optimize_status: 'success', translate_status: 'success' },
-      { id: 2, segment_id: 2, revision: 2, start_sec: 1, end_sec: 2, wall_start: '2026-01-01 00:00:01', wall_end: '2026-01-01 00:00:02', text_raw: '', optimize_status: 'success', translate_status: 'success' },
-    ] as any);
-
-    const store = useAppStore();
-    await store.loadSegments();
-
-    expect(store.segments.length).toBe(1);
-    expect(store.segments[0].text_raw).toBe('hello');
-  });
-
-  it('should merge segments with same segment_id', async () => {
-    vi.mocked(TauriAPI.getInitStatus).mockResolvedValue({ status: 1 });
-    vi.mocked(TauriAPI.listSegments).mockResolvedValue([
-      { id: 1, segment_id: 1, revision: 1, start_sec: 0, end_sec: 1, wall_start: '2026-01-01 00:00:00', wall_end: '2026-01-01 00:00:01', text_raw: 'first', optimize_status: 'success', translate_status: 'success' },
-      { id: 2, segment_id: 1, revision: 2, start_sec: 0.8, end_sec: 2, wall_start: '2026-01-01 00:00:01', wall_end: '2026-01-01 00:00:02', text_raw: 'second', optimize_status: 'success', translate_status: 'success' },
-    ] as any);
-
-    const store = useAppStore();
-    await store.loadSegments();
-
-    expect(store.segments.length).toBe(1);
   });
 });

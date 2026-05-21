@@ -23,8 +23,10 @@ use std::sync::RwLock;
 
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use crate::audio_buffer::SAMPLE_RATE;
 use crate::commands::recording::build_input_stream;
+
+/// Target sample rate for the upstream PCM the orchestrator expects.
+const SAMPLE_RATE: u32 = 16_000;
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::lock_utils::read_lock;
 use crate::settings::VadSettings;

@@ -1,4 +1,3 @@
-mod audio_buffer;
 mod commands;
 pub mod config;
 mod correction;
@@ -9,162 +8,31 @@ mod lock_utils;
 mod settings;
 mod versioning;
 
-use audio_buffer::RollingAudioBuffer;
 use serde::Serialize;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
 
 use crate::config::quality_filter::QualityFilterConfig;
 use crate::correction::CorrectionEngine;
 use crate::llm_client::CachedModels;
 use crate::llm_settings::LlmSettings;
-use crate::lock_utils::{mutex_lock, read_lock, write_lock};
+use crate::lock_utils::mutex_lock;
 use crate::settings::VadSettings;
-use chrono::Local;
 use log::{error, info, warn};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, RwLock};
-
-    use super::{remove_segment_from_memory, SegmentResult};
-    use crate::lock_utils::read_lock;
-
-    fn seg(start: f32, end: f32, text: &str, revision: i64) -> SegmentResult {
-        SegmentResult {
-            segment_id: 1,
-            revision,
-            start,
-            end,
-            wall_start: "2026-01-01 00:00:00".to_string(),
-            wall_end: "2026-01-01 00:00:01".to_string(),
-            text: text.to_string(),
-            text_optimized: Some("opt".to_string()),
-            text_english: Some("en".to_string()),
-            optimize_status: "success".to_string(),
-            translate_status: "success".to_string(),
-            finalization_check_state: "not_ready".to_string(),
-            is_discarded: false,
-            discard_reason: None,
-            discard_source: None,
-            discard_confidence: None,
-            quality_check_status: "pending".to_string(),
-            text_raw: text.to_string(),
-        }
-    }
-
-    #[test]
-    fn remove_segment_from_memory_removes_matching_segment_id_only() {
-        let segments = Arc::new(RwLock::new(vec![
-            seg(0.0, 1.0, "第一句", 1),
-            seg(1.0, 2.0, "第二句", 2),
-        ]));
-        {
-            let mut guard = segments.write().expect("lock segments");
-            guard[0].segment_id = 100;
-            guard[1].segment_id = 200;
-        }
-
-        let removed = remove_segment_from_memory(&segments, 100);
-
-        assert!(removed);
-        let guard = read_lock(&segments);
-        assert_eq!(guard.len(), 1);
-        assert_eq!(guard[0].segment_id, 200);
-        assert_eq!(guard[0].text, "第二句");
-    }
-
-    #[test]
-    fn remove_segment_from_memory_returns_false_when_segment_missing() {
-        let segments = Arc::new(RwLock::new(vec![seg(0.0, 1.0, "第一句", 1)]));
-
-        let removed = remove_segment_from_memory(&segments, 999);
-
-        assert!(!removed);
-        let guard = read_lock(&segments);
-        assert_eq!(guard.len(), 1);
-        assert_eq!(guard[0].segment_id, 1);
-    }
-}
-
-#[derive(Serialize, Clone)]
-pub(crate) struct SegmentResult {
-    segment_id: u64,
-    revision: i64,
-    start: f32,
-    end: f32,
-    wall_start: String,
-    wall_end: String,
-    text: String,
-    text_optimized: Option<String>,
-    text_english: Option<String>,
-    optimize_status: String,
-    translate_status: String,
-    finalization_check_state: String,
-    // Plan 2: discard judgment fields
-    is_discarded: bool,
-    discard_reason: Option<String>,
-    discard_source: Option<String>,
-    discard_confidence: Option<f32>,
-    quality_check_status: String,
-    // Raw ASR text for judgment
-    text_raw: String,
-}
-
-pub(crate) fn update_segment_llm_state(
-    segments: &Arc<RwLock<Vec<SegmentResult>>>,
-    revision: i64,
-    optimize_status: Option<&str>,
-    translate_status: Option<&str>,
-    optimized: Option<String>,
-    english: Option<String>,
-) {
-    let mut segs = write_lock(segments);
-    if let Some(seg) = segs.iter_mut().rev().find(|seg| seg.revision == revision) {
-        if let Some(status) = optimize_status {
-            seg.optimize_status = status.to_string();
-        }
-        if let Some(status) = translate_status {
-            seg.translate_status = status.to_string();
-        }
-        if let Some(text) = optimized {
-            seg.text_optimized = Some(text);
-        }
-        if let Some(text) = english {
-            seg.text_english = Some(text);
-        }
-    }
-}
-
-pub(crate) fn remove_segment_from_memory(segments: &Arc<RwLock<Vec<SegmentResult>>>, segment_id: u64) -> bool {
-    let mut segs = write_lock(segments);
-    let original_len = segs.len();
-    segs.retain(|seg| seg.segment_id != segment_id);
-    segs.len() != original_len
-}
-
 #[derive(Serialize, Clone)]
 pub(crate) struct RecordingState {
     recording: bool,
-    segments: Vec<SegmentResult>,
-    elapsed_secs: f32,
-    audio_window_start_sec: f32,
-    audio_window_end_sec: f32,
 }
 
 pub(crate) struct AppState {
     recording: Arc<AtomicBool>,
     stop_signal: Arc<AtomicBool>,
-    segments: Arc<RwLock<Vec<SegmentResult>>>,
-    recorded_audio: Arc<RwLock<RollingAudioBuffer>>,
     db: Arc<Mutex<Option<db::SpeechDatabase>>>,
     correction_engine: Arc<CorrectionEngine>,
-    start_wall_clock: Arc<RwLock<Option<chrono::DateTime<Local>>>>,
-    start_instant: Arc<RwLock<Option<Instant>>>,
     init_status: Arc<AtomicU8>,
     init_error: Arc<RwLock<String>>,
     num_threads: Arc<AtomicU32>,
@@ -175,26 +43,6 @@ pub(crate) struct AppState {
     selected_device: Arc<RwLock<Option<String>>>,
 }
 
-// ---------------------------------------------------------------------------
-// cpal microphone capture
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Device enumeration
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Tauri commands
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Settings
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Resource directory & model init
-// ---------------------------------------------------------------------------
-
 fn build_app_state(
     db: db::SpeechDatabase,
     llm_settings: LlmSettings,
@@ -203,12 +51,8 @@ fn build_app_state(
     AppState {
         recording: Arc::new(AtomicBool::new(false)),
         stop_signal: Arc::new(AtomicBool::new(false)),
-        segments: Arc::new(RwLock::new(Vec::new())),
-        recorded_audio: Arc::new(RwLock::new(RollingAudioBuffer::new())),
         db: Arc::new(Mutex::new(Some(db))),
         correction_engine: Arc::new(CorrectionEngine::new()),
-        start_wall_clock: Arc::new(RwLock::new(None)),
-        start_instant: Arc::new(RwLock::new(None)),
         init_status: Arc::new(AtomicU8::new(0)),
         init_error: Arc::new(RwLock::new(String::new())),
         num_threads: Arc::new(AtomicU32::new(0)),
@@ -350,13 +194,6 @@ pub fn run() {
             commands::recording::stop_recording,
             commands::recording::clear_results,
             commands::recording::get_recording_state,
-            commands::history_api::list_segments,
-            commands::history_api::tail_segments,
-            commands::history_api::delete_segment,
-            commands::export::save_segment_as_wav,
-            commands::export::save_all_audio,
-            commands::export::get_recorded_audio_path,
-            commands::export::export_srt,
             commands::export::copy_text_to_clipboard,
             commands::init::get_init_status,
             commands::settings::get_settings,
@@ -368,7 +205,6 @@ pub fn run() {
             commands::correction_api::update_correction_rule,
             commands::correction_api::delete_correction_rule,
             commands::correction_api::reload_correction_rules,
-            commands::manual_optimize::manual_optimize_translate,
             commands::quality_filter::get_quality_filter_config,
             commands::quality_filter::save_quality_filter_config,
             commands::quality_filter::reset_quality_filter_config,

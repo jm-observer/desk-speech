@@ -4,7 +4,6 @@ import { TauriAPI } from '../api/tauri-client';
 import type { AppSettings } from '../api/tauri-client';
 import type { QualityFilterConfig } from '../api/tauri-client';
 import type { AppVersionInfo } from '../api/tauri-client';
-import type { SpeakerStatus } from '../api/tauri-client';
 import { Button } from './ui/Button';
 
 interface SettingsModalProps {
@@ -12,7 +11,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type Tab = 'vad' | 'asr' | 'llm' | 'quality' | 'speaker';
+type Tab = 'vad' | 'asr' | 'llm' | 'quality';
 type FieldKey = keyof AppSettings;
 type FieldErrorMap = Partial<Record<FieldKey, string>>;
 type InputKind = 'number' | 'text' | 'password' | 'select' | 'textarea';
@@ -39,7 +38,6 @@ const TAB_LABELS: Record<Tab, string> = {
   asr: 'ASR 识别',
   llm: 'LLM 后处理',
   quality: '质量过滤',
-  speaker: '音色识别',
 };
 
 const TAB_DESCRIPTIONS: Record<Tab, string> = {
@@ -47,7 +45,6 @@ const TAB_DESCRIPTIONS: Record<Tab, string> = {
   asr: '控制本地识别模型的并行度，主要影响 CPU 占用与识别速度。',
   llm: '配置远程模型接入与文本后处理策略，影响润色、翻译和自动复制结果。',
   quality: '配置终态质量过滤策略，包括丢弃阈值、静默窗口、规则词表与判定提示词模板。',
-  speaker: '注册目标音色（声纹）后，只转写与目标说话人匹配的语音段，其余直接丢弃。',
 };
 
 const FIELD_DEFINITIONS: FieldDefinition[] = [
@@ -396,9 +393,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const [qualitySaving, setQualitySaving] = useState(false);
   const [versionInfo, setVersionInfo] = useState<AppVersionInfo | null>(null);
   const [showDevInfo, setShowDevInfo] = useState(false);
-  const [speakerStatus, setSpeakerStatus] = useState<SpeakerStatus | null>(null);
-  const [speakerBusy, setSpeakerBusy] = useState(false);
-  const [speakerError, setSpeakerError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -466,33 +460,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       }
     };
 
-    const loadSpeakerStatus = async () => {
-      setSpeakerError(null);
-      try {
-        setSpeakerStatus(await TauriAPI.getSpeakerStatus());
-      } catch (err) {
-        console.warn('Load speaker status failed', err);
-      }
-    };
-
     void loadSettings();
     void loadModels();
     void loadQualityConfig();
     void loadVersionInfo();
-    void loadSpeakerStatus();
   }, [open]);
-
-  const runSpeakerAction = async (action: () => Promise<SpeakerStatus>) => {
-    setSpeakerBusy(true);
-    setSpeakerError(null);
-    try {
-      setSpeakerStatus(await action());
-    } catch (err) {
-      setSpeakerError(typeof err === 'string' ? err : '操作失败，请重试');
-    } finally {
-      setSpeakerBusy(false);
-    }
-  };
 
   const focusField = (key: FieldKey) => {
     setTab(FIELD_TAB_MAP[key]);
@@ -868,107 +840,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                   {formError}
                 </div>
               )}
-              <div className="mb-6 flex flex-wrap items-center gap-3">{(['vad', 'asr', 'llm', 'quality', 'speaker'] as Tab[]).map(renderTabButton)}</div>
+              <div className="mb-6 flex flex-wrap items-center gap-3">{(['vad', 'asr', 'llm', 'quality'] as Tab[]).map(renderTabButton)}</div>
 
               <div className="mb-8 rounded-xl border border-[var(--line)] bg-[var(--bg-softer)] p-4 text-[13px] leading-relaxed text-[var(--ink-3)]">
                 {TAB_DESCRIPTIONS[tab]}
               </div>
 
-              {tab !== 'quality' && tab !== 'speaker' && <div className="grid grid-cols-1 gap-x-8 gap-y-8 md:grid-cols-2">{currentFields.map(renderField)}</div>}
-
-              {tab === 'speaker' && (
-                <div className="flex flex-col gap-5">
-                  {speakerStatus && !speakerStatus.model_available && (
-                    <div className="rounded-xl border border-[var(--danger)] bg-[var(--danger-soft)] px-4 py-3 text-[13px] text-[var(--danger)]">
-                      声纹模型未加载（缺少 assets/speaker-embedding.onnx），音色识别不可用。
-                    </div>
-                  )}
-                  {speakerError && (
-                    <div className="rounded-xl border border-[var(--danger)] bg-[var(--danger-soft)] px-4 py-3 text-[13px] text-[var(--danger)]">
-                      {speakerError}
-                    </div>
-                  )}
-
-                  <div className="rounded-xl border border-[var(--line)] bg-[var(--bg-softer)] p-4 text-[13px] text-[var(--ink-2)]">
-                    状态：
-                    {speakerStatus?.enrolled ? (
-                      <span className="font-medium text-[var(--ink-1)]">已注册声纹</span>
-                    ) : (
-                      <span className="text-[var(--ink-3)]">未注册</span>
-                    )}
-                    {speakerStatus?.enrolled && (
-                      <>
-                        {' · '}
-                        门控{speakerStatus.enabled ? '已开启（仅转写目标音色）' : '已关闭'}
-                      </>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button
-                      variant="primary"
-                      disabled={speakerBusy || !(speakerStatus?.model_available ?? false)}
-                      onClick={() => void runSpeakerAction(() => TauriAPI.enrollSpeaker())}
-                    >
-                      {speakerBusy ? '录制中（约 6 秒）…' : speakerStatus?.enrolled ? '重新注册声纹' : '注册声纹（录制 6 秒）'}
-                    </Button>
-                    {speakerStatus?.enrolled && (
-                      <Button
-                        variant="ghost"
-                        disabled={speakerBusy}
-                        onClick={() => void runSpeakerAction(() => TauriAPI.clearSpeaker())}
-                      >
-                        清除声纹
-                      </Button>
-                    )}
-                  </div>
-                  <p className="text-[12px] leading-relaxed text-[var(--ink-3)]">
-                    点击后对着麦克风清晰说话约 6 秒。注册成功后将自动开启音色门控：录音时只转写与你声纹匹配的语音段，其他人声直接丢弃。
-                  </p>
-
-                  {speakerStatus?.enrolled && (
-                    <>
-                      <label className="inline-flex items-center gap-3 text-[14px] text-[var(--ink-1)]">
-                        <input
-                          type="checkbox"
-                          disabled={speakerBusy}
-                          checked={speakerStatus.enabled}
-                          onChange={(event) =>
-                            void runSpeakerAction(() => TauriAPI.setSpeakerEnabled(event.target.checked))
-                          }
-                        />
-                        启用音色门控
-                      </label>
-
-                      <div className="flex flex-col gap-1">
-                        <label className="text-[13px] text-[var(--ink-2)]">
-                          匹配阈值：<span className="font-medium text-[var(--ink-1)]">{(speakerStatus.threshold).toFixed(2)}</span>
-                          <span className="ml-2 text-[12px] text-[var(--ink-3)]">越高越严格（误收他人↓，漏收自己↑）</span>
-                        </label>
-                        <input
-                          type="range"
-                          min={0.2}
-                          max={0.8}
-                          step={0.01}
-                          disabled={speakerBusy}
-                          defaultValue={speakerStatus.threshold}
-                          onMouseUp={(event) =>
-                            void runSpeakerAction(() =>
-                              TauriAPI.setSpeakerThreshold(Number((event.target as HTMLInputElement).value)),
-                            )
-                          }
-                          onTouchEnd={(event) =>
-                            void runSpeakerAction(() =>
-                              TauriAPI.setSpeakerThreshold(Number((event.target as HTMLInputElement).value)),
-                            )
-                          }
-                        />
-                        <p className="text-[12px] text-[var(--ink-3)]">建议 0.45 ~ 0.55；环境/麦克风差异大时按实际效果微调。</p>
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
+              {tab !== 'quality' && <div className="grid grid-cols-1 gap-x-8 gap-y-8 md:grid-cols-2">{currentFields.map(renderField)}</div>}
 
               {tab === 'quality' && qualityConfig && (
                 <div className="grid grid-cols-1 gap-x-8 gap-y-8 md:grid-cols-2">

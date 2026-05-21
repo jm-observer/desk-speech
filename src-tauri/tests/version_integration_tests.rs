@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[path = "../src/config/mod.rs"]
 mod config;
 #[path = "../src/db/mod.rs"]
