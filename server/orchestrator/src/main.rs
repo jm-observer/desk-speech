@@ -106,6 +106,7 @@ async fn main() {
     let app = Router::new()
         .route("/stream", get(ws_upgrade))
         .route("/", get(console))
+        .route("/segment/:id", get(console))
         .route("/api/stats", get(api_stats))
         .route("/api/history", get(api_history))
         .route("/api/speakers", get(api_speakers))
@@ -118,7 +119,8 @@ async fn main() {
         .route("/api/segments/:id/audio", get(api_segment_audio))
         .route("/api/segments/:id/text", post(api_segment_set_text))
         .route("/api/segments/:id/rerun", post(api_segment_rerun))
-        .route("/api/segments/:id", delete(api_segment_delete))
+        .route("/api/segments/:id", get(api_segment_get).delete(api_segment_delete))
+        .route("/api/segments", delete(api_segments_clear))
         .route("/api/config", get(api_config_get).post(api_config_set))
         .with_state(ctx);
 
@@ -498,6 +500,17 @@ async fn api_segment_set_text(
     }
 }
 
+/// Fetch a single segment as JSON (used by the standalone /segment/:id page).
+async fn api_segment_get(
+    State(ctx): State<AppCtx>,
+    Path(id): Path<i64>,
+) -> Response {
+    match ctx.db.segment_get(id) {
+        Some(row) => Json(row).into_response(),
+        None => (StatusCode::NOT_FOUND, "segment not found").into_response(),
+    }
+}
+
 /// Delete a segment (and its retained audio).
 async fn api_segment_delete(
     State(ctx): State<AppCtx>,
@@ -505,6 +518,14 @@ async fn api_segment_delete(
 ) -> Json<serde_json::Value> {
     let ok = ctx.db.segment_delete(id);
     Json(json!({"ok": ok}))
+}
+
+/// Wipe ALL segment history (records + retained audio). Sessions are kept.
+/// Destructive — confirmed by the UI before this is called.
+async fn api_segments_clear(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
+    let removed = ctx.db.segments_clear_all();
+    tracing::warn!("[history] cleared {removed} segment row(s) via /api/segments DELETE");
+    Json(json!({"ok": true, "removed": removed}))
 }
 
 /// Re-run optimize + translate for an existing segment, using its current
@@ -633,6 +654,13 @@ textarea{width:100%;min-height:96px;line-height:1.5;font-family:ui-monospace,SFM
 .seg-fld .en{color:#94a3b8;font-style:italic}
 .seg-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
 .seg-acts .right{margin-left:auto;display:flex;gap:8px}
+.hist-hd{display:flex;align-items:start;gap:16px;justify-content:space-between;margin-bottom:10px}
+.hist-hd .meta{flex:1;font-size:12px;color:#94a3b8;line-height:1.6}
+.hist-hd .meta code{color:#cbd5e1;background:#1f2330;padding:1px 6px;border-radius:4px;font-size:11px}
+.seg-hd .id a{color:#64748b;text-decoration:none}
+.seg-hd .id a:hover{color:#cbd5e1;text-decoration:underline}
+.single-wrap{max-width:820px;margin:0 auto}
+.single-wrap .back{display:inline-block;margin-bottom:14px;text-decoration:none}
 </style></head><body>
 <header>语音服务管理台</header>
 <nav><button class=on data-t=ov>概览</button><button data-t=hi>历史</button>
@@ -640,7 +668,12 @@ textarea{width:100%;min-height:96px;line-height:1.5;font-family:ui-monospace,SFM
 <main><div id=v></div></main>
 <script>
 const V=document.getElementById('v');let tab='ov';
+const NAV=document.querySelector('nav');
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+ // When entering the standalone /segment/:id page, the nav buttons should
+ // bounce back to "/" with the desired tab active; on the main console they
+ // just switch tabs in-place.
+ if(window.__singleMode){location.href='/#'+b.dataset.t;return}
  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
  b.classList.add('on');tab=b.dataset.t;render()});
 async function j(u,m,bd){const o={method:m||'GET'};if(bd){o.headers={'content-type':'application/json'};o.body=JSON.stringify(bd)}return (await fetch(u,o)).json()}
@@ -719,20 +752,39 @@ function renderCfgRow(k,v){
 function cssId(k){return k.replace(/[^a-zA-Z0-9_-]/g,'_')}
 function jsKey(k){return k.replace(/'/g,"\\'")}
 function renderHistory(h){
- if(!h||!h.length){V.innerHTML='<div class=card><p class=note>暂无历史记录。</p></div>';return}
- V.innerHTML='<div class=card>'+
-  '<audio id=hap controls style="width:100%;margin-bottom:10px;display:none"></audio>'+
-  '<p class=note>音频保留 1 天:▶ 试听、⬇ 下载(可作声纹注册输入)。改「原文」后点「保存原文」生成纠错样本;「重新优化/翻译」会按当前原文 + 配置中的提示词重跑 LLM,结果立刻覆盖优化和英文两栏。</p>'+
+ const headHtml=
+  '<div class=hist-hd>'+
+   '<div class=meta>'+
+    '<div>音频保留 1 天:▶ 试听、⬇ 下载(可作声纹注册输入)。改「原文」后点「保存原文」生成纠错样本;「重新优化/翻译」会按当前原文 + 配置中的提示词重跑 LLM,结果立刻覆盖优化和英文两栏。「单独打开」会在新标签页里展示这一条,带音频播放器,适合细看或保存外链。</div>'+
+    '<div style="margin-top:6px">存储:GB10 容器内 <code>SQLite</code>(<code>/data/app.db</code>,挂载到 Docker volume <code>orch-data</code>)。文本表 <code>segments</code> 永久保存,音频表 <code>segment_audio</code> 每小时清理 1 天前的 blob,会话表 <code>sessions</code> 仅用于"录音时长"统计。</div>'+
+   '</div>'+
+   '<div><button class="s del" onclick="clearAllHistory()" title="删除所有历史记录(不可恢复)">清空全部历史</button></div>'+
+  '</div>';
+ if(!h||!h.length){V.innerHTML='<div class=card>'+headHtml+'<p class=note style="margin-top:14px">暂无历史记录。</p></div>';return}
+ V.innerHTML='<div class=card>'+headHtml+
+  '<audio id=hap controls style="width:100%;margin:10px 0;display:none"></audio>'+
   h.map(r=>renderSeg(r)).join('')+
   '</div>';
 }
-function renderSeg(r){
+async function clearAllHistory(){
+ if(!confirm('确认清空全部历史?\n\n会删除所有识别记录(原文/优化/翻译)和保留的音频。\n会话时长统计不受影响。\n此操作不可恢复。'))return;
+ if(!confirm('再确认一次:真的要清空全部历史吗?'))return;
+ const d=await j('/api/segments','DELETE');
+ if(d.ok){alert('已清空 '+d.removed+' 条记录');render()}
+ else{alert('清空失败')}
+}
+function renderSeg(r,opts){
+ opts=opts||{};
  const audioBtn=r.has_audio
   ?`<button class="s ren" onclick="playSeg(${r.id})">▶ 试听</button> <a class="s ren" style="text-decoration:none;display:inline-block" href="/api/segments/${r.id}/audio">⬇ 下载</a>`
   :'<span class=note>(音频已过期)</span>';
+ const openLink=opts.hideOpen?''
+  :`<a class="s ren" style="text-decoration:none;display:inline-block" href="/segment/${r.id}" target="_blank" rel="noopener" title="在新标签页单独打开此条记录">↗ 单独打开</a>`;
+ const idHtml=opts.hideOpen?`<span class=id>#${r.id}</span>`
+  :`<span class=id><a href="/segment/${r.id}" target="_blank" rel="noopener" title="在新标签页打开">#${r.id}</a></span>`;
  return `<div class=seg id=seg_${r.id}>
   <div class=seg-hd>
-   <span class=id>#${r.id}</span>
+   ${idHtml}
    <span>${esc(r.ts)}</span>
    ${r.speaker?`<span class=sp>${esc(r.speaker)}</span>`:''}
    <span class=spacer></span>
@@ -744,7 +796,8 @@ function renderSeg(r){
   <div class=seg-acts>
    <button class="s ren" onclick="saveSeg(${r.id})">保存原文</button>
    <button class="s ren" onclick="rerunSeg(${r.id},this)">重新优化/翻译</button>
-   <div class=right><button class="s del" onclick="delSeg(${r.id})">删除</button></div>
+   ${openLink}
+   <div class=right><button class="s del" onclick="delSeg(${r.id},${opts.singleMode?'true':'false'})">删除</button></div>
   </div>
  </div>`;
 }
@@ -758,11 +811,13 @@ async function rerunSeg(id,btn){
  }catch(e){alert('请求失败:'+e)}
  finally{btn.disabled=false;btn.textContent=t}
 }
-async function delSeg(id){
+async function delSeg(id,singleMode){
  if(!confirm('删除该条记录?(原文/优化/翻译及保留的音频都会删除,且不可恢复)'))return;
  const d=await j('/api/segments/'+id,'DELETE');
- if(d.ok){const el=document.getElementById('seg_'+id);if(el)el.remove()}
- else{alert('删除失败')}
+ if(d.ok){
+  if(singleMode){location.href='/#hi';return}
+  const el=document.getElementById('seg_'+id);if(el)el.remove();
+ }else{alert('删除失败')}
 }
 function esc(s){return (s+'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function escA(s){return esc(s).replace(/"/g,'&quot;')}
@@ -797,7 +852,36 @@ async function enroll(){
  mr.onstop=()=>{stream.getTracks().forEach(t=>t.stop());doEnroll(new Blob(chunks),name)};
  mr.start();est.textContent='录音中…(5秒)';setTimeout(()=>mr.stop(),5000);
 }
-render();
+async function renderSingleSegment(id){
+ window.__singleMode=true;
+ // Hide tab nav since we're showing one row in isolation; tab buttons would
+ // be misleading. Keep them visible-but-disabled for orientation? Just hide.
+ if(NAV)NAV.style.display='none';
+ let r;
+ try{const resp=await fetch('/api/segments/'+id);
+  if(!resp.ok){V.innerHTML='<div class="card single-wrap"><a class="s ren back" href="/">← 返回管理台</a><p class=note style="margin-top:14px">未找到 #'+id+' 的记录(可能已删除)。</p></div>';return}
+  r=await resp.json();
+ }catch(e){V.innerHTML='<div class="card single-wrap"><a class="s ren back" href="/">← 返回管理台</a><p class=note style="margin-top:14px">加载失败:'+esc(String(e))+'</p></div>';return}
+ const audioSrc=r.has_audio?('/api/segments/'+r.id+'/audio'):'';
+ V.innerHTML='<div class="single-wrap">'+
+  '<a class="s ren back" href="/" style="text-decoration:none">← 返回管理台</a>'+
+  '<div class=card>'+
+   (audioSrc?'<audio id=hap controls autoplay style="width:100%;margin-bottom:14px" src="'+audioSrc+'"></audio>'
+            :'<p class=note style="margin-bottom:10px">(原始音频已过期或未保存,只剩文本)</p>')+
+   renderSeg(r,{singleMode:true,hideOpen:true})+
+  '</div></div>';
+}
+function bootstrap(){
+ const m=location.pathname.match(/^\/segment\/(\d+)\/?$/);
+ if(m){renderSingleSegment(parseInt(m[1],10));return}
+ // hash-based jump (e.g. coming back from a /segment page with /#hi)
+ const h=(location.hash||'').replace('#','');
+ if(h&&['ov','hi','sp','cf'].includes(h)){
+  tab=h;document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===h));
+ }
+ render();
+}
+bootstrap();
 </script></body></html>"#;
 
 /// Bounded session PCM buffer (16k mono s16le). Keeps only the most recent

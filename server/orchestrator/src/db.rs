@@ -173,6 +173,15 @@ impl Db {
             .unwrap_or(false)
     }
 
+    /// Wipe ALL transcript history (segments + retained audio). Sessions are
+    /// kept (used by the recording-time stats on the overview tab). Returns
+    /// the number of segment rows removed.
+    pub fn segments_clear_all(&self) -> usize {
+        let c = self.lock();
+        let _ = c.execute("DELETE FROM segment_audio", []);
+        c.execute("DELETE FROM segments", []).unwrap_or(0)
+    }
+
     // ── per-segment audio (retained 1 day, for re-listen / download /
     //    voiceprint enrollment input / corrected-sample building) ─────────
     pub fn audio_put(&self, sid: i64, wav: &[u8]) {
