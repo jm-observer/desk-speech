@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -27,9 +27,48 @@ use crate::commands::recording::build_input_stream;
 
 /// Target sample rate for the upstream PCM the orchestrator expects.
 const SAMPLE_RATE: u32 = 16_000;
+
+/// Auto-copy "stitch window": when the previous auto-copy happened within
+/// this duration, we treat the new segment as a continuation of the same
+/// thought and write the concatenated text to the clipboard, instead of
+/// overwriting with just the new segment's text. Lets a multi-pause
+/// sentence end up as one clipboard paste.
+const AUTO_COPY_MERGE_WINDOW: Duration = Duration::from_millis(3000);
+
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::lock_utils::read_lock;
 use crate::settings::VadSettings;
+
+/// Tracks the last clipboard write so the next one can decide whether to
+/// merge (same thought, short gap) or replace (new thought, long gap).
+struct AutoCopyAccum {
+    written_at: Instant,
+    text: String,
+    ref_id: i64,
+}
+
+/// Decide what to actually paste into the clipboard for this segment:
+/// if the previous auto-copy is still within the stitch window and the
+/// segment id differs, concatenate; otherwise start fresh. Mutates `acc`
+/// in place to remember the final pasted text for the next call.
+fn next_clipboard_text(acc: &mut Option<AutoCopyAccum>, text: &str, ref_id: i64) -> String {
+    let merged = match acc.as_ref() {
+        Some(prev)
+            if prev.written_at.elapsed() < AUTO_COPY_MERGE_WINDOW
+                && prev.ref_id != ref_id
+                && !prev.text.is_empty() =>
+        {
+            format!("{} {}", prev.text, text)
+        }
+        _ => text.to_string(),
+    };
+    *acc = Some(AutoCopyAccum {
+        written_at: Instant::now(),
+        text: merged.clone(),
+        ref_id,
+    });
+    merged
+}
 
 /// Returns the configured remote orchestrator URL, if any.
 pub(crate) fn remote_url() -> Option<String> {
@@ -342,6 +381,8 @@ async fn run_one_connection(
     let llm_settings_r = Arc::clone(llm_settings);
     let mut reader = tokio::spawn(async move {
         let mut segs: HashMap<i64, SegState> = HashMap::new();
+        // Stitch window accumulator: appends short-gap copies into one paste.
+        let mut copy_acc: Option<AutoCopyAccum> = None;
         while let Some(Ok(msg)) = rd.next().await {
             let Message::Text(t) = msg else { continue };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { continue };
@@ -380,8 +421,13 @@ async fn run_one_connection(
                         AutoCopyMode::OptimizedZh
                     );
                     if copy && !text.is_empty() {
-                        match app_r.clipboard().write_text(text) {
-                            Ok(_) => info!("[remote] auto copy (优化中文) ref={id}"),
+                        let merged = next_clipboard_text(&mut copy_acc, &text, id);
+                        let merged_for_log = merged.clone();
+                        match app_r.clipboard().write_text(merged) {
+                            Ok(_) => info!(
+                                "[remote] auto copy (优化中文) ref={id} chars={}",
+                                merged_for_log.chars().count()
+                            ),
                             Err(e) => error!("[remote] clipboard 优化中文 failed: {e}"),
                         }
                     }
@@ -401,8 +447,13 @@ async fn run_one_connection(
                         AutoCopyMode::English
                     );
                     if copy && !text.is_empty() {
-                        match app_r.clipboard().write_text(text) {
-                            Ok(_) => info!("[remote] auto copy (英文) ref={id}"),
+                        let merged = next_clipboard_text(&mut copy_acc, &text, id);
+                        let merged_for_log = merged.clone();
+                        match app_r.clipboard().write_text(merged) {
+                            Ok(_) => info!(
+                                "[remote] auto copy (英文) ref={id} chars={}",
+                                merged_for_log.chars().count()
+                            ),
                             Err(e) => error!("[remote] clipboard 英文 failed: {e}"),
                         }
                     }
