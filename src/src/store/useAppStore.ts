@@ -46,6 +46,36 @@ export const useAppStore = () => {
         : 'blocked',
   }), []);
 
+  // Map an orchestrator /api/history row (server SegmentRow shape) into the
+  // Segment shape the desktop UI consumes. Server fields:
+  //   id, session_id, ts, text, optimized, english, speaker, has_audio
+  // We use `id` as both segment_id and a synthetic revision so it merges
+  // with live `segment_updated` events without colliding.
+  const mapServerHistory = useCallback((row: Record<string, unknown>): Segment => {
+    const id = typeof row.id === 'number' ? row.id : null;
+    const ts = typeof row.ts === 'string' ? row.ts : '';
+    return {
+      id,
+      segment_id: id,
+      revision: id ?? undefined,
+      start: 0,
+      end: 0,
+      wall_start: ts,
+      wall_end: ts,
+      text_raw: typeof row.text === 'string' ? row.text : '',
+      text_optimized: typeof row.optimized === 'string' ? row.optimized : undefined,
+      text_english: typeof row.english === 'string' ? row.english : undefined,
+      speaker: typeof row.speaker === 'string' && row.speaker.length > 0 ? row.speaker : undefined,
+      // Server-side history is post-processing — mark both stages as
+      // 'success' regardless of whether optimized/english are present, so
+      // preloaded rows never show a spinner. SegmentCard falls back to
+      // `text_raw` when the optimized field is empty, which is the right
+      // affordance for "this is past context, not currently being processed".
+      optimize_status: 'success',
+      translate_status: 'success',
+    };
+  }, []);
+
   // Initialize
   useEffect(() => {
     let canceled = false;
@@ -72,6 +102,24 @@ export const useAppStore = () => {
           setQualityFilterConfig(config);
         } catch (err) {
           console.error('Failed to load quality filter config', err);
+        }
+
+        // Preload last 5 history segments from the orchestrator so the panel
+        // isn't empty before the first recording of this session. Server
+        // returns newest-first; reverse so the list reads oldest -> newest
+        // (live segments append at the bottom in the same order).
+        try {
+          const rows = await TauriAPI.fetchRemoteHistory(5);
+          if (canceled) return;
+          if (rows.length > 0) {
+            const mapped = rows
+              .map(mapServerHistory)
+              .filter((seg) => seg.text_raw.trim().length > 0)
+              .reverse();
+            setSegments(mapped);
+          }
+        } catch (err) {
+          console.warn('Preload remote history failed', err);
         }
 
         // Check init status
@@ -235,7 +283,7 @@ export const useAppStore = () => {
         unsubscribeConfigValidationError();
       }
     };
-  }, [mapDbSegment]);
+  }, [mapDbSegment, mapServerHistory]);
 
   return {
     status, setStatus,

@@ -3,6 +3,11 @@ name = "orchestrator"
 version = "0.1.0"
 edition = "2021"
 
+# Built independently on GB10 (cargo deps + linux toolchain), not part of the
+# Windows workspace. `[workspace]` keeps `cargo` from inheriting the parent
+# manifest when this crate is checked locally on Windows.
+[workspace]
+
 # P0 编排层:对客户端的 WebSocket(protocol-draft.md)+ 串 ASR + vLLM。
 # 纯业务胶水,不做推理。后续可复用现有 Tauri 后端的分段/词修正逻辑。
 

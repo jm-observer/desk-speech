@@ -118,6 +118,7 @@ export const TauriAPI = {
   startRecording: () => invoke('start_recording'),
   stopRecording: () => invoke('stop_recording'),
   getRecordingState: () => invoke<RecordingState>('get_recording_state'),
+  fetchRemoteHistory: (limit: number) => invoke<Record<string, unknown>[]>('fetch_remote_history', { limit }),
   listDevices: () => invoke<InputDeviceInfo[]>('list_input_devices'),
   getSelectedDevice: () => invoke<string | null>('get_selected_device'),
   setInputDevice: (deviceName: string | null) => invoke('set_input_device', { deviceName }),

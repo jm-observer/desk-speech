@@ -137,6 +137,42 @@ impl Db {
             .unwrap_or(false)
     }
 
+    /// Look up a single segment (for rerun / get-by-id flows).
+    pub fn segment_get(&self, sid: i64) -> Option<SegmentRow> {
+        self.lock()
+            .query_row(
+                "SELECT s.id,s.session_id,s.ts,s.text,s.optimized,s.english,s.speaker,
+                        EXISTS(SELECT 1 FROM segment_audio a WHERE a.segment_id=s.id)
+                 FROM segments s WHERE s.id=?1",
+                [sid],
+                |r| {
+                    Ok(SegmentRow {
+                        id: r.get(0)?,
+                        session_id: r.get(1)?,
+                        ts: r.get(2)?,
+                        text: r.get(3)?,
+                        optimized: r.get(4)?,
+                        english: r.get(5)?,
+                        speaker: r.get(6)?,
+                        has_audio: r.get::<_, i64>(7)? != 0,
+                    })
+                },
+            )
+            .ok()
+    }
+
+    /// Delete a segment row and its retained audio. Returns true if a row was
+    /// actually removed (false if the id didn't exist).
+    pub fn segment_delete(&self, sid: i64) -> bool {
+        let c = self.lock();
+        // best-effort: drop audio first so we don't leave orphan blobs if the
+        // segments delete races (single-conn anyway, so really fine).
+        let _ = c.execute("DELETE FROM segment_audio WHERE segment_id=?1", [sid]);
+        c.execute("DELETE FROM segments WHERE id=?1", [sid])
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
     // ── per-segment audio (retained 1 day, for re-listen / download /
     //    voiceprint enrollment input / corrected-sample building) ─────────
     pub fn audio_put(&self, sid: i64, wav: &[u8]) {

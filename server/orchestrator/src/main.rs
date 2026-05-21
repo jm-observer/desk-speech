@@ -117,6 +117,8 @@ async fn main() {
         .route("/api/speakers/:id/enabled", post(api_speaker_enabled))
         .route("/api/segments/:id/audio", get(api_segment_audio))
         .route("/api/segments/:id/text", post(api_segment_set_text))
+        .route("/api/segments/:id/rerun", post(api_segment_rerun))
+        .route("/api/segments/:id", delete(api_segment_delete))
         .route("/api/config", get(api_config_get).post(api_config_set))
         .with_state(ctx);
 
@@ -354,8 +356,16 @@ async fn console() -> Html<&'static str> {
 async fn api_stats(State(ctx): State<AppCtx>) -> Json<db::Stats> {
     Json(ctx.db.stats())
 }
-async fn api_history(State(ctx): State<AppCtx>) -> Json<Vec<db::SegmentRow>> {
-    Json(ctx.db.segments_recent(200))
+async fn api_history(
+    State(ctx): State<AppCtx>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Json<Vec<db::SegmentRow>> {
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(200)
+        .clamp(1, 500);
+    Json(ctx.db.segments_recent(limit))
 }
 async fn api_speakers(State(ctx): State<AppCtx>) -> Json<Vec<db::Speaker>> {
     Json(ctx.db.speakers_list())
@@ -488,6 +498,74 @@ async fn api_segment_set_text(
     }
 }
 
+/// Delete a segment (and its retained audio).
+async fn api_segment_delete(
+    State(ctx): State<AppCtx>,
+    Path(id): Path<i64>,
+) -> Json<serde_json::Value> {
+    let ok = ctx.db.segment_delete(id);
+    Json(json!({"ok": ok}))
+}
+
+/// Re-run optimize + translate for an existing segment, using its current
+/// `text` and the latest DB-configured prompts/vLLM endpoint. Returns the
+/// updated row so the UI can refresh in-place.
+async fn api_segment_rerun(
+    State(ctx): State<AppCtx>,
+    Path(id): Path<i64>,
+) -> Json<serde_json::Value> {
+    let Some(row) = ctx.db.segment_get(id) else {
+        return Json(json!({"ok": false, "error": "segment not found"}));
+    };
+    let text = row.text.clone();
+    let model = ctx
+        .db
+        .config_get("vllm.model")
+        .unwrap_or_else(|| ctx.cfg.vllm_model.clone());
+    let base = ctx
+        .db
+        .config_get("vllm.base")
+        .unwrap_or_else(|| ctx.cfg.vllm_base.clone());
+    let opt_sys = ctx
+        .db
+        .config_get("llm.optimize_prompt")
+        .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
+    let tr_sys = ctx
+        .db
+        .config_get("llm.translate_prompt")
+        .unwrap_or_else(|| DEFAULT_TRANSLATE_PROMPT.into());
+    let opt_fut = llm(&base, &model, &opt_sys, &text);
+    let tr_fut = llm(&base, &model, &tr_sys, &text);
+    let (opt_res, tr_res) = tokio::join!(opt_fut, tr_fut);
+    let mut errs: Vec<String> = Vec::new();
+    let optimized = match opt_res {
+        Ok(s) => {
+            ctx.db.segment_set_optimized(id, &s);
+            Some(s)
+        }
+        Err(e) => {
+            errs.push(format!("optimize: {e}"));
+            None
+        }
+    };
+    let english = match tr_res {
+        Ok(s) => {
+            ctx.db.segment_set_english(id, &s);
+            Some(s)
+        }
+        Err(e) => {
+            errs.push(format!("translate: {e}"));
+            None
+        }
+    };
+    Json(json!({
+        "ok": errs.is_empty(),
+        "error": if errs.is_empty() { None } else { Some(errs.join("; ")) },
+        "optimized": optimized,
+        "english": english,
+    }))
+}
+
 async fn api_config_get(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
     let m: serde_json::Map<String, serde_json::Value> = ctx
         .db
@@ -527,7 +605,34 @@ button.s{padding:4px 10px;border-radius:6px;border:0;cursor:pointer;font-size:12
 .del{background:#7f1d1d;color:#fff}.ren{background:#334155;color:#fff}
 .kpi{display:flex;gap:24px}.kpi div{font-size:13px;color:#94a3b8}.kpi b{display:block;font-size:24px;color:#fff}
 .note{color:#94a3b8;font-size:13px}
-input{background:#0f1115;border:1px solid #334155;color:#e6e6e6;border-radius:6px;padding:6px}
+input,select,textarea{background:#0f1115;border:1px solid #334155;color:#e6e6e6;border-radius:6px;padding:6px;font:inherit;box-sizing:border-box}
+textarea{width:100%;min-height:96px;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;resize:vertical}
+.cfg-grp{margin-top:8px}
+.cfg-grp h3{margin:14px 0 6px;font-size:14px;color:#cbd5e1;border-bottom:1px solid #232838;padding-bottom:4px}
+.cfg-row{display:grid;grid-template-columns:minmax(180px,220px) 1fr auto;gap:14px;align-items:start;padding:10px 0;border-bottom:1px solid #1f2330}
+.cfg-row:last-child{border-bottom:0}
+.cfg-lbl b{display:block;color:#fff;font-size:13px}
+.cfg-lbl code{font-size:11px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.cfg-lbl .hint{display:block;font-size:12px;color:#94a3b8;margin-top:4px;line-height:1.5}
+.cfg-ctl input[type=text],.cfg-ctl select{width:100%}
+.cfg-ctl .row{display:flex;gap:8px;align-items:center}
+.cfg-save{align-self:start}
+/* history tab — stack original/optimized/english vertically so long text wraps */
+.seg{padding:14px 0;border-bottom:1px solid #1f2330}
+.seg:last-child{border-bottom:0}
+.seg-hd{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:#94a3b8;margin-bottom:8px}
+.seg-hd .id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#64748b}
+.seg-hd .sp{color:#cbd5e1;background:#1f2330;padding:2px 8px;border-radius:6px}
+.seg-hd .spacer{flex:1}
+.seg-fld{display:grid;grid-template-columns:60px 1fr;gap:8px 12px;margin-bottom:4px;align-items:start}
+.seg-fld .k{color:#94a3b8;font-size:12px;padding-top:6px}
+.seg-fld textarea,.seg-fld input{width:100%;box-sizing:border-box}
+.seg-fld textarea{min-height:46px}
+.seg-fld .raw{background:#0d1626;border-color:#1e3a5f}
+.seg-fld .opt{color:#e6e6e6}
+.seg-fld .en{color:#94a3b8;font-style:italic}
+.seg-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.seg-acts .right{margin-left:auto;display:flex;gap:8px}
 </style></head><body>
 <header>语音服务管理台</header>
 <nav><button class=on data-t=ov>概览</button><button data-t=hi>历史</button>
@@ -545,15 +650,7 @@ async function render(){
   <div>会话数<b>${s.sessions}</b></div><div>识别段<b>${s.segments}</b></div>
   <div>累计录音<b>${(s.total_recording_sec/60).toFixed(1)}分</b></div>
   <div>今日录音<b>${(s.today_recording_sec/60).toFixed(1)}分</b></div></div></div>`}
- else if(tab=='hi'){const h=await j('/api/history');
-  V.innerHTML='<div class=card><audio id=hap controls style="width:100%;margin-bottom:10px;display:none"></audio>'+
-  '<p class=note>音频保留1天:▶试听、⬇下载(可作声纹注册输入),改「原文」后点保存生成纠错样本(供后续提取/优化参考)。</p>'+
-  '<table><tr><th>时间</th><th>原文(可改)</th><th>优化</th><th>英文</th><th>说话人</th><th>音频</th></tr>'+
-  h.map(r=>`<tr><td>${r.ts}</td>`+
-   `<td><input id="tx_${r.id}" value="${escA(r.text)}" style="width:97%"></td>`+
-   `<td>${esc(r.optimized||'')}</td><td>${esc(r.english||'')}</td><td>${esc(r.speaker||'')}</td>`+
-   `<td style="white-space:nowrap">${r.has_audio?`<button class="s ren" onclick="playSeg(${r.id})">▶</button> <a class="s ren" style="text-decoration:none" href="/api/segments/${r.id}/audio">⬇</a> `:'<span class=note>已过期 </span>'}<button class="s ren" onclick="saveSeg(${r.id})">保存</button></td>`+
-   `</tr>`).join('')+'</table></div>'}
+ else if(tab=='hi'){const h=await j('/api/history');renderHistory(h)}
  else if(tab=='sp'){const sp=await j('/api/speakers');const ac=await j('/api/asr-config');
   const gv=String(ac.gate_to_enrolled==null?'on':ac.gate_to_enrolled).toLowerCase();
   const gate=!(gv==='off'||gv==='0'||gv==='false'||gv==='no');
@@ -569,9 +666,103 @@ async function render(){
   '<table><tr><th>名称</th><th>启用</th><th>创建</th><th></th></tr>'+
   sp.map(s=>`<tr><td>${esc(s.name)}</td><td><input type=checkbox ${s.enabled?'checked':''} onchange="en(${s.id},this.checked)"></td><td>${s.created_at}</td>
   <td><button class="s ren" onclick="rn(${s.id})">改名</button> <button class="s del" onclick="dl(${s.id})">删除</button></td></tr>`).join('')+'</table></div>'}
- else if(tab=='cf'){const c=await j('/api/config');const ks=Object.keys(c);
-  V.innerHTML='<div class=card><table>'+ks.map(k=>`<tr><td>${esc(k)}</td><td><input id="cf_${k}" value="${esc(c[k])}" style="width:60%"></td><td><button class="s ren" onclick="cs('${k}')">保存</button></td></tr>`).join('')+
-  (ks.length?'':'<tr><td class=note>暂无配置项</td></tr>')+'</table></div>'}
+ else if(tab=='cf'){const c=await j('/api/config');renderConfig(c)}
+}
+const CFG_META={
+ 'asr.model':{label:'ASR 模型',group:'ASR',kind:'select',options:['paraformer','sensevoice'],
+  hint:'识别后端模型。修改后 ASR 服务在 ~15s 内热切换(无需重启;切换期间在跑的那段会用旧模型完成)。'},
+ 'asr.spk_threshold':{label:'声纹匹配阈值',group:'ASR',
+  hint:'0~1 的相似度门槛。值越高越严格(误收他人↓、漏收自己↑)。常用 0.30~0.45。ASR 服务每 15s 轮询热更新,无需重启。'},
+ 'asr.sentence_gap_ms':{label:'句子切分静音 (毫秒)',group:'ASR',
+  hint:'连续静音超过该时长视为一句结束并下发。1000~2000 为常用区间。无需重启,~15s 内生效。'},
+ 'asr.gate_to_enrolled':{label:'声纹门控',group:'ASR',kind:'select',options:['on','off'],
+  hint:'on = 只识别已在「声纹」tab 启用的声纹的语音段,其余直接丢弃;off = 识别所有人,命中已启用声纹时仍标注说话人。未注册任何声纹时,两种设置都等同于「识别所有人」。无需重启,~15s 内生效。'},
+ 'vllm.base':{label:'vLLM 服务地址',group:'LLM',
+  hint:'OpenAI 兼容根地址(以 /v1 结尾)。容器内访问主机服务请用 host.docker.internal,例如 http://host.docker.internal:12340/v1。改完下一条新分段就用新值,无需重启。'},
+ 'vllm.model':{label:'vLLM 模型名',group:'LLM',
+  hint:'必须与 vLLM 启动时 --served-model-name 一致,例如 gemma-4-26B-A4B-it。'},
+ 'llm.optimize_prompt':{label:'中文润色提示词',group:'LLM',kind:'textarea',
+  hint:'system 角色提示词。把原始口语转写整理成通顺书面中文。改完下一条新分段生效。'},
+ 'llm.translate_prompt':{label:'英文翻译提示词',group:'LLM',kind:'textarea',
+  hint:'system 角色提示词。把整理后的中文翻成自然英文。改完下一条新分段生效。'},
+};
+const CFG_GROUPS=['ASR','LLM','其他'];
+function renderConfig(c){
+ const ks=Object.keys(c).sort();
+ if(!ks.length){V.innerHTML='<div class=card><p class=note>暂无配置项。</p></div>';return}
+ const buckets={};ks.forEach(k=>{const g=(CFG_META[k]&&CFG_META[k].group)||'其他';(buckets[g]=buckets[g]||[]).push(k)});
+ let html='<div class=card>'+
+  '<p class=note>所有配置项即时生效,无需重启:asr.* 由 ASR 服务每 15s 轮询;vllm.* / llm.* 在处理下一条分段时读取。</p>';
+ CFG_GROUPS.forEach(g=>{
+  const list=buckets[g];if(!list||!list.length)return;
+  html+='<div class=cfg-grp><h3>'+esc(g)+'</h3>';
+  list.forEach(k=>{html+=renderCfgRow(k,c[k])});
+  html+='</div>';
+ });
+ html+='</div>';V.innerHTML=html;
+}
+function renderCfgRow(k,v){
+ const meta=CFG_META[k]||{};const kind=meta.kind||'text';const id='cf_'+cssId(k);
+ const lbl=meta.label?`<b>${esc(meta.label)}</b><code>${esc(k)}</code>`:`<b>${esc(k)}</b>`;
+ const hint=meta.hint?`<span class=hint>${esc(meta.hint)}</span>`:'';
+ let ctl;
+ if(kind==='textarea'){
+  ctl=`<textarea id="${id}" rows=5>${esc(v||'')}</textarea>`;
+ }else if(kind==='select'){
+  const opts=(meta.options||[]).map(o=>`<option value="${esc(o)}"${o===v?' selected':''}>${esc(o)}</option>`).join('');
+  ctl=`<select id="${id}">${opts}</select>`;
+ }else{
+  ctl=`<input id="${id}" type=text value="${escA(v||'')}">`;
+ }
+ return `<div class=cfg-row><div class=cfg-lbl>${lbl}${hint}</div><div class=cfg-ctl>${ctl}</div><button class="s ren cfg-save" onclick="cs('${jsKey(k)}')">保存</button></div>`;
+}
+function cssId(k){return k.replace(/[^a-zA-Z0-9_-]/g,'_')}
+function jsKey(k){return k.replace(/'/g,"\\'")}
+function renderHistory(h){
+ if(!h||!h.length){V.innerHTML='<div class=card><p class=note>暂无历史记录。</p></div>';return}
+ V.innerHTML='<div class=card>'+
+  '<audio id=hap controls style="width:100%;margin-bottom:10px;display:none"></audio>'+
+  '<p class=note>音频保留 1 天:▶ 试听、⬇ 下载(可作声纹注册输入)。改「原文」后点「保存原文」生成纠错样本;「重新优化/翻译」会按当前原文 + 配置中的提示词重跑 LLM,结果立刻覆盖优化和英文两栏。</p>'+
+  h.map(r=>renderSeg(r)).join('')+
+  '</div>';
+}
+function renderSeg(r){
+ const audioBtn=r.has_audio
+  ?`<button class="s ren" onclick="playSeg(${r.id})">▶ 试听</button> <a class="s ren" style="text-decoration:none;display:inline-block" href="/api/segments/${r.id}/audio">⬇ 下载</a>`
+  :'<span class=note>(音频已过期)</span>';
+ return `<div class=seg id=seg_${r.id}>
+  <div class=seg-hd>
+   <span class=id>#${r.id}</span>
+   <span>${esc(r.ts)}</span>
+   ${r.speaker?`<span class=sp>${esc(r.speaker)}</span>`:''}
+   <span class=spacer></span>
+   ${audioBtn}
+  </div>
+  <div class=seg-fld><div class=k>原文</div><textarea id="tx_${r.id}" class=raw rows=2>${esc(r.text||'')}</textarea></div>
+  <div class=seg-fld><div class=k>优化</div><div id="opt_${r.id}" class=opt>${esc(r.optimized||'')||'<span class=note>(尚未优化)</span>'}</div></div>
+  <div class=seg-fld><div class=k>英文</div><div id="en_${r.id}" class=en>${esc(r.english||'')||'<span class=note>(尚未翻译)</span>'}</div></div>
+  <div class=seg-acts>
+   <button class="s ren" onclick="saveSeg(${r.id})">保存原文</button>
+   <button class="s ren" onclick="rerunSeg(${r.id},this)">重新优化/翻译</button>
+   <div class=right><button class="s del" onclick="delSeg(${r.id})">删除</button></div>
+  </div>
+ </div>`;
+}
+async function rerunSeg(id,btn){
+ const t=btn.textContent;btn.disabled=true;btn.textContent='处理中...';
+ try{
+  const d=await j('/api/segments/'+id+'/rerun','POST',{});
+  if(d.optimized!=null){document.getElementById('opt_'+id).textContent=d.optimized}
+  if(d.english!=null){document.getElementById('en_'+id).textContent=d.english}
+  if(!d.ok){alert('LLM 部分失败:'+(d.error||'?'))}
+ }catch(e){alert('请求失败:'+e)}
+ finally{btn.disabled=false;btn.textContent=t}
+}
+async function delSeg(id){
+ if(!confirm('删除该条记录?(原文/优化/翻译及保留的音频都会删除,且不可恢复)'))return;
+ const d=await j('/api/segments/'+id,'DELETE');
+ if(d.ok){const el=document.getElementById('seg_'+id);if(el)el.remove()}
+ else{alert('删除失败')}
 }
 function esc(s){return (s+'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function escA(s){return esc(s).replace(/"/g,'&quot;')}
@@ -580,7 +771,7 @@ function playSeg(id){const a=document.getElementById('hap');a.style.display='blo
 async function dl(id){if(confirm('删除该声纹?')){await j('/api/speakers/'+id,'DELETE');render()}}
 async function rn(id){const n=prompt('新名称');if(n){await j('/api/speakers/'+id+'/rename','POST',{name:n});render()}}
 async function en(id,e){await j('/api/speakers/'+id+'/enabled','POST',{enabled:e})}
-async function cs(k){const val=document.getElementById('cf_'+k).value;await j('/api/config','POST',{[k]:val});alert('已保存')}
+async function cs(k){const el=document.getElementById('cf_'+cssId(k));if(!el){alert('找不到输入框: '+k);return}await j('/api/config','POST',{[k]:el.value});const b=event&&event.target;if(b){const t=b.textContent;b.textContent='已保存';setTimeout(()=>{b.textContent=t},900)}else{alert('已保存')}}
 async function setGate(on){await j('/api/config','POST',{'asr.gate_to_enrolled':on?'on':'off'});render()}
 function enName(){const n=(document.getElementById('enm')||{}).value;return (n||'').trim()}
 async function doEnroll(blob,name){

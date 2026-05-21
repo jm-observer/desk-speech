@@ -194,6 +194,7 @@ pub fn run() {
             commands::recording::stop_recording,
             commands::recording::clear_results,
             commands::recording::get_recording_state,
+            commands::remote::fetch_remote_history,
             commands::export::copy_text_to_clipboard,
             commands::init::get_init_status,
             commands::settings::get_settings,

@@ -36,6 +36,40 @@ pub(crate) fn remote_url() -> Option<String> {
     std::env::var("REMOTE_ASR_URL").ok().filter(|s| !s.is_empty())
 }
 
+/// Derive the orchestrator HTTP base (e.g. "http://192.168.0.68:8090")
+/// from REMOTE_ASR_URL (e.g. "ws://192.168.0.68:8090/stream").
+fn remote_http_base() -> Option<String> {
+    let ws = remote_url()?;
+    let (scheme, rest) = if let Some(r) = ws.strip_prefix("wss://") {
+        ("https://", r)
+    } else if let Some(r) = ws.strip_prefix("ws://") {
+        ("http://", r)
+    } else {
+        return None;
+    };
+    // strip everything from the first '/' onward (path), keep host[:port]
+    let host = rest.split_once('/').map(|(h, _)| h).unwrap_or(rest);
+    Some(format!("{scheme}{host}"))
+}
+
+/// Fetch recent transcribed segments from the orchestrator's `/api/history`.
+/// Used by the desktop client to pre-populate the result list on startup
+/// (last N transcripts) so the panel isn't empty before the user records.
+#[tauri::command]
+pub async fn fetch_remote_history(limit: u32) -> Result<Vec<serde_json::Value>, String> {
+    let Some(base) = remote_http_base() else {
+        return Err("REMOTE_ASR_URL 未配置".to_string());
+    };
+    let lim = limit.clamp(1, 200);
+    let url = format!("{base}/api/history?limit={lim}");
+    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("history api status {}", resp.status()));
+    }
+    let body: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(body)
+}
+
 /// Minimal stateful linear resampler (mono), replaces sherpa's resampler so
 /// the client no longer depends on sherpa-onnx. ASR-grade quality is fine.
 struct LinResampler {
