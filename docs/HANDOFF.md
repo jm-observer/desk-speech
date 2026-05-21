@@ -94,6 +94,43 @@ A/B 工具:`server/ab_asr.py`(scp 到 `~/server`→`docker compose cp` 进 asr�
 - 提示词调优:当前优化/翻译提示词够用,无具体抱怨不盲改;`llm.optimize_prompt`/
   `llm.translate_prompt` 现已是管理台实时可编(Stage3-C),按需现场调即可
 
+### 英文技术词被识别成中文音译(2026-05-21 收到反馈,待体验后定方案)
+
+**症状**:说 "body"、"agent"、"token"、"API" 等英文词时发音不够标准,Paraformer
+作为纯中文模型会把它们解码成最接近发音的汉字串(如「把蒂」「埃真特」)。
+
+三条优化路径,按 ROI 排序:
+
+1. **改 `llm.optimize_prompt`(零代码,推荐先试)** —— 在润色阶段让 LLM 把明显是
+   音译的英文技术词还原。建议追加段落:
+   ```
+   2. 如果发现明显是用谐音/拼音音译过来的英文技术词或产品名(例如「把蒂」→ body、
+      「埃真特」→ agent、「贴啃」→ token、「啊P艾」→ API、「皆森」→ JSON、
+      「报跌」→ payload、「瑞快斯特」→ request、「啊塞克」→ async、
+      「服啦各」→ flag 等),还原成原英文单词,大小写按业内惯例。其他正常中文词不要乱改。
+   3. 保留所有代码标识符、变量名、函数名、缩写、模型名(如 vLLM、Tauri、GB10、JSON)
+      原样,不音译、不翻译。
+   4. 中英文混排时英文词两侧加一个空格,不加点号。
+   ```
+   操作:`http://192.168.0.68:8090/` → 配置 → `llm.optimize_prompt` textarea
+   → 替换 → 保存。下一条新分段生效,无需重启。覆盖面最广,但 LLM 偶尔可能过度
+   修正(把真中文词当英文音译还原)。
+
+2. **`asr.model` 改 `sensevoice`(无代码)** —— SenseVoice 多语种原生,英文/粤语
+   识别成正确字符的概率比 paraformer 高。代价:纯长中文场景断句/标点不如 paraformer
+   自然。管理台改 `asr.model`,~15s 内热切换。**建议同一段录音两个模型都跑一遍对比再决定**。
+
+3. **paraformer 热词偏置(改 ~15-20 行代码,留作长尾兜底)** —— FunASR
+   `model.generate(input=..., hotword="body agent token API JSON")` 能让解码偏向
+   提供的词。需要:
+   - `server/asr/app.py` 加 `HOTWORDS` 全局 + `_refresh_asr_config()` 读
+     `asr.hotwords` 字符串
+   - `recognize()` 给 paraformer 分支带 `hotword=HOTWORDS`(sensevoice 分支不需要)
+   - 管理台 seed 一个 `asr.hotwords` 默认值
+   只对预设词起作用,长尾覆盖不到。1 + 3 可叠加。
+
+用户当前选择:先用 1 体验,体验完决定是否加 2/3。
+
 ### 声纹注册端到端 —— 已打通(原"暂缓"已解决)
 - 修了潜伏 bug:`spk_embed` 把 CAM++ 的 cuda 张量直接 `np.asarray` 会崩
   (`can't convert cuda:0 tensor to numpy`)——这正是当初"暂缓"的原因。已加
