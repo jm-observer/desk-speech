@@ -5,6 +5,7 @@ import { Switch } from './ui/Switch';
 import { Button } from './ui/Button';
 import { Icon } from './ui/Icon';
 import { StatusChip } from './StatusChip';
+import type { AsrLanguage, AutoCopyMode } from '../api/tauri-client';
 
 interface ControlPanelProps {
   status: string;
@@ -20,11 +21,28 @@ interface ControlPanelProps {
   onRetry: () => void;
   errorMessage: string;
   onClear: () => void;
-  onShowSettings: () => void;
-  onShowRules: () => void;
+  asrLanguage: AsrLanguage;
+  onAsrLanguageChange: (val: AsrLanguage) => void;
+  autoCopyMode: AutoCopyMode;
+  onAutoCopyModeChange: (val: AutoCopyMode) => void;
   onToggleMode: () => void;
   disabled?: boolean;
 }
+
+const LANGUAGE_OPTIONS: { label: string; value: AsrLanguage }[] = [
+  { label: '自动检测', value: '' },
+  { label: '中文', value: 'zh' },
+  { label: '英文', value: 'en' },
+  { label: '日文', value: 'ja' },
+  { label: '韩文', value: 'ko' },
+  { label: '粤语', value: 'yue' },
+];
+
+const AUTO_COPY_OPTIONS: { label: string; value: AutoCopyMode }[] = [
+  { label: '关闭', value: 'off' },
+  { label: '复制中文优化', value: 'optimized_zh' },
+  { label: '复制英文翻译', value: 'english' },
+];
 
 export const ControlPanel: React.FC<ControlPanelProps> = ({
   status,
@@ -40,8 +58,10 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onRetry,
   errorMessage,
   onClear,
-  onShowSettings,
-  onShowRules,
+  asrLanguage,
+  onAsrLanguageChange,
+  autoCopyMode,
+  onAutoCopyModeChange,
   onToggleMode,
   disabled,
 }) => {
@@ -74,6 +94,24 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
         disabled={status === 'recording'}
       />
 
+      <Dropdown
+        label="识别语言"
+        icon="languages"
+        options={LANGUAGE_OPTIONS}
+        value={asrLanguage}
+        onChange={(v) => onAsrLanguageChange(v as AsrLanguage)}
+        disabled={status === 'recording' || disabled}
+      />
+
+      <Dropdown
+        label="自动复制"
+        icon="copy"
+        options={AUTO_COPY_OPTIONS}
+        value={autoCopyMode}
+        onChange={(v) => onAutoCopyModeChange(v as AutoCopyMode)}
+        disabled={disabled}
+      />
+
       <RecordCard
         status={status}
         onStart={onStart}
@@ -102,16 +140,15 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
 
       <div className="flex-1" />
 
-      <div className="pt-4 border-t border-[var(--line)] grid grid-cols-2 gap-2">
+      <div className="pt-4 border-t border-[var(--line)]">
         <Button variant="soft" size="sm" className="w-full h-9 rounded-lg text-xs" onClick={onClear} disabled={status === 'recording' || disabled}>
           清空结果
         </Button>
-        <Button variant="soft" size="sm" className="w-full h-9 rounded-lg text-xs" onClick={onShowRules} disabled={disabled}>
-          词修正
-        </Button>
-        <Button variant="soft" size="sm" className="col-span-2 w-full h-9 rounded-lg text-xs" onClick={onShowSettings} disabled={disabled}>
-          识别参数设置
-        </Button>
+        <p className="mt-3 text-[11px] leading-relaxed text-[var(--ink-4)]">
+          ASR 模型、LLM 提示词、声纹等服务端配置请打开
+          <br />
+          GB10 管理台 (http://&lt;server&gt;:8090/) 调整。
+        </p>
       </div>
     </aside>
   );

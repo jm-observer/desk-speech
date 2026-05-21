@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { TauriAPI, type SegmentDiscardedEvent, type SegmentUpdatedEvent, type QualityFilterConfig, type ValidationErrorsResponse } from '../api/tauri-client';
+import { TauriAPI, type SegmentDiscardedEvent, type SegmentUpdatedEvent } from '../api/tauri-client';
 import type { Segment } from '../api/tauri-client';
 import { listen } from '@tauri-apps/api/event';
 
@@ -14,8 +14,6 @@ export const useAppStore = () => {
   const [showEnglish, setShowEnglish] = useState(true);
   const [uiMode, setUiMode] = useState<'detailed' | 'simple'>('detailed');
   const [isInitialized, setIsInitialized] = useState(false);
-  const [qualityFilterConfig, setQualityFilterConfig] = useState<QualityFilterConfig | null>(null);
-  const [configValidationError, setConfigValidationError] = useState<string | null>(null);
 
   const mapDbSegment = useCallback((row: Record<string, unknown>): Segment => ({
     id: typeof row.id === 'number' ? row.id : null,
@@ -82,8 +80,6 @@ export const useAppStore = () => {
     let initTimer: number | null = null;
     let unsubscribeSegmentDiscarded: (() => void) | null = null;
     let unsubscribeSegmentUpdated: (() => void) | null = null;
-    let unsubscribeConfigUpdated: (() => void) | null = null;
-    let unsubscribeConfigValidationError: (() => void) | null = null;
 
     const init = async () => {
       try {
@@ -94,15 +90,6 @@ export const useAppStore = () => {
         const selected = await TauriAPI.getSelectedDevice();
         if (canceled) return;
         if (selected) setSelectedDevice(selected);
-
-        // Load quality filter config
-        try {
-          const config = await TauriAPI.getQualityFilterConfig();
-          if (canceled) return;
-          setQualityFilterConfig(config);
-        } catch (err) {
-          console.error('Failed to load quality filter config', err);
-        }
 
         // Preload last 5 history segments from the orchestrator so the panel
         // isn't empty before the first recording of this session. Server
@@ -162,14 +149,8 @@ export const useAppStore = () => {
       // Remove segment from list by revision
       setSegments((prev) => {
         const filtered = prev.filter(s => {
-          // Remove if segment_id matches
-          if (segment_id !== null && s.segment_id === segment_id) {
-            return false;
-          }
-          // Also remove if revision matches (for segments without segment_id)
-          if (s.revision !== undefined && revision !== undefined && s.revision === revision) {
-            return false;
-          }
+          if (segment_id !== null && s.segment_id === segment_id) return false;
+          if (s.revision !== undefined && revision !== undefined && s.revision === revision) return false;
           return true;
         });
 
@@ -182,23 +163,16 @@ export const useAppStore = () => {
       });
     })
       .then((unlisten) => {
-        if (canceled) {
-          unlisten();
-          return;
-        }
+        if (canceled) { unlisten(); return; }
         unsubscribeSegmentDiscarded = unlisten;
       })
-      .catch((err) => {
-        console.error('Subscribe segment_discarded failed', err);
-      });
+      .catch((err) => { console.error('Subscribe segment_discarded failed', err); });
 
     void listen<SegmentUpdatedEvent>('segment_updated', (event) => {
       if (canceled) return;
       const row = event.payload;
       const next = mapDbSegment(row as unknown as Record<string, unknown>);
-      if (next.revision === undefined) {
-        return;
-      }
+      if (next.revision === undefined) return;
       console.debug('[segment_updated]', { revision: next.revision, segmentId: next.segment_id });
       setSegments((prev) => {
         const exists = prev.some((segment) => segment.revision === next.revision);
@@ -217,71 +191,16 @@ export const useAppStore = () => {
       });
     })
       .then((unlisten) => {
-        if (canceled) {
-          unlisten();
-          return;
-        }
+        if (canceled) { unlisten(); return; }
         unsubscribeSegmentUpdated = unlisten;
       })
-      .catch((err) => {
-        console.error('Subscribe segment_updated failed', err);
-      });
-
-    // Subscribe to quality filter config updated events
-    void listen<QualityFilterConfig>('quality_filter_config_updated', (event) => {
-      if (canceled) return;
-      console.debug('[quality_filter_config_updated]', event.payload);
-      setQualityFilterConfig(event.payload);
-    })
-      .then((unlisten) => {
-        if (canceled) {
-          unlisten();
-          return;
-        }
-        unsubscribeConfigUpdated = unlisten;
-      })
-      .catch((err) => {
-        console.error('Subscribe quality_filter_config_updated failed', err);
-      });
-
-    // Subscribe to validation errors
-    void listen<ValidationErrorsResponse>('quality_filter_config_validation_error', (event) => {
-      if (canceled) return;
-      const errors = event.payload.errors;
-      const messages = errors.map(e => `${e.field}: ${e.message}`).join('; ');
-      setConfigValidationError(messages);
-      console.warn('[quality_filter_config_validation_error]', messages);
-      // Clear after 5 seconds
-      setTimeout(() => setConfigValidationError(null), 5000);
-    })
-      .then((unlisten) => {
-        if (canceled) {
-          unlisten();
-          return;
-        }
-        unsubscribeConfigValidationError = unlisten;
-      })
-      .catch((err) => {
-        console.error('Subscribe quality_filter_config_validation_error failed', err);
-      });
+      .catch((err) => { console.error('Subscribe segment_updated failed', err); });
 
     return () => {
       canceled = true;
-      if (initTimer !== null) {
-        window.clearTimeout(initTimer);
-      }
-      if (typeof unsubscribeSegmentDiscarded === 'function') {
-        unsubscribeSegmentDiscarded();
-      }
-      if (typeof unsubscribeSegmentUpdated === 'function') {
-        unsubscribeSegmentUpdated();
-      }
-      if (typeof unsubscribeConfigUpdated === 'function') {
-        unsubscribeConfigUpdated();
-      }
-      if (typeof unsubscribeConfigValidationError === 'function') {
-        unsubscribeConfigValidationError();
-      }
+      if (initTimer !== null) window.clearTimeout(initTimer);
+      if (typeof unsubscribeSegmentDiscarded === 'function') unsubscribeSegmentDiscarded();
+      if (typeof unsubscribeSegmentUpdated === 'function') unsubscribeSegmentUpdated();
     };
   }, [mapDbSegment, mapServerHistory]);
 
@@ -294,7 +213,5 @@ export const useAppStore = () => {
     showEnglish, setShowEnglish,
     uiMode, setUiMode,
     isInitialized,
-    qualityFilterConfig, setQualityFilterConfig,
-    configValidationError, setConfigValidationError,
   };
 };

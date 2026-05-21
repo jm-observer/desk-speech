@@ -30,33 +30,15 @@ export interface InitStatus {
   error?: string;
 }
 
+/// The two real choices the desktop client makes — everything else (model,
+/// prompts, vLLM, quality filtering) is owned by the GB10 orchestrator and
+/// edited from the web console at http://<gb10>:8090/.
+export type AsrLanguage = '' | 'zh' | 'en' | 'ja' | 'ko' | 'yue';
+export type AutoCopyMode = 'off' | 'english' | 'optimized_zh';
+
 export interface AppSettings {
-  threshold: number;
-  min_silence_duration: number;
-  min_speech_duration: number;
-  max_speech_duration: number;
-  num_threads: number;
-  asr_model: 'sense-voice' | 'whisper-turbo';
-  asr_provider: 'cpu' | 'cuda';
-  asr_language: '' | 'zh' | 'en' | 'ja' | 'ko' | 'yue';
-  provider_url: string;
-  api_key: string;
-  selected_model: string;
-  optimize_prompt_template: string;
-  translate_prompt_template: string;
-  auto_copy_mode: 'off' | 'english' | 'optimized_zh';
-}
-
-export interface LlmModelList {
-  models: string[];
-}
-
-export interface CorrectionRule {
-  id: number;
-  source: string;
-  target: string;
-  priority: number;
-  enabled: boolean;
+  asr_language: AsrLanguage;
+  auto_copy_mode: AutoCopyMode;
 }
 
 export interface SegmentDiscardedEvent {
@@ -86,34 +68,6 @@ export interface SegmentUpdatedEvent {
   created_at: string;
 }
 
-export interface QualityFilterConfig {
-  llm_prompt_template: string;
-  discard_confidence_threshold: number;
-  silence_window_ms: number;
-  repeat_ratio_threshold: number;
-  enabled: boolean;
-  version: number;
-}
-
-export interface ConfigValidationError {
-  field: string;
-  message: string;
-}
-
-export interface ValidationErrorsResponse {
-  errors: ConfigValidationError[];
-}
-
-export interface AppVersionInfo {
-  app_version: string;
-  app_name: string;
-  build_profile: string;
-  git_commit: string | null;
-  schema_version: number;
-  config_schema_version: number;
-  first_run_after_upgrade: boolean;
-}
-
 export const TauriAPI = {
   startRecording: () => invoke('start_recording'),
   stopRecording: () => invoke('stop_recording'),
@@ -127,15 +81,4 @@ export const TauriAPI = {
   copyToClipboard: (text: string) => invoke('copy_text_to_clipboard', { text }),
   getSettings: () => invoke<AppSettings>('get_settings'),
   applySettings: (newSettings: AppSettings) => invoke('apply_settings', { newSettings }),
-  listLlmModels: () => invoke<LlmModelList>('list_llm_models'),
-  listLlmModelsWithUrl: (providerUrl: string, apiKey: string) => invoke<LlmModelList>('list_llm_models_with_url', { providerUrl, apiKey }),
-  listCorrectionRules: () => invoke<CorrectionRule[]>('list_correction_rules'),
-  createCorrectionRule: (payload: Omit<CorrectionRule, 'id'>) => invoke('create_correction_rule', payload),
-  updateCorrectionRule: (payload: CorrectionRule) => invoke('update_correction_rule', { ...payload }),
-  deleteCorrectionRule: (id: number) => invoke('delete_correction_rule', { id }),
-  reloadCorrectionRules: () => invoke('reload_correction_rules'),
-  getQualityFilterConfig: () => invoke<QualityFilterConfig>('get_quality_filter_config'),
-  saveQualityFilterConfig: (payload: Omit<QualityFilterConfig, 'version'>) => invoke('save_quality_filter_config', { payload }),
-  resetQualityFilterConfig: () => invoke<QualityFilterConfig>('reset_quality_filter_config'),
-  getAppVersionInfo: () => invoke<AppVersionInfo>('get_app_version_info'),
 };

@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { TauriAPI } from './api/tauri-client';
-import type { Segment } from './api/tauri-client';
+import type { AppSettings, AsrLanguage, AutoCopyMode, Segment } from './api/tauri-client';
 import { ControlPanel } from './components/ControlPanel';
 import { SegmentCard } from './components/SegmentCard';
 import { useAppStore } from './store/useAppStore';
 import { Icon } from './components/ui/Icon';
 import { RecordCard } from './components/RecordCard';
-import { SettingsModal } from './components/SettingsModal';
-import { CorrectionModal } from './components/CorrectionModal';
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
@@ -47,8 +45,8 @@ function App() {
   const notificationBaselineReadyRef = useRef(false);
   const autoStartTriggeredRef = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [showCorrectionModal, setShowCorrectionModal] = useState(false);
+  const [asrLanguage, setAsrLanguage] = useState<AsrLanguage>('zh');
+  const [autoCopyMode, setAutoCopyMode] = useState<AutoCopyMode>('english');
   const [autoRecordingEnabled, setAutoRecordingEnabled] = useState(() => {
     const saved = window.localStorage.getItem(AUTO_RECORDING_STORAGE_KEY);
     return saved === null ? true : saved === 'true';
@@ -126,6 +124,16 @@ function App() {
       console.error('Check notification permission failed', err);
     });
   }, [logNotificationDebug]);
+
+  // Load persisted asr_language + auto_copy_mode from the local DB on mount.
+  useEffect(() => {
+    TauriAPI.getSettings()
+      .then((s) => {
+        setAsrLanguage(s.asr_language);
+        setAutoCopyMode(s.auto_copy_mode);
+      })
+      .catch((err) => console.warn('Load settings failed', err));
+  }, []);
 
   const getSegmentKey = useCallback((seg: Segment) => {
     if (seg.segment_id !== null && seg.segment_id !== undefined) {
@@ -449,8 +457,18 @@ function App() {
             onRetry={retryRecording}
             errorMessage={store.errorMessage}
             onClear={handleClear}
-            onShowSettings={() => setShowSettingsModal(true)}
-            onShowRules={() => setShowCorrectionModal(true)}
+            asrLanguage={asrLanguage}
+            onAsrLanguageChange={(v) => {
+              setAsrLanguage(v);
+              const next: AppSettings = { asr_language: v, auto_copy_mode: autoCopyMode };
+              TauriAPI.applySettings(next).catch((err) => console.error('apply asr_language failed', err));
+            }}
+            autoCopyMode={autoCopyMode}
+            onAutoCopyModeChange={(v) => {
+              setAutoCopyMode(v);
+              const next: AppSettings = { asr_language: asrLanguage, auto_copy_mode: v };
+              TauriAPI.applySettings(next).catch((err) => console.error('apply auto_copy_mode failed', err));
+            }}
             onToggleMode={() => store.setUiMode(store.uiMode === 'detailed' ? 'simple' : 'detailed')}
             disabled={isBusy}
           />
@@ -483,8 +501,6 @@ function App() {
           </div>
         </main>
       )}
-      <SettingsModal open={showSettingsModal} onClose={() => setShowSettingsModal(false)} />
-      <CorrectionModal open={showCorrectionModal} onClose={() => setShowCorrectionModal(false)} />
     </div>
   );
 }
