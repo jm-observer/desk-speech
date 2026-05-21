@@ -112,8 +112,12 @@ impl LinResampler {
 }
 
 fn now_rfc3339() -> String {
-    // Clock time, second precision (UI shows just HH:MM:SS).
-    Local::now().format("%H:%M:%S").to_string()
+    // Full local timestamp ("YYYY-MM-DD HH:MM:SS") — matches the format the
+    // server's /api/history returns (`ts`), so the desktop UI's sort
+    // (string-compare on wall_start) keeps live segments and preloaded
+    // history in chronological order. The UI's stripYear() trims the date
+    // back off for display.
+    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 /// Accumulated state of one segment (so updates never clobber prior fields).

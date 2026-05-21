@@ -5,6 +5,23 @@ import { listen } from '@tauri-apps/api/event';
 
 export type AppStatus = 'idle' | 'initializing' | 'recording' | 'processing' | 'error' | 'finished';
 
+/// Stable ordering for the segment list. Backend assigns a monotonic
+/// `revision` (orchestrator's segment id), so prefer that — it keeps
+/// preloaded history and live segments in chronological order even if
+/// their wall-clock strings disagree on format. Fall back to wall_start
+/// then start_sec for the (rare) cases without a revision.
+function compareSegments(a: Segment, b: Segment): number {
+  const ar = a.revision ?? a.segment_id ?? a.id;
+  const br = b.revision ?? b.segment_id ?? b.id;
+  if (typeof ar === 'number' && typeof br === 'number' && ar !== br) {
+    return ar - br;
+  }
+  if (a.wall_start !== b.wall_start) {
+    return a.wall_start.localeCompare(b.wall_start);
+  }
+  return a.start - b.start;
+}
+
 export const useAppStore = () => {
   const [status, setStatus] = useState<AppStatus>('initializing');
   const [errorMessage, setErrorMessage] = useState<string>('');
@@ -154,12 +171,7 @@ export const useAppStore = () => {
           return true;
         });
 
-        return filtered.sort((a, b) => {
-          if (a.wall_start !== b.wall_start) {
-            return a.wall_start.localeCompare(b.wall_start);
-          }
-          return a.start - b.start;
-        });
+        return filtered.sort(compareSegments);
       });
     })
       .then((unlisten) => {
@@ -182,12 +194,7 @@ export const useAppStore = () => {
             )
           : [...prev, next];
 
-        return updated.sort((a, b) => {
-          if (a.wall_start !== b.wall_start) {
-            return a.wall_start.localeCompare(b.wall_start);
-          }
-          return a.start - b.start;
-        });
+        return updated.sort(compareSegments);
       });
     })
       .then((unlisten) => {
