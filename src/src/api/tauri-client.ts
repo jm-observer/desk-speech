@@ -39,6 +39,8 @@ export type AutoCopyMode = 'off' | 'english' | 'optimized_zh';
 export interface AppSettings {
   asr_language: AsrLanguage;
   auto_copy_mode: AutoCopyMode;
+  /** Auto-copy stitch window in milliseconds; 0 disables short-gap merging. */
+  merge_window_ms: number;
 }
 
 export interface SegmentDiscardedEvent {

@@ -28,13 +28,6 @@ use crate::commands::recording::build_input_stream;
 /// Target sample rate for the upstream PCM the orchestrator expects.
 const SAMPLE_RATE: u32 = 16_000;
 
-/// Auto-copy "stitch window": when the previous auto-copy happened within
-/// this duration, we treat the new segment as a continuation of the same
-/// thought and write the concatenated text to the clipboard, instead of
-/// overwriting with just the new segment's text. Lets a multi-pause
-/// sentence end up as one clipboard paste.
-const AUTO_COPY_MERGE_WINDOW: Duration = Duration::from_millis(3000);
-
 use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::lock_utils::read_lock;
 use crate::settings::VadSettings;
@@ -48,13 +41,19 @@ struct AutoCopyAccum {
 }
 
 /// Decide what to actually paste into the clipboard for this segment:
-/// if the previous auto-copy is still within the stitch window and the
-/// segment id differs, concatenate; otherwise start fresh. Mutates `acc`
+/// if the previous auto-copy is still within the stitch `window` and the
+/// segment id differs, concatenate; otherwise start fresh. A zero `window`
+/// disables merging (every segment replaces the clipboard). Mutates `acc`
 /// in place to remember the final pasted text for the next call.
-fn next_clipboard_text(acc: &mut Option<AutoCopyAccum>, text: &str, ref_id: i64) -> String {
+fn next_clipboard_text(
+    acc: &mut Option<AutoCopyAccum>,
+    text: &str,
+    ref_id: i64,
+    window: Duration,
+) -> String {
     let merged = match acc.as_ref() {
         Some(prev)
-            if prev.written_at.elapsed() < AUTO_COPY_MERGE_WINDOW
+            if prev.written_at.elapsed() < window
                 && prev.ref_id != ref_id
                 && !prev.text.is_empty() =>
         {
@@ -416,12 +415,14 @@ async fn run_one_connection(
                     }
                     st.opt = Some(text.clone());
                     emit_state(&app_r, id, st);
-                    let copy = matches!(
-                        read_lock(&llm_settings_r).auto_copy_mode,
-                        AutoCopyMode::OptimizedZh
-                    );
+                    let (copy, window_ms) = {
+                        let s = read_lock(&llm_settings_r);
+                        (matches!(s.auto_copy_mode, AutoCopyMode::OptimizedZh), s.merge_window_ms)
+                    };
                     if copy && !text.is_empty() {
-                        let merged = next_clipboard_text(&mut copy_acc, &text, id);
+                        let merged = next_clipboard_text(
+                            &mut copy_acc, &text, id, Duration::from_millis(window_ms),
+                        );
                         let merged_for_log = merged.clone();
                         match app_r.clipboard().write_text(merged) {
                             Ok(_) => info!(
@@ -442,12 +443,14 @@ async fn run_one_connection(
                     }
                     st.eng = Some(text.clone());
                     emit_state(&app_r, id, st);
-                    let copy = matches!(
-                        read_lock(&llm_settings_r).auto_copy_mode,
-                        AutoCopyMode::English
-                    );
+                    let (copy, window_ms) = {
+                        let s = read_lock(&llm_settings_r);
+                        (matches!(s.auto_copy_mode, AutoCopyMode::English), s.merge_window_ms)
+                    };
                     if copy && !text.is_empty() {
-                        let merged = next_clipboard_text(&mut copy_acc, &text, id);
+                        let merged = next_clipboard_text(
+                            &mut copy_acc, &text, id, Duration::from_millis(window_ms),
+                        );
                         let merged_for_log = merged.clone();
                         match app_r.clipboard().write_text(merged) {
                             Ok(_) => info!(

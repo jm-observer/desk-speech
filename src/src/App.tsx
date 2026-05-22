@@ -47,6 +47,7 @@ function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [asrLanguage, setAsrLanguage] = useState<AsrLanguage>('zh');
   const [autoCopyMode, setAutoCopyMode] = useState<AutoCopyMode>('english');
+  const [mergeWindowMs, setMergeWindowMs] = useState(3000);
   const [autoRecordingEnabled, setAutoRecordingEnabled] = useState(() => {
     const saved = window.localStorage.getItem(AUTO_RECORDING_STORAGE_KEY);
     return saved === null ? true : saved === 'true';
@@ -125,12 +126,13 @@ function App() {
     });
   }, [logNotificationDebug]);
 
-  // Load persisted asr_language + auto_copy_mode from the local DB on mount.
+  // Load persisted settings from the local DB on mount.
   useEffect(() => {
     TauriAPI.getSettings()
       .then((s) => {
         setAsrLanguage(s.asr_language);
         setAutoCopyMode(s.auto_copy_mode);
+        setMergeWindowMs(s.merge_window_ms);
       })
       .catch((err) => console.warn('Load settings failed', err));
   }, []);
@@ -460,14 +462,20 @@ function App() {
             asrLanguage={asrLanguage}
             onAsrLanguageChange={(v) => {
               setAsrLanguage(v);
-              const next: AppSettings = { asr_language: v, auto_copy_mode: autoCopyMode };
+              const next: AppSettings = { asr_language: v, auto_copy_mode: autoCopyMode, merge_window_ms: mergeWindowMs };
               TauriAPI.applySettings(next).catch((err) => console.error('apply asr_language failed', err));
             }}
             autoCopyMode={autoCopyMode}
             onAutoCopyModeChange={(v) => {
               setAutoCopyMode(v);
-              const next: AppSettings = { asr_language: asrLanguage, auto_copy_mode: v };
+              const next: AppSettings = { asr_language: asrLanguage, auto_copy_mode: v, merge_window_ms: mergeWindowMs };
               TauriAPI.applySettings(next).catch((err) => console.error('apply auto_copy_mode failed', err));
+            }}
+            mergeWindowMs={mergeWindowMs}
+            onMergeWindowMsChange={(v) => {
+              setMergeWindowMs(v);
+              const next: AppSettings = { asr_language: asrLanguage, auto_copy_mode: autoCopyMode, merge_window_ms: v };
+              TauriAPI.applySettings(next).catch((err) => console.error('apply merge_window_ms failed', err));
             }}
             onToggleMode={() => store.setUiMode(store.uiMode === 'detailed' ? 'simple' : 'detailed')}
             disabled={isBusy}

@@ -1,6 +1,7 @@
 import React from 'react';
 import { RecordCard } from './RecordCard';
 import { Dropdown } from './ui/Dropdown';
+import { NumberField } from './ui/NumberField';
 import { Switch } from './ui/Switch';
 import { Button } from './ui/Button';
 import { Icon } from './ui/Icon';
@@ -25,9 +26,15 @@ interface ControlPanelProps {
   onAsrLanguageChange: (val: AsrLanguage) => void;
   autoCopyMode: AutoCopyMode;
   onAutoCopyModeChange: (val: AutoCopyMode) => void;
+  mergeWindowMs: number;
+  onMergeWindowMsChange: (val: number) => void;
   onToggleMode: () => void;
   disabled?: boolean;
 }
+
+/** Bounds for the auto-copy stitch window input (seconds). */
+const MERGE_WINDOW_MIN_S = 0;
+const MERGE_WINDOW_MAX_S = 60;
 
 const LANGUAGE_OPTIONS: { label: string; value: AsrLanguage }[] = [
   { label: '自动检测', value: '' },
@@ -62,6 +69,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onAsrLanguageChange,
   autoCopyMode,
   onAutoCopyModeChange,
+  mergeWindowMs,
+  onMergeWindowMsChange,
   onToggleMode,
   disabled,
 }) => {
@@ -111,6 +120,23 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
         onChange={(v) => onAutoCopyModeChange(v as AutoCopyMode)}
         disabled={disabled}
       />
+
+      <div>
+        <NumberField
+          label="合并间隔"
+          icon="clock"
+          value={mergeWindowMs / 1000}
+          onChange={(sec) => onMergeWindowMsChange(Math.round(sec * 1000))}
+          min={MERGE_WINDOW_MIN_S}
+          max={MERGE_WINDOW_MAX_S}
+          step={0.5}
+          suffix="秒"
+          disabled={disabled || autoCopyMode === 'off'}
+        />
+        <p className="mt-1.5 ml-1 text-[11px] leading-relaxed text-[var(--ink-4)]">
+          相邻句子间隔在此时间内时，自动复制会拼接为一次粘贴；设为 0 则关闭合并。
+        </p>
+      </div>
 
       <RecordCard
         status={status}

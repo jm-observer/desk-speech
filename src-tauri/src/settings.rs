@@ -4,7 +4,7 @@ use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::db;
-use crate::llm_settings::{AutoCopyMode, LlmSettings};
+use crate::llm_settings::{AutoCopyMode, LlmSettings, MAX_MERGE_WINDOW_MS};
 use crate::lock_utils::{mutex_lock, read_lock, write_lock};
 use crate::AppState;
 
@@ -24,13 +24,15 @@ impl Default for VadSettings {
     }
 }
 
-/// Combined settings DTO exchanged with the frontend — the two real choices
-/// the desktop client makes: which ASR language to request, and whether to
-/// auto-copy the optimized Chinese / English translation to the clipboard.
+/// Combined settings DTO exchanged with the frontend — the choices the
+/// desktop client makes: which ASR language to request, whether to auto-copy
+/// the optimized Chinese / English translation to the clipboard, and how long
+/// the short-gap auto-copy stitch window stays open (ms; 0 disables merging).
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct CombinedSettings {
     asr_language: String,
     auto_copy_mode: AutoCopyMode,
+    merge_window_ms: u64,
 }
 
 pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, String> {
@@ -40,6 +42,7 @@ pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<Combined
     Ok(CombinedSettings {
         asr_language: vad.asr_language,
         auto_copy_mode: llm.auto_copy_mode,
+        merge_window_ms: llm.merge_window_ms,
     })
 }
 
@@ -58,7 +61,10 @@ pub(crate) async fn apply_settings(
     validate_language(&new_settings.asr_language)?;
 
     let new_vad = VadSettings { asr_language: new_settings.asr_language };
-    let new_llm = LlmSettings { auto_copy_mode: new_settings.auto_copy_mode };
+    let new_llm = LlmSettings {
+        auto_copy_mode: new_settings.auto_copy_mode,
+        merge_window_ms: new_settings.merge_window_ms.min(MAX_MERGE_WINDOW_MS),
+    };
 
     let settings_arc = Arc::clone(&state.settings);
     let llm_arc = Arc::clone(&state.llm_settings);
@@ -85,6 +91,12 @@ pub(crate) async fn apply_settings(
     )
     .await
     .map_err(|e| e.to_string())?;
+    db.upsert_setting(
+        "llm.merge_window_ms".to_string(),
+        new_llm.merge_window_ms.to_string(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -106,6 +118,11 @@ pub(crate) async fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSet
             "optimized_zh" => AutoCopyMode::OptimizedZh,
             _ => AutoCopyMode::English,
         };
+    }
+    if let Ok(Some(v)) = db.get_setting("llm.merge_window_ms".to_string()).await {
+        if let Ok(n) = v.parse::<u64>() {
+            s.merge_window_ms = n.min(MAX_MERGE_WINDOW_MS);
+        }
     }
     s
 }
