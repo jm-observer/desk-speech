@@ -6,14 +6,18 @@
 # 换模型不改本文件——模型由 compose 的 env(ASR_*_DIR)+ 卷挂载决定。
 FROM funasr-asr:arm64
 
+# openai-whisper: FunASR 的 WhisperTokenizer 需要 `whisper` 包(get_tokenizer +
+# log-mel 前端)。缺它时 FunASR 只打印提示不报错,加载 Whisper 会 UnboundLocalError。
 RUN pip3 install --break-system-packages --default-timeout=600 --retries 10 \
-    "websockets>=12" "aiohttp>=3.9"
+    "websockets>=12" "aiohttp>=3.9" openai-whisper
 
 WORKDIR /app
 COPY app.py /app/app.py
 
 ENV ASR_PARAFORMER_DIR=/models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch \
     ASR_SENSEVOICE_DIR=/models/SenseVoiceSmall \
+    ASR_WHISPER_TURBO_DIR=/models/Whisper-large-v3-turbo \
+    ASR_WHISPER_LARGE_DIR=/models/Whisper-large-v3 \
     ASR_VAD_DIR=/models/speech_fsmn_vad_zh-cn-16k-common-pytorch \
     ASR_PUNC_DIR=/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch \
     ASR_SPK_DIR=/models/speech_campplus_sv_zh_en_16k-common_advanced \
