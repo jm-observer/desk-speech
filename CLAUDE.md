@@ -48,7 +48,10 @@ nothing is shared at the library level.
 
 ### Desktop client (Windows)
 ```powershell
-$env:REMOTE_ASR_URL = "ws://192.168.0.68:8090/stream"    # required; remote-only mode
+# Connection URL is configured in-app (control panel → 连接地址 dropdown).
+# Built-in default `ws://192.168.0.68:8090/stream` is always shown; users add
+# custom presets via the dropdown, persisted in the client's local SQLite
+# (`remote.url` / `remote.url_presets`). The old REMOTE_ASR_URL env var is gone.
 npm run dev                              # Vite dev server + Tauri window
 npm run build                            # tsc + Vite + Tauri release bundle (NSIS .exe)
 cd src && npx tsc --noEmit               # front-end type check
@@ -80,10 +83,17 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
 - **asr-server**: standalone HTTP `/v1/audio/transcriptions` (OpenAI Audio API shape) for
   external callers; not used by the desktop client.
 - **Runtime config**: many settings live in orchestrator's SQLite `config` table and are
-  edited from the Web admin (`asr.model`, `asr.spk_threshold`, `asr.sentence_gap_ms`,
-  `asr.gate_to_enrolled`, `vllm.model`, `vllm.base`, `llm.optimize_prompt`,
-  `llm.translate_prompt`). asr polls `/api/asr-config` every ~15s — most changes apply
-  without redeploy.
+  edited from the Web admin (`asr.model`, `asr.secondary_model`, `asr.spk_threshold`,
+  `asr.sentence_gap_ms`, `asr.gate_to_enrolled`, `vllm.model`, `vllm.base`,
+  `llm.optimize_prompt`, `llm.translate_prompt`). asr polls `/api/asr-config` every
+  ~15s — most changes apply without redeploy.
+- **次模型对比识别**: 桌面端 ControlPanel 开关「次模型对比识别」(默认关) →
+  hello.want_secondary=true。orchestrator 给 asr 发 `{type:config,want_secondary}`,
+  asr 在 finalize() 主段 emit 之后 run_in_executor 跑 `asr.secondary_model`,以
+  `{type:secondary,t_start,t_end,text,kind}` 回发。orchestrator 按 `(t0,t1)` 配回
+  主段 id,落库 `segments.secondary` 列,发 `ServerEvent::Secondary { ref, text, kind }`。
+  桌面端 SegmentCard 在原文行下方紧贴一个带"次模型"标签的灰底行 + hover 复制按钮。
+  次模型只跑识别 (不进润色/翻译),仅供对比中文识别精度。
 
 ## Important constraints
 

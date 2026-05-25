@@ -1,9 +1,10 @@
 //! Remote ASR session (redesign / P0).
 //!
-//! When `REMOTE_ASR_URL` is set, recording streams mic PCM to the GB10
-//! orchestrator over WebSocket (see docs/protocol-draft.md) instead of running
-//! sherpa-onnx locally. Incoming protocol events are mapped to the existing
-//! `segment_updated` frontend event so the UI is unchanged.
+//! Recording streams mic PCM to the GB10 orchestrator over WebSocket (see
+//! docs/protocol-draft.md). The orchestrator URL is held in `AppState.remote_url`
+//! and edited from the desktop UI (persisted as `remote.url` in SQLite).
+//! Incoming protocol events are mapped to the existing `segment_updated`
+//! frontend event so the UI is unchanged.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -69,15 +70,16 @@ fn next_clipboard_text(
     merged
 }
 
-/// Returns the configured remote orchestrator URL, if any.
-pub(crate) fn remote_url() -> Option<String> {
-    std::env::var("REMOTE_ASR_URL").ok().filter(|s| !s.is_empty())
+/// Returns the configured remote orchestrator URL from app state, if non-empty.
+pub(crate) fn remote_url(state: &crate::AppState) -> Option<String> {
+    let v = read_lock(&state.remote_url).clone();
+    if v.trim().is_empty() { None } else { Some(v) }
 }
 
 /// Derive the orchestrator HTTP base (e.g. "http://192.168.0.68:8090")
-/// from REMOTE_ASR_URL (e.g. "ws://192.168.0.68:8090/stream").
-fn remote_http_base() -> Option<String> {
-    let ws = remote_url()?;
+/// from the active WebSocket URL (e.g. "ws://192.168.0.68:8090/stream").
+fn remote_http_base(state: &crate::AppState) -> Option<String> {
+    let ws = remote_url(state)?;
     let (scheme, rest) = if let Some(r) = ws.strip_prefix("wss://") {
         ("https://", r)
     } else if let Some(r) = ws.strip_prefix("ws://") {
@@ -94,9 +96,12 @@ fn remote_http_base() -> Option<String> {
 /// Used by the desktop client to pre-populate the result list on startup
 /// (last N transcripts) so the panel isn't empty before the user records.
 #[tauri::command]
-pub async fn fetch_remote_history(limit: u32) -> Result<Vec<serde_json::Value>, String> {
-    let Some(base) = remote_http_base() else {
-        return Err("REMOTE_ASR_URL 未配置".to_string());
+pub async fn fetch_remote_history(
+    limit: u32,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let Some(base) = remote_http_base(&state) else {
+        return Err("远程识别地址未配置".to_string());
     };
     let lim = limit.clamp(1, 200);
     let url = format!("{base}/api/history?limit={lim}");
@@ -164,6 +169,11 @@ struct SegState {
     raw: String,
     opt: Option<String>,
     eng: Option<String>,
+    /// Secondary-recognizer transcription (dual-model comparison mode); only
+    /// populated when the client opted in via `hello.want_secondary` and the
+    /// orchestrator sends a paired `secondary` event.
+    sec: Option<String>,
+    sec_kind: Option<String>,
     t0: f64,
     t1: f64,
     wall: String,
@@ -177,8 +187,8 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
     let optimize_status = if s.opt.is_some() { "success" } else { "running" };
     let translate_status = if s.eng.is_some() { "success" } else { "running" };
     info!(
-        "[remote][emit] id={id} raw={:?} opt={:?} eng={:?} t=[{:.2},{:.2}]",
-        s.raw, s.opt, s.eng, s.t0, s.t1
+        "[remote][emit] id={id} raw={:?} opt={:?} eng={:?} sec={:?} t=[{:.2},{:.2}]",
+        s.raw, s.opt, s.eng, s.sec, s.t0, s.t1
     );
     let _ = app.emit(
         "segment_updated",
@@ -195,6 +205,8 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
             "translate_status": translate_status,
             "text_optimized": s.opt,
             "text_english": s.eng,
+            "text_secondary": s.sec,
+            "secondary_kind": s.sec_kind,
             "speaker": s.speaker,
             "created_at": s.wall,
         }),
@@ -301,6 +313,9 @@ pub(crate) async fn run_remote_session(
         let s = read_lock(&settings);
         if s.asr_language.is_empty() { "auto".to_string() } else { s.asr_language.clone() }
     };
+    // Dual-model comparison opt-in: read once at session start. Toggling
+    // mid-session requires a stop/start (matches the URL-change reconnect).
+    let want_secondary = read_lock(&llm_settings).want_secondary;
     let stop = stop_signal;
 
     let mut pcm_rx = match spawn_capture(device_name, Arc::clone(&stop)) {
@@ -318,6 +333,7 @@ pub(crate) async fn run_remote_session(
         "type": "hello", "protocol": "1", "sample_rate": 16000,
         "format": "pcm_s16le", "language": language,
         "want_optimize": true, "want_translate": true,
+        "want_secondary": want_secondary,
     })
     .to_string();
 
@@ -460,6 +476,19 @@ async fn run_one_connection(
                             Err(e) => error!("[remote] clipboard 英文 failed: {e}"),
                         }
                     }
+                }
+                Some("secondary") => {
+                    let id = v.get("ref").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let kind = v.get("kind").and_then(|x| x.as_str()).map(str::to_string);
+                    info!("[remote][secondary] ref={id} kind={:?} text={text:?}", kind);
+                    let st = segs.entry(id).or_default();
+                    if st.wall.is_empty() {
+                        st.wall = now_rfc3339();
+                    }
+                    st.sec = Some(text);
+                    st.sec_kind = kind;
+                    emit_state(&app_r, id, st);
                 }
                 Some("error") => {
                     warn!("[remote] server error: {}", v.get("message").and_then(|x| x.as_str()).unwrap_or(""));

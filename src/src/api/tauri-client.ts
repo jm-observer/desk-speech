@@ -11,6 +11,12 @@ export interface Segment {
   text_raw: string;
   text_optimized?: string;
   text_english?: string;
+  /** Secondary recognizer transcription (only present when the dual-model
+   *  comparison opt-in is on). Used for side-by-side accuracy checks; not
+   *  routed through optimize/translate. */
+  text_secondary?: string;
+  /** Which model produced `text_secondary` (e.g. "sensevoice"). Informational. */
+  secondary_kind?: string;
   speaker?: string;
   optimize_status: 'pending' | 'running' | 'success' | 'failed';
   translate_status: 'blocked' | 'pending' | 'running' | 'success' | 'failed';
@@ -41,7 +47,22 @@ export interface AppSettings {
   auto_copy_mode: AutoCopyMode;
   /** Auto-copy stitch window in milliseconds; 0 disables short-gap merging. */
   merge_window_ms: number;
+  /** Currently selected remote orchestrator WebSocket URL. */
+  remote_url: string;
+  /** User-added custom orchestrator URLs (the built-in default is always shown
+   * in addition to these). */
+  remote_url_presets: string[];
+  /** Opt-in to dual-model comparison: orchestrator also runs `asr.secondary_model`
+   *  on each VAD segment and the UI shows it under the primary transcription.
+   *  Takes effect at the next session start (toggling mid-session needs a
+   *  stop+start, like a URL change). */
+  want_secondary: boolean;
 }
+
+/** Built-in orchestrator URL — always shown as the first option in the
+ *  connection dropdown, regardless of saved presets. Kept in sync with
+ *  `settings::DEFAULT_REMOTE_URL` in the Rust backend. */
+export const DEFAULT_REMOTE_URL = 'ws://192.168.0.68:8090/stream';
 
 export interface SegmentDiscardedEvent {
   revision: number;
@@ -66,6 +87,8 @@ export interface SegmentUpdatedEvent {
   translate_status: Segment['translate_status'];
   text_optimized?: string;
   text_english?: string;
+  text_secondary?: string;
+  secondary_kind?: string;
   speaker?: string;
   created_at: string;
 }

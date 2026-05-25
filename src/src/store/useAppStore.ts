@@ -43,6 +43,8 @@ export const useAppStore = () => {
     text_raw: typeof row.text_raw === 'string' ? row.text_raw : '',
     text_optimized: typeof row.text_optimized === 'string' ? row.text_optimized : undefined,
     text_english: typeof row.text_english === 'string' ? row.text_english : undefined,
+    text_secondary: typeof row.text_secondary === 'string' ? row.text_secondary : undefined,
+    secondary_kind: typeof row.secondary_kind === 'string' ? row.secondary_kind : undefined,
     speaker: typeof row.speaker === 'string' && row.speaker.length > 0 ? row.speaker : undefined,
     optimize_status:
       row.optimize_status === 'pending' ||
@@ -80,6 +82,7 @@ export const useAppStore = () => {
       text_raw: typeof row.text === 'string' ? row.text : '',
       text_optimized: typeof row.optimized === 'string' ? row.optimized : undefined,
       text_english: typeof row.english === 'string' ? row.english : undefined,
+      text_secondary: typeof row.secondary === 'string' ? row.secondary : undefined,
       speaker: typeof row.speaker === 'string' && row.speaker.length > 0 ? row.speaker : undefined,
       // Server-side history is post-processing — mark both stages as
       // 'success' regardless of whether optimized/english are present, so

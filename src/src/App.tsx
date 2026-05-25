@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { TauriAPI } from './api/tauri-client';
+import { TauriAPI, DEFAULT_REMOTE_URL } from './api/tauri-client';
 import type { AppSettings, AsrLanguage, AutoCopyMode, Segment } from './api/tauri-client';
 import { ControlPanel } from './components/ControlPanel';
 import { SegmentCard } from './components/SegmentCard';
@@ -48,6 +48,9 @@ function App() {
   const [asrLanguage, setAsrLanguage] = useState<AsrLanguage>('zh');
   const [autoCopyMode, setAutoCopyMode] = useState<AutoCopyMode>('english');
   const [mergeWindowMs, setMergeWindowMs] = useState(3000);
+  const [remoteUrl, setRemoteUrl] = useState<string>(DEFAULT_REMOTE_URL);
+  const [remoteUrlPresets, setRemoteUrlPresets] = useState<string[]>([]);
+  const [wantSecondary, setWantSecondary] = useState(false);
   const [autoRecordingEnabled, setAutoRecordingEnabled] = useState(() => {
     const saved = window.localStorage.getItem(AUTO_RECORDING_STORAGE_KEY);
     return saved === null ? true : saved === 'true';
@@ -133,6 +136,9 @@ function App() {
         setAsrLanguage(s.asr_language);
         setAutoCopyMode(s.auto_copy_mode);
         setMergeWindowMs(s.merge_window_ms);
+        setRemoteUrl(s.remote_url || DEFAULT_REMOTE_URL);
+        setRemoteUrlPresets(s.remote_url_presets || []);
+        setWantSecondary(!!s.want_secondary);
       })
       .catch((err) => console.warn('Load settings failed', err));
   }, []);
@@ -361,6 +367,128 @@ function App() {
     }
   };
 
+  // Wait until the backend reports recording=false. Used by the live
+  // URL-change reconnect path so we don't start a new session while the
+  // previous WebSocket is still tearing down.
+  const waitUntilNotRecording = useCallback(async (timeoutMs = 4000): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const s = await TauriAPI.getRecordingState();
+        if (!s.recording) return true;
+      } catch (err) {
+        console.warn('waitUntilNotRecording probe failed', err);
+      }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return false;
+  }, []);
+
+  /**
+   * Persist the connection-related slice of settings and, if the URL changed
+   * while a session is in flight, transparently stop + restart so the new
+   * URL takes effect immediately. Other settings (language / auto-copy /
+   * merge window) are picked up live by the backend and don't need a restart.
+   */
+  const persistAndMaybeReconnect = useCallback(
+    async (next: AppSettings, urlChanged: boolean) => {
+      try {
+        await TauriAPI.applySettings(next);
+      } catch (err) {
+        console.error('apply settings failed', err);
+        return;
+      }
+      if (!urlChanged) return;
+      let wasRecording = false;
+      try {
+        wasRecording = (await TauriAPI.getRecordingState()).recording;
+      } catch (err) {
+        console.warn('probe recording state failed', err);
+      }
+      if (!wasRecording) return;
+      try {
+        await TauriAPI.stopRecording();
+      } catch (err) {
+        console.error('stop for reconnect failed', err);
+      }
+      const settled = await waitUntilNotRecording();
+      if (!settled) {
+        console.warn('reconnect: previous session did not stop in time');
+      }
+      // Use the same path manual start does so error reporting stays consistent.
+      await startRecording();
+    },
+    [waitUntilNotRecording, startRecording]
+  );
+
+  const handleRemoteUrlSelect = (url: string) => {
+    if (url === remoteUrl) return;
+    setRemoteUrl(url);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: url,
+      remote_url_presets: remoteUrlPresets,
+      want_secondary: wantSecondary,
+    };
+    persistAndMaybeReconnect(next, true);
+  };
+
+  const handleRemoteUrlAdd = (url: string) => {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    const presetsNext = remoteUrlPresets.includes(trimmed)
+      ? remoteUrlPresets
+      : [...remoteUrlPresets, trimmed];
+    const urlChanged = trimmed !== remoteUrl;
+    setRemoteUrlPresets(presetsNext);
+    setRemoteUrl(trimmed);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: trimmed,
+      remote_url_presets: presetsNext,
+      want_secondary: wantSecondary,
+    };
+    persistAndMaybeReconnect(next, urlChanged);
+  };
+
+  const handleWantSecondaryChange = (val: boolean) => {
+    if (val === wantSecondary) return;
+    setWantSecondary(val);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: remoteUrl,
+      remote_url_presets: remoteUrlPresets,
+      want_secondary: val,
+    };
+    // hello.want_secondary is sent once at session start, so toggling needs
+    // a reconnect for the new value to take effect. Same pattern as URL.
+    persistAndMaybeReconnect(next, true);
+  };
+
+  const handleRemoteUrlRemove = (url: string) => {
+    const presetsNext = remoteUrlPresets.filter((p) => p !== url);
+    // If the removed preset was selected, fall back to the built-in default.
+    const fallback = remoteUrl === url ? DEFAULT_REMOTE_URL : remoteUrl;
+    const urlChanged = fallback !== remoteUrl;
+    setRemoteUrlPresets(presetsNext);
+    setRemoteUrl(fallback);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: fallback,
+      remote_url_presets: presetsNext,
+      want_secondary: wantSecondary,
+    };
+    persistAndMaybeReconnect(next, urlChanged);
+  };
+
   const handleCopy = async (text: string) => {
     await TauriAPI.copyToClipboard(text);
   };
@@ -462,21 +590,49 @@ function App() {
             asrLanguage={asrLanguage}
             onAsrLanguageChange={(v) => {
               setAsrLanguage(v);
-              const next: AppSettings = { asr_language: v, auto_copy_mode: autoCopyMode, merge_window_ms: mergeWindowMs };
+              const next: AppSettings = {
+                asr_language: v,
+                auto_copy_mode: autoCopyMode,
+                merge_window_ms: mergeWindowMs,
+                remote_url: remoteUrl,
+                remote_url_presets: remoteUrlPresets,
+                want_secondary: wantSecondary,
+              };
               TauriAPI.applySettings(next).catch((err) => console.error('apply asr_language failed', err));
             }}
             autoCopyMode={autoCopyMode}
             onAutoCopyModeChange={(v) => {
               setAutoCopyMode(v);
-              const next: AppSettings = { asr_language: asrLanguage, auto_copy_mode: v, merge_window_ms: mergeWindowMs };
+              const next: AppSettings = {
+                asr_language: asrLanguage,
+                auto_copy_mode: v,
+                merge_window_ms: mergeWindowMs,
+                remote_url: remoteUrl,
+                remote_url_presets: remoteUrlPresets,
+                want_secondary: wantSecondary,
+              };
               TauriAPI.applySettings(next).catch((err) => console.error('apply auto_copy_mode failed', err));
             }}
             mergeWindowMs={mergeWindowMs}
             onMergeWindowMsChange={(v) => {
               setMergeWindowMs(v);
-              const next: AppSettings = { asr_language: asrLanguage, auto_copy_mode: autoCopyMode, merge_window_ms: v };
+              const next: AppSettings = {
+                asr_language: asrLanguage,
+                auto_copy_mode: autoCopyMode,
+                merge_window_ms: v,
+                remote_url: remoteUrl,
+                remote_url_presets: remoteUrlPresets,
+                want_secondary: wantSecondary,
+              };
               TauriAPI.applySettings(next).catch((err) => console.error('apply merge_window_ms failed', err));
             }}
+            remoteUrl={remoteUrl}
+            remoteUrlPresets={remoteUrlPresets}
+            onRemoteUrlSelect={handleRemoteUrlSelect}
+            onRemoteUrlAdd={handleRemoteUrlAdd}
+            onRemoteUrlRemove={handleRemoteUrlRemove}
+            wantSecondary={wantSecondary}
+            onWantSecondaryChange={handleWantSecondaryChange}
             onToggleMode={() => store.setUiMode(store.uiMode === 'detailed' ? 'simple' : 'detailed')}
             disabled={isBusy}
           />

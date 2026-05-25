@@ -29,6 +29,9 @@ pub struct SegmentRow {
     pub text: String,
     pub optimized: Option<String>,
     pub english: Option<String>,
+    /// Secondary recognizer text (comparison; only present when the client
+    /// opted in via `hello.want_secondary` and a secondary model was loaded).
+    pub secondary: Option<String>,
     pub speaker: Option<String>,
     /// Whether per-segment audio is still retained (purged after 1 day).
     pub has_audio: bool,
@@ -82,6 +85,15 @@ impl Db {
             );
             "#,
         )?;
+        // Lightweight migration: `secondary` column added in the dual-model
+        // comparison feature. ALTER ... ADD COLUMN errors if the column
+        // already exists, so we swallow that one specific error.
+        if let Err(e) = conn.execute("ALTER TABLE segments ADD COLUMN secondary TEXT", []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e.into());
+            }
+        }
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -141,7 +153,7 @@ impl Db {
     pub fn segment_get(&self, sid: i64) -> Option<SegmentRow> {
         self.lock()
             .query_row(
-                "SELECT s.id,s.session_id,s.ts,s.text,s.optimized,s.english,s.speaker,
+                "SELECT s.id,s.session_id,s.ts,s.text,s.optimized,s.english,s.speaker,s.secondary,
                         EXISTS(SELECT 1 FROM segment_audio a WHERE a.segment_id=s.id)
                  FROM segments s WHERE s.id=?1",
                 [sid],
@@ -154,7 +166,8 @@ impl Db {
                         optimized: r.get(4)?,
                         english: r.get(5)?,
                         speaker: r.get(6)?,
-                        has_audio: r.get::<_, i64>(7)? != 0,
+                        secondary: r.get(7)?,
+                        has_audio: r.get::<_, i64>(8)? != 0,
                     })
                 },
             )
@@ -223,6 +236,13 @@ impl Db {
             .lock()
             .execute("UPDATE segments SET english=?2 WHERE id=?1", (sid, eng));
     }
+    /// Persist the secondary recognizer's transcription for a segment (used
+    /// in dual-model comparison mode; not produced for default sessions).
+    pub fn segment_set_secondary(&self, sid: i64, text: &str) {
+        let _ = self
+            .lock()
+            .execute("UPDATE segments SET secondary=?2 WHERE id=?1", (sid, text));
+    }
 
     /// Largest segment id on disk (0 if none). Used to seed the in-memory
     /// SEG_ID counter on startup so a restart never reuses an id and
@@ -236,7 +256,7 @@ impl Db {
     pub fn segments_recent(&self, limit: i64) -> Vec<SegmentRow> {
         let c = self.lock();
         let mut stmt = match c.prepare(
-            "SELECT s.id,s.session_id,s.ts,s.text,s.optimized,s.english,s.speaker,
+            "SELECT s.id,s.session_id,s.ts,s.text,s.optimized,s.english,s.speaker,s.secondary,
                     EXISTS(SELECT 1 FROM segment_audio a WHERE a.segment_id=s.id)
              FROM segments s ORDER BY s.id DESC LIMIT ?1",
         ) {
@@ -252,7 +272,8 @@ impl Db {
                 optimized: r.get(4)?,
                 english: r.get(5)?,
                 speaker: r.get(6)?,
-                has_audio: r.get::<_, i64>(7)? != 0,
+                secondary: r.get(7)?,
+                has_audio: r.get::<_, i64>(8)? != 0,
             })
         });
         rows.map(|it| it.filter_map(Result::ok).collect()).unwrap_or_default()

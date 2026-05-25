@@ -140,10 +140,12 @@ docker compose -f compose.tts.yaml up -d <cosyvoice|gptsovits>
 
 ```powershell
 cd D:\git\streaming-speech
-$env:REMOTE_ASR_URL="ws://192.168.0.68:8090/stream"   # 必须;同窗口先设再跑
 npm run dev
 ```
 - 远程模式跳过本地模型;录音→说话→**停止后**出结果(P0 按句,无实时逐字)
+- 连接地址在控制面板「连接地址」下拉里选/加(内置默认 `ws://192.168.0.68:8090/stream`,
+  用户可加自定义,持久化在本地 SQLite `remote.url` / `remote.url_presets`);
+  录音中切换地址会自动停-启,无需手动重连
 - 设置页「自动复制」=优化中文 → 自动入剪贴板
 - 编译验证:`cd src-tauri && cargo check`;前端 `cd src && npx tsc --noEmit`
 

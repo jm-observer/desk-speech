@@ -64,6 +64,19 @@ GB10(192.168.0.68, NVIDIA GB10 / arm64 / CUDA13, Ubuntu24, Docker)
   task 内 `tokio::join!` 并发;段 N+1 不被 N 的 LLM 阻塞;Done 前 drain-await
   在飞任务(乱序按 ref id 归并安全)
 - 日志降噪(`838e5bc`)、文案/lint 小修(`2144ba8`)、PCM限长(`bb80d0b`)
+- **双模型对比识别**(2026-05 新增):桌面端 ControlPanel 加「次模型对比识别」开关
+  (默认关) → hello 带 `want_secondary=true`。orchestrator 连上 asr 后立即发
+  `{type:config,want_secondary}` 握手。asr 全局新增 `SECONDARY_KIND`/`SECONDARY_MODEL`
+  (惰性加载,首段命中时才占 VRAM);轮询 `/api/asr-config` 的 `secondary_model`
+  字段热切;`finalize()` 主段先 emit,然后 `run_in_executor(recognize_with, seg,
+  SECONDARY_MODEL, SECONDARY_KIND)` 异步再 emit `{type:secondary,t_start,t_end,
+  text,kind}`。orchestrator 用 `(t0,t1)→seg_id` HashMap 配对,写 `segments.secondary`
+  列,发 `ServerEvent::Secondary { ref, text, kind }`。SegmentCard 在原文行下方
+  紧贴一条带「次模型」/`kind` 标签的灰底行 + hover 复制。次模型只跑识别(不进
+  润色/翻译),专门用于对比中文识别质量。开关变化与改 URL 同流程:`stop+start`
+  自动重连让新 hello 生效。db 加 `segment_set_secondary` + `segments.secondary`
+  列(轻量 ALTER 兼容老库)。config 默认 `asr.secondary_model=sensevoice`,可在
+  管理台改成空(禁用)或其他 ASR kind。
 - 声纹门控开关(commit `c5046bf`):新 config 键 `asr.gate_to_enrolled`
   (`on`|`off`,seed `on`,入 `/api/asr-config`,asr ~15s 轮询)。on=仅识别
   已启用声纹(其余丢弃);off=识别所有人(命中仍标说话人)。管理台「声纹」
@@ -180,11 +193,14 @@ A/B 工具:`server/ab_asr.py`(scp 到 `~/server`→`docker compose cp` 进 asr�
 
 ```powershell
 cd D:\git\streaming-speech
-$env:REMOTE_ASR_URL="ws://192.168.0.68:8090/stream"   # 必须;同窗口先设再跑
 npm run dev
 ```
 - 远程模式跳过本地模型,启动快;点开始录音→说话→**停止后**出结果(P0 无实时逐字,
   按句:停顿 > `asr.sentence_gap_ms` 才切句)
+- 连接地址在「控制面板 → 连接地址」下拉里选,可加/删自定义预设
+  (持久化在本地 SQLite `remote.url` / `remote.url_presets`,内置默认
+  `ws://192.168.0.68:8090/stream`);录音中切地址会自动停-启重连。
+  `REMOTE_ASR_URL` env 已废弃
 - 设置页「自动复制」=优化中文 → 优化结果自动入剪贴板
 - 编译验证:`cd src-tauri && cargo check`;前端 `cd src && npx tsc --noEmit`
 

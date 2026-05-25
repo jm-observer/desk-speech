@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 /// 客户端 → 服务端:连接后第一帧。
 /// `protocol`/`sample_rate`/`format`/`language` 是协议契约字段(客户端必发,
 /// 见 protocol-draft.md),编排层目前只用 `want_*`;保留以备 language 路由等。
+/// `want_secondary` 可选:客户端要求在主模型识别旁,额外用次模型(对比用)
+/// 跑一遍相同 PCM,服务端会发回 `Secondary { ref, text }` 事件。
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Hello {
@@ -15,6 +17,8 @@ pub struct Hello {
     pub language: String, // "zh" / "auto" / "en" ...(透传给 ASR 路由)
     pub want_optimize: bool,
     pub want_translate: bool,
+    #[serde(default)]
+    pub want_secondary: bool,
 }
 
 /// 客户端 → 服务端:控制帧(stop / reset)。
@@ -40,6 +44,14 @@ pub enum ServerEvent {
     },
     Optimized { r#ref: u64, text: String },
     Translated { r#ref: u64, text: String },
+    /// 次模型对比识别结果。客户端按 `ref` 与主段 `Segment.id` 关联,在同一
+    /// 行下方展示;不参与后续优化/翻译流水线。
+    Secondary {
+        r#ref: u64,
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+    },
     Error { code: String, message: String, fatal: bool },
     Done { session_id: String },
 }

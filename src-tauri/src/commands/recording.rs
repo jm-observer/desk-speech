@@ -26,9 +26,9 @@ pub async fn start_recording(
     }
 
     // Remote-only: stream mic to the GB10 orchestrator.
-    let Some(url) = crate::commands::remote::remote_url() else {
+    let Some(url) = crate::commands::remote::remote_url(&state) else {
         state.recording.store(false, Ordering::SeqCst);
-        return Err("远程识别未配置(请设置 REMOTE_ASR_URL)".to_string());
+        return Err("远程识别地址未配置(请在控制面板里设置)".to_string());
     };
     info!("[start_recording] remote mode -> {url}");
     state.stop_signal.store(false, Ordering::Relaxed);

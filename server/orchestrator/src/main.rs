@@ -76,7 +76,10 @@ async fn main() {
     for (k, v) in [
         ("asr.spk_threshold", "0.35"),
         ("asr.sentence_gap_ms", "1500"),
-        ("asr.model", "paraformer"), // paraformer | sensevoice (hot-switch)
+        ("asr.model", "paraformer"), // paraformer|sensevoice|whisper-turbo|whisper-large-v3 (hot-switch)
+        // 次模型(对比用):空=禁用。客户端 hello.want_secondary=true 时生效;
+        // 同枚举集合,自动避免与主模型重复。
+        ("asr.secondary_model", "sensevoice"),
         ("asr.gate_to_enrolled", "on"), // on=仅识别已启用声纹 | off=识别所有人
         // LLM config — defaults from env/const, then live-editable in console.
         ("vllm.model", c.vllm_model.as_str()),
@@ -166,6 +169,27 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
     let cli_tx = Arc::new(tokio::sync::Mutex::new(cli_tx));
     let (mut asr_tx, asr_rx) = asr.split();
 
+    // Negotiate per-session knobs with asr (currently just want_secondary).
+    // asr defaults to false if the message never arrives, so this is safe
+    // to send before any audio frames. On send failure we surface a
+    // non-fatal error and fall through — the next PCM frame in the main
+    // loop will close cleanly if the asr socket is really gone.
+    let cfg_msg = serde_json::json!({
+        "type": "config",
+        "want_secondary": hello.want_secondary,
+    })
+    .to_string();
+    if let Err(e) = asr_tx.send(TMessage::text(cfg_msg)).await {
+        let _ = cli_tx.lock().await.send(Message::Text(
+            ServerEvent::Error {
+                code: "asr_handshake".into(),
+                message: format!("asr config handshake failed: {e}"),
+                fatal: false,
+            }
+            .json(),
+        )).await;
+    }
+
     // 本会话上行 PCM 的滚动缓冲(16k mono s16le)。asr_reader 收到段时按
     // t_start/t_end 切片存为 WAV(留 1 天,供试听/下载/声纹/纠错样本)。
     // 与 asr 同一字节流、同一时钟;reset 时一起清零保持对齐。
@@ -239,6 +263,14 @@ async fn asr_reader(
         let _ = tx.lock().await.send(Message::Text(json)).await;
     }
     let mut llm_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // (t_start_ms, t_end_ms) → orchestrator segment id. Populated when a
+    // primary `segment` arrives; used to pair the asr's later `secondary`
+    // event back to the same client-visible segment id. Quantising to ms
+    // matches the float precision both sides round through.
+    let mut seg_by_time: HashMap<(i64, i64), u64> = HashMap::new();
+    fn time_key(t0: f64, t1: f64) -> (i64, i64) {
+        ((t0 * 1000.0).round() as i64, (t1 * 1000.0).round() as i64)
+    }
     while let Some(Ok(msg)) = asr_rx.next().await {
         let TMessage::Text(t) = msg else { continue };
         let v: serde_json::Value = match serde_json::from_str(&t) {
@@ -253,6 +285,12 @@ async fn asr_reader(
                 let t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let speaker = v.get("speaker").and_then(|x| x.as_str());
                 db.segment_upsert(id as i64, &session_id, &text, None, None, t0, t1, speaker);
+                // Remember (t0,t1)→id so the asr's later `secondary` event
+                // (same VAD window, possibly arriving after several other
+                // segments) can be paired back to this client segment.
+                if hello.want_secondary {
+                    seg_by_time.insert(time_key(t0, t1), id);
+                }
                 // forward the segment immediately — never blocked by LLM
                 send(
                     &cli_tx,
@@ -324,6 +362,36 @@ async fn asr_reader(
                     }));
                 }
             }
+            Some("secondary") => {
+                // Pair the secondary recognition back to its primary segment
+                // id via (t_start,t_end). If asr races ahead of orchestrator
+                // (shouldn't happen — primary always emitted first) we just
+                // drop the event rather than guess.
+                let t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                let t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                let text = v
+                    .get("text")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let kind = v.get("kind").and_then(|x| x.as_str()).map(str::to_string);
+                let Some(&seg_id) = seg_by_time.get(&time_key(t0, t1)) else {
+                    tracing::warn!(
+                        "[orch] secondary without matching segment t=[{:.3},{:.3}]",
+                        t0,
+                        t1
+                    );
+                    continue;
+                };
+                db.segment_set_secondary(seg_id as i64, &text);
+                send(
+                    &cli_tx,
+                    ServerEvent::Secondary { r#ref: seg_id, text, kind }.json(),
+                )
+                .await;
+                // Comparison done for this window — free the map entry.
+                seg_by_time.remove(&time_key(t0, t1));
+            }
             Some("error") => {
                 let m = v.get("message").and_then(|x| x.as_str()).unwrap_or("asr error");
                 send(
@@ -381,6 +449,10 @@ async fn api_asr_config(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
         .db
         .config_get("asr.model")
         .unwrap_or_else(|| "paraformer".into());
+    let secondary_model = ctx
+        .db
+        .config_get("asr.secondary_model")
+        .unwrap_or_default();
     let gate_to_enrolled = ctx
         .db
         .config_get("asr.gate_to_enrolled")
@@ -389,6 +461,7 @@ async fn api_asr_config(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
         "spk_threshold": f("asr.spk_threshold", 0.35),
         "sentence_gap_ms": f("asr.sentence_gap_ms", 1500.0) as i64,
         "model": model,
+        "secondary_model": secondary_model,
         "gate_to_enrolled": gate_to_enrolled,
     }))
 }
@@ -702,8 +775,10 @@ async function render(){
  else if(tab=='cf'){const c=await j('/api/config');renderConfig(c)}
 }
 const CFG_META={
- 'asr.model':{label:'ASR 模型',group:'ASR',kind:'select',options:['paraformer','sensevoice'],
-  hint:'识别后端模型。修改后 ASR 服务在 ~15s 内热切换(无需重启;切换期间在跑的那段会用旧模型完成)。'},
+ 'asr.model':{label:'ASR 模型',group:'ASR',kind:'select',options:['paraformer','sensevoice','whisper-turbo','whisper-large-v3'],
+  hint:'识别后端模型。paraformer/sensevoice 为中文优先;whisper-turbo/whisper-large-v3 多语种自动识别(turbo 更快、large-v3 更准)。修改后 ASR 服务在 ~15s 内热切换(无需重启;切换期间在跑的那段会用旧模型完成)。首次切到 Whisper 会加载权重,耗时稍长。'},
+ 'asr.secondary_model':{label:'次模型(对比)',group:'ASR',kind:'select',options:['','paraformer','sensevoice','whisper-turbo','whisper-large-v3'],
+  hint:'仅在桌面端打开「次模型对比」开关时生效。空=禁用。与主模型重复会被自动跳过。次模型只跑识别(不参与润色/翻译),用于对比中文识别能力。首次有会话启用时才会真正加载权重。'},
  'asr.spk_threshold':{label:'声纹匹配阈值',group:'ASR',
   hint:'0~1 的相似度门槛。值越高越严格(误收他人↓、漏收自己↑)。常用 0.30~0.45。ASR 服务每 15s 轮询热更新,无需重启。'},
  'asr.sentence_gap_ms':{label:'句子切分静音 (毫秒)',group:'ASR',

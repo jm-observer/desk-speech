@@ -9,8 +9,9 @@ the client to stop. `{"type":"flush"}` finalizes any pending segment then
 emits `{"type":"done"}`. `{"type":"reset"}` clears state.
 
 Model selection is purely via environment (ASR_*_DIR) so swapping
-Paraformer / SenseVoice / faster-whisper later does not touch this code's
-interface, the orchestrator, the protocol, or the client.
+Paraformer / SenseVoice / Whisper later does not touch this code's
+interface, the orchestrator, the protocol, or the client. The active
+model is hot-switchable at runtime via the orchestrator's `asr.model`.
 """
 import asyncio
 import json
@@ -33,6 +34,12 @@ _SV_TAG_RE = re.compile(r"<\|[^|]*\|>")
 
 PARAFORMER = os.environ["ASR_PARAFORMER_DIR"]
 SENSEVOICE = os.environ.get("ASR_SENSEVOICE_DIR") or None
+# Whisper (FunASR-packaged, loaded via the same AutoModel torch/CUDA stack).
+WHISPER_TURBO = os.environ.get("ASR_WHISPER_TURBO_DIR") or None
+WHISPER_LARGE = os.environ.get("ASR_WHISPER_LARGE_DIR") or None
+# Whisper decode language: "" -> auto-detect (best for mixed zh/en sessions);
+# set e.g. "zh" or "en" to pin it.
+WHISPER_LANGUAGE = os.environ.get("ASR_WHISPER_LANGUAGE", "").strip() or None
 VAD = os.environ["ASR_VAD_DIR"]
 PUNC = os.environ.get("ASR_PUNC_DIR") or None
 DEVICE = os.environ.get("ASR_DEVICE", "cuda")
@@ -60,15 +67,39 @@ ORCH_BASE = os.environ.get("ORCH_BASE", "http://orchestrator:8090")
 HTTP_PORT = int(os.environ.get("ASR_HTTP_PORT", "9101"))
 VP_REFRESH_SEC = int(os.environ.get("ASR_VP_REFRESH_SEC", "15"))
 
-def _build_asr(kind: str):
-    """Construct the offline recognizer for `kind` (paraformer|sensevoice).
+_WHISPER_KINDS = ("whisper-turbo", "whisper-large-v3")
+VALID_ASR_KINDS = ("paraformer", "sensevoice") + _WHISPER_KINDS
 
+# Secondary recognizer kind for side-by-side comparison. Picked by the
+# orchestrator's `asr.secondary_model` config (hot-switchable). Per-session
+# opt-in via the hello's `want_secondary` flag — keeps default sessions at
+# the original VRAM footprint. Default initial kind: sensevoice if its
+# weights env is set, otherwise disabled until the management console
+# picks one.
+_DEFAULT_SECONDARY = "sensevoice" if SENSEVOICE else ""
+SECONDARY_KIND: str = os.environ.get("ASR_SECONDARY_MODEL", _DEFAULT_SECONDARY).strip()
+SECONDARY_MODEL = None  # lazy: only built once the first opt-in session arrives
+
+
+def _build_asr(kind: str):
+    """Construct the offline recognizer for `kind`.
+
+    kind ∈ paraformer | sensevoice | whisper-turbo | whisper-large-v3.
     Heavy (loads weights onto GPU); called at startup and on hot-switch.
     """
     if kind == "sensevoice":
         if not SENSEVOICE:
             raise RuntimeError("ASR_SENSEVOICE_DIR not set")
         return AutoModel(model=SENSEVOICE, device=DEVICE, disable_update=True)
+    if kind in _WHISPER_KINDS:
+        turbo = kind == "whisper-turbo"
+        d = WHISPER_TURBO if turbo else WHISPER_LARGE
+        if not d:
+            env = "ASR_WHISPER_TURBO_DIR" if turbo else "ASR_WHISPER_LARGE_DIR"
+            raise RuntimeError(f"{env} not set")
+        # No vad_model: our streaming FSMN-VAD already cuts sentences, and
+        # recognize() feeds Whisper one (<=30s) segment at a time.
+        return AutoModel(model=d, device=DEVICE, disable_update=True)
     return AutoModel(model=PARAFORMER, punc_model=PUNC, device=DEVICE,
                      disable_update=True)
 
@@ -166,12 +197,14 @@ def _refresh_voiceprints():
 def _refresh_asr_config():
     """Pull runtime-tunable config from the orchestrator and reconcile.
 
-    Threshold/gap apply immediately. `model` triggers a hot-switch of the
-    recognizer: we rebuild on a poll thread and atomically swap the globals.
+    Threshold/gap apply immediately. `model` / `secondary_model` trigger a
+    hot-switch: we rebuild on a poll thread and atomically swap the globals.
     An in-progress recognize() snapshots the old model, so live sessions are
     not interrupted (the new model takes effect from the next sentence).
+    Secondary model is lazy — only built once a session actually opts in.
     """
-    global SPK_THRESHOLD, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND, GATE_TO_ENROLLED
+    global SPK_THRESHOLD, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND
+    global GATE_TO_ENROLLED, SECONDARY_KIND, SECONDARY_MODEL
     try:
         with urllib.request.urlopen(f"{ORCH_BASE}/api/asr-config", timeout=5) as r:
             d = json.loads(r.read().decode())
@@ -185,7 +218,7 @@ def _refresh_asr_config():
         GATE_TO_ENROLLED = str(d["gate_to_enrolled"]).strip().lower() \
             not in ("0", "off", "false", "no")
     want = str(d.get("model", "")).strip().lower()
-    if want and want in ("paraformer", "sensevoice") and want != ASR_KIND:
+    if want and want in VALID_ASR_KINDS and want != ASR_KIND:
         print(f"[asr][cfg] switching ASR model {ASR_KIND} -> {want} ...",
               flush=True)
         try:
@@ -196,6 +229,83 @@ def _refresh_asr_config():
             return  # retried on next poll
         ASR_MODEL, ASR_KIND = m, want
         print(f"[asr][cfg] ASR model now: {ASR_KIND}", flush=True)
+    # Secondary recognizer: kind change either swaps the loaded model (if
+    # already built) or just updates the desired kind (built on first opt-in).
+    sec = str(d.get("secondary_model", "")).strip().lower()
+    if sec != SECONDARY_KIND and (not sec or sec in VALID_ASR_KINDS):
+        if sec and sec == ASR_KIND:
+            print(f"[asr][cfg] secondary={sec} matches primary; skipping "
+                  f"(comparison would be redundant)", flush=True)
+        elif not sec:
+            SECONDARY_KIND = ""
+            SECONDARY_MODEL = None
+            print("[asr][cfg] secondary model disabled", flush=True)
+        elif SECONDARY_MODEL is None:
+            SECONDARY_KIND = sec
+            print(f"[asr][cfg] secondary model set to {sec} (lazy-load)",
+                  flush=True)
+        else:
+            print(f"[asr][cfg] switching secondary {SECONDARY_KIND} -> {sec} ...",
+                  flush=True)
+            try:
+                m = _build_asr(sec)
+            except Exception as e:  # noqa: BLE001
+                print(f"[asr][cfg] secondary switch to {sec} FAILED: {e} "
+                      f"(keeping {SECONDARY_KIND})", flush=True)
+                return
+            SECONDARY_MODEL, SECONDARY_KIND = m, sec
+            print(f"[asr][cfg] secondary model now: {SECONDARY_KIND}", flush=True)
+
+
+def _ensure_secondary_loaded():
+    """Build the secondary recognizer on first opt-in. Returns (model, kind)
+    or (None, "") if no secondary is configured / build failed."""
+    global SECONDARY_MODEL, SECONDARY_KIND
+    if not SECONDARY_KIND:
+        return (None, "")
+    if SECONDARY_MODEL is not None:
+        return (SECONDARY_MODEL, SECONDARY_KIND)
+    if SECONDARY_KIND == ASR_KIND:
+        return (None, "")  # avoid loading a duplicate of the primary
+    print(f"[asr][sec] lazy-loading secondary model {SECONDARY_KIND} ...",
+          flush=True)
+    try:
+        SECONDARY_MODEL = _build_asr(SECONDARY_KIND)
+    except Exception as e:  # noqa: BLE001
+        print(f"[asr][sec] load failed: {e} — disabling secondary", flush=True)
+        SECONDARY_KIND = ""
+        SECONDARY_MODEL = None
+        return (None, "")
+    print(f"[asr][sec] secondary ready: {SECONDARY_KIND}", flush=True)
+    return (SECONDARY_MODEL, SECONDARY_KIND)
+
+
+def recognize_with(seg: np.ndarray, model, kind: str) -> str:
+    """Same as `recognize` but on an explicit (model, kind) pair — used to
+    drive the secondary recognizer without disturbing the primary globals."""
+    if seg.size == 0 or model is None or not kind:
+        return ""
+    if kind == "sensevoice":
+        res = model.generate(input=seg, cache={}, language="auto",
+                             use_itn=True, batch_size_s=300)
+        if not res:
+            return ""
+        return _SV_TAG_RE.sub("", res[0].get("text", "")).strip()
+    if kind in _WHISPER_KINDS:
+        opts = {
+            "task": "transcribe",
+            "language": WHISPER_LANGUAGE,
+            "beam_size": None,
+            "fp16": DEVICE.startswith("cuda"),
+            "without_timestamps": True,
+            "prompt": None,
+        }
+        res = model.generate(input=seg, DecodingOptions=opts, batch_size_s=0)
+        if not res:
+            return ""
+        return _SV_TAG_RE.sub("", res[0].get("text", "")).strip()
+    res = model.generate(input=seg, batch_size_s=300)
+    return res[0].get("text", "") if res else ""
 
 
 async def voiceprint_loop():
@@ -203,7 +313,13 @@ async def voiceprint_loop():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _refresh_voiceprints)
         await loop.run_in_executor(None, _refresh_asr_config)
-        print(f"[asr][cfg] model={ASR_KIND} voiceprints={len(ENABLED_VPS)} "
+        sec_state = (
+            f"loaded={SECONDARY_KIND}"
+            if SECONDARY_MODEL is not None
+            else (f"pending={SECONDARY_KIND}" if SECONDARY_KIND else "off")
+        )
+        print(f"[asr][cfg] model={ASR_KIND} secondary={sec_state} "
+              f"voiceprints={len(ENABLED_VPS)} "
               f"gate={'on' if GATE_TO_ENROLLED else 'off'} "
               f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms", flush=True)
         await asyncio.sleep(VP_REFRESH_SEC)
@@ -232,6 +348,13 @@ class Session:
         self.speech_open = False    # VAD currently inside speech
         self.sent_beg = None        # accumulating sentence start (ms)
         self.last_end = None        # end (ms) of last closed speech region
+        # Per-session opt-in for the secondary recognizer (set by the
+        # orchestrator's {type:"config", want_secondary:bool} handshake).
+        # Off by default so existing clients see no behaviour change.
+        self.want_secondary = False
+        # Background secondary-recognition tasks; awaited before `done` so the
+        # client doesn't miss a trailing comparison result.
+        self.sec_tasks: list = []
 
     def now_ms(self) -> int:
         return len(self.buf) // SAMPLES_PER_MS
@@ -276,6 +399,19 @@ def recognize(seg: np.ndarray) -> str:
         if not res:
             return ""
         return _SV_TAG_RE.sub("", res[0].get("text", "")).strip()
+    if kind in _WHISPER_KINDS:
+        opts = {
+            "task": "transcribe",
+            "language": WHISPER_LANGUAGE,  # None -> auto-detect
+            "beam_size": None,
+            "fp16": DEVICE.startswith("cuda"),
+            "without_timestamps": True,
+            "prompt": None,
+        }
+        res = model.generate(input=seg, DecodingOptions=opts, batch_size_s=0)
+        if not res:
+            return ""
+        return _SV_TAG_RE.sub("", res[0].get("text", "")).strip()
     res = model.generate(input=seg, batch_size_s=300)
     return res[0].get("text", "") if res else ""
 
@@ -295,6 +431,37 @@ async def emit_segment(ws, text, beg_ms, end_ms, speaker=None):
     if speaker:
         msg["speaker"] = speaker
     await ws.send(json.dumps(msg, ensure_ascii=False))
+
+
+async def _run_secondary(ws, seg: np.ndarray, beg: int, end: int):
+    """Run the secondary recognizer off the event loop and emit a paired
+    `secondary` event. Pairing key on the client side is (t_start,t_end) —
+    same values the primary segment carries, since both share VAD output."""
+    model, kind = _ensure_secondary_loaded()
+    if model is None:
+        return
+    loop = asyncio.get_event_loop()
+    try:
+        text = await loop.run_in_executor(None, recognize_with, seg, model, kind)
+    except Exception as e:  # noqa: BLE001
+        print(f"[asr][sec] recognize failed ({kind}): {e}", flush=True)
+        return
+    text = (text or "").strip()
+    print(f"[asr][sec] beg={beg} end={end} kind={kind} text={text!r}",
+          flush=True)
+    if not text:
+        return
+    msg = {
+        "type": "secondary",
+        "kind": kind,
+        "text": text,
+        "t_start": beg / 1000.0 if beg is not None else None,
+        "t_end": end / 1000.0 if end is not None else None,
+    }
+    try:
+        await ws.send(json.dumps(msg, ensure_ascii=False))
+    except Exception:
+        pass  # client gone; nothing to do
 
 
 async def finalize(ws, s: Session):
@@ -318,6 +485,15 @@ async def finalize(ws, s: Session):
     # informational even when gating is off.
     speaker = spk if (ENABLED_VPS and spk and score >= SPK_THRESHOLD) else None
     await emit_segment(ws, text, beg, end, speaker)
+    # Fan out the same PCM slice to the secondary recognizer (if opted-in
+    # for this session). Detached so primary path latency is unaffected.
+    if s.want_secondary and SECONDARY_KIND:
+        # Use a copy so subsequent buf growth / reset can't race the worker.
+        task = asyncio.create_task(_run_secondary(ws, seg.copy(), beg, end))
+        s.sec_tasks.append(task)
+        # Lightly prune finished tasks so the list doesn't grow unbounded
+        # in long sessions.
+        s.sec_tasks = [t for t in s.sec_tasks if not t.done()]
 
 
 async def feed_vad(ws, s: Session, chunk: np.ndarray, is_final: bool):
@@ -386,14 +562,39 @@ async def handle(ws):
             continue
         # text control
         try:
-            t = json.loads(msg).get("type")
+            ctrl = json.loads(msg)
+            t = ctrl.get("type")
         except Exception:
             continue
         if t == "reset":
+            # Drop any in-flight secondary tasks for the previous segments
+            # before throwing away the session — they belong to a different
+            # logical recording from the client's perspective.
+            for task in s.sec_tasks:
+                task.cancel()
             s = Session()
+        elif t == "config":
+            # Per-session knobs negotiated with the orchestrator (currently
+            # just `want_secondary`). Treated as a sticky preference; the
+            # orchestrator sends it once right after connect.
+            if "want_secondary" in ctrl:
+                s.want_secondary = bool(ctrl.get("want_secondary"))
+                print(f"[asr][cfg] session want_secondary={s.want_secondary} "
+                      f"(secondary kind={SECONDARY_KIND or 'off'})", flush=True)
         elif t == "flush":
             tail = s._flush_tail()
             await feed_vad(ws, s, tail, is_final=True)
+            # Wait for any secondary recognitions queued by the just-finalised
+            # segments so the client sees their comparison text before `done`.
+            if s.sec_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*s.sec_tasks, return_exceptions=True),
+                        timeout=15,
+                    )
+                except asyncio.TimeoutError:
+                    print("[asr][sec] drain on flush timed out", flush=True)
+                s.sec_tasks.clear()
             await ws.send(json.dumps({"type": "done"}))
 
 

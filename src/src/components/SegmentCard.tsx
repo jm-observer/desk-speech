@@ -7,6 +7,11 @@ import { Icon } from './ui/Icon';
 interface SegmentCardProps {
   segment: Segment;
   showEnglish?: boolean;
+  /** When the dual-model comparison opt-in is on, show the secondary
+   *  recognizer's text in a small accent row. Defaults to true so any
+   *  segment carrying `text_secondary` is shown — toggling the feature off
+   *  for new sessions naturally hides it for future segments. */
+  showSecondary?: boolean;
   onCopyChinese: (text: string) => void;
   onCopyEnglish: (text: string) => void;
 }
@@ -14,11 +19,13 @@ interface SegmentCardProps {
 export const SegmentCard: React.FC<SegmentCardProps> = ({
   segment,
   showEnglish,
+  showSecondary = true,
   onCopyChinese,
   onCopyEnglish,
 }) => {
   const [copiedZh, setCopiedZh] = useState(false);
   const [copiedEn, setCopiedEn] = useState(false);
+  const [copiedSec, setCopiedSec] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const maxHeightRef = useRef(0);
   const [minHeight, setMinHeight] = useState<number | undefined>(undefined);
@@ -34,6 +41,15 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
     setCopiedEn(true);
     setTimeout(() => setCopiedEn(false), 2000);
   };
+
+  const handleCopySec = () => {
+    if (!segment.text_secondary) return;
+    onCopyChinese(segment.text_secondary);
+    setCopiedSec(true);
+    setTimeout(() => setCopiedSec(false), 2000);
+  };
+
+  const showSecondaryRow = showSecondary && !!segment.text_secondary;
 
   const optimizeRunning = segment.optimize_status === 'running' || segment.optimize_status === 'pending';
   const translateRunning = segment.translate_status === 'running' || segment.translate_status === 'pending';
@@ -120,6 +136,27 @@ export const SegmentCard: React.FC<SegmentCardProps> = ({
 
         <div className="flex flex-col gap-1.5">
           <p className="text-[13px] leading-[1.7] text-[var(--ink-2)] break-words text-pretty">{segment.text_raw}</p>
+
+          {showSecondaryRow && (
+            <div className="flex items-start gap-2 px-2.5 py-1.5 rounded-md bg-[var(--bg-soft)] border-l-2 border-[var(--accent,var(--primary))]">
+              <span
+                className="shrink-0 mt-0.5 text-[10px] uppercase tracking-wider font-medium text-[var(--ink-4)] font-mono"
+                title={segment.secondary_kind ? `次模型: ${segment.secondary_kind}` : '次模型'}
+              >
+                {segment.secondary_kind || '次模型'}
+              </span>
+              <p className="flex-1 text-[12.5px] leading-[1.6] text-[var(--ink-3)] break-words text-pretty">
+                {segment.text_secondary}
+              </p>
+              <button
+                onClick={handleCopySec}
+                className="shrink-0 w-6 h-6 rounded flex items-center justify-center text-[var(--ink-4)] hover:text-[var(--primary-deep)] hover:bg-[var(--bg-card)] opacity-0 group-hover:opacity-100 transition-opacity"
+                title="复制次模型识别"
+              >
+                <Icon name={copiedSec ? 'check' : 'copy'} size={11} />
+              </button>
+            </div>
+          )}
 
           <p className={cn('text-[15px] leading-[1.7] break-words text-pretty', optimizeRunning && 'text-[var(--ink-4)]')}>
             {segment.optimize_status === 'failed'

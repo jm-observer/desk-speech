@@ -29,12 +29,21 @@ pub(crate) struct AppState {
     settings: Arc<RwLock<VadSettings>>,
     llm_settings: Arc<RwLock<LlmSettings>>,
     selected_device: Arc<RwLock<Option<String>>>,
+    /// Currently selected remote orchestrator WS URL (e.g.
+    /// `ws://192.168.0.68:8090/stream`). Replaces the old `REMOTE_ASR_URL` env
+    /// var — edited from the desktop UI, persisted in SQLite as `remote.url`.
+    remote_url: Arc<RwLock<String>>,
+    /// User-added custom URLs surfaced in the connection dropdown (in addition
+    /// to the built-in default). Persisted as JSON in SQLite under `remote.url_presets`.
+    remote_url_presets: Arc<RwLock<Vec<String>>>,
 }
 
 fn build_app_state(
     db: db::SpeechDatabase,
     vad_settings: VadSettings,
     llm_settings: LlmSettings,
+    remote_url: String,
+    remote_url_presets: Vec<String>,
 ) -> AppState {
     AppState {
         recording: Arc::new(AtomicBool::new(false)),
@@ -45,6 +54,8 @@ fn build_app_state(
         settings: Arc::new(RwLock::new(vad_settings)),
         llm_settings: Arc::new(RwLock::new(llm_settings)),
         selected_device: Arc::new(RwLock::new(None)),
+        remote_url: Arc::new(RwLock::new(remote_url)),
+        remote_url_presets: Arc::new(RwLock::new(remote_url_presets)),
     }
 }
 
@@ -72,7 +83,9 @@ pub fn run() {
 
     let vad_settings = tauri::async_runtime::block_on(settings::load_vad_settings_from_db(&db));
     let llm_settings = tauri::async_runtime::block_on(settings::load_llm_settings_from_db(&db));
-    let state = build_app_state(db, vad_settings, llm_settings);
+    let (remote_url, remote_url_presets) =
+        tauri::async_runtime::block_on(settings::load_remote_settings_from_db(&db));
+    let state = build_app_state(db, vad_settings, llm_settings, remote_url, remote_url_presets);
 
     // Remote-only client: recognition runs on the GB10 orchestrator.
     // Report ready immediately; connection errors surface at record time

@@ -6,6 +6,7 @@ import { Switch } from './ui/Switch';
 import { Button } from './ui/Button';
 import { Icon } from './ui/Icon';
 import { StatusChip } from './StatusChip';
+import { RemoteUrlPicker } from './RemoteUrlPicker';
 import type { AsrLanguage, AutoCopyMode } from '../api/tauri-client';
 
 interface ControlPanelProps {
@@ -28,6 +29,13 @@ interface ControlPanelProps {
   onAutoCopyModeChange: (val: AutoCopyMode) => void;
   mergeWindowMs: number;
   onMergeWindowMsChange: (val: number) => void;
+  remoteUrl: string;
+  remoteUrlPresets: string[];
+  onRemoteUrlSelect: (url: string) => void;
+  onRemoteUrlAdd: (url: string) => void;
+  onRemoteUrlRemove: (url: string) => void;
+  wantSecondary: boolean;
+  onWantSecondaryChange: (val: boolean) => void;
   onToggleMode: () => void;
   disabled?: boolean;
 }
@@ -71,6 +79,13 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onAutoCopyModeChange,
   mergeWindowMs,
   onMergeWindowMsChange,
+  remoteUrl,
+  remoteUrlPresets,
+  onRemoteUrlSelect,
+  onRemoteUrlAdd,
+  onRemoteUrlRemove,
+  wantSecondary,
+  onWantSecondaryChange,
   onToggleMode,
   disabled,
 }) => {
@@ -93,6 +108,15 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
       </div>
 
       <StatusChip status={status} />
+
+      <RemoteUrlPicker
+        value={remoteUrl}
+        presets={remoteUrlPresets}
+        onSelect={onRemoteUrlSelect}
+        onAdd={onRemoteUrlAdd}
+        onRemove={onRemoteUrlRemove}
+        disabled={disabled}
+      />
 
       <Dropdown
         label="输入设备"
@@ -161,6 +185,13 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             <span className="text-[11px] text-[var(--ink-4)]">刷新后会按当前模式自动检测并尝试启动</span>
           </div>
           <Switch checked={autoRecordingEnabled} onCheckedChange={onAutoRecordingEnabledChange} disabled={disabled} />
+        </div>
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col">
+            <span className="text-[13px] font-medium text-[var(--ink-2)]">次模型对比识别</span>
+            <span className="text-[11px] text-[var(--ink-4)]">同段并行跑次模型(中文),在原文下方对照展示。变更需停-启录音生效</span>
+          </div>
+          <Switch checked={wantSecondary} onCheckedChange={onWantSecondaryChange} disabled={disabled} />
         </div>
       </div>
 
