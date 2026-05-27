@@ -55,7 +55,7 @@ static SEG_ID: AtomicU64 = AtomicU64::new(1);
 
 // Defaults for the LLM keys seeded into config (editable in the console
 // "配置" tab). Also the fallback if a key is somehow missing from the DB.
-const DEFAULT_OPTIMIZE_PROMPT: &str = "你是中文口语转写规整器。把用户这句口语整理成通顺、简洁的书面中文。严格要求:只输出整理后的一句话本身;不要解释、不要选项、不要列表、不要markdown、不要追问、不要任何前后缀;若已通顺则原样返回。";
+const DEFAULT_OPTIMIZE_PROMPT: &str = "你是中文口语转写规整器。任务:仅修正口语病(去除\"那/就是/啊/什么的\"等口头语、合并自我重复如\"最左侧是最左侧是\"、补齐缺失标点、改正同音错字),输出通顺的书面中文。严格保留原句所有信息点和原有顺序;禁止归纳、概括、合并要点、改写为列表或重排语序;长句保持长句,不要为了简洁而压缩。严格要求:只输出整理后的文本本身;不要解释、不要选项、不要markdown、不要追问、不要任何前后缀;若已通顺则原样返回。";
 const DEFAULT_TRANSLATE_PROMPT: &str = "Translate the user's sentence into natural English. Output ONLY the translation itself — no explanations, no options, no quotes, no markdown.";
 
 #[tokio::main]
