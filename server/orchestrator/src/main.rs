@@ -58,6 +58,29 @@ static SEG_ID: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_OPTIMIZE_PROMPT: &str = "你是中文口语转写规整器。任务:仅修正口语病(去除\"那/就是/啊/什么的\"等口头语、合并自我重复如\"最左侧是最左侧是\"、补齐缺失标点、改正同音错字),输出通顺的书面中文。严格保留原句所有信息点和原有顺序;禁止归纳、概括、合并要点、改写为列表或重排语序;长句保持长句,不要为了简洁而压缩。严格要求:只输出整理后的文本本身;不要解释、不要选项、不要markdown、不要追问、不要任何前后缀;若已通顺则原样返回。";
 const DEFAULT_TRANSLATE_PROMPT: &str = "Translate the user's sentence into natural English. Output ONLY the translation itself — no explanations, no options, no quotes, no markdown.";
 
+/// 抽取热词列表(忽略空行和注释)。每行可为 "词" 或 "词 权重",权重对 LLM 没意义,这里只取词面。
+fn parse_hotwords(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// 把 asr.hotwords 词表拼到中文润色 prompt 末尾,作为 SenseVoice 等不支持声学热词
+/// 的模型的兜底。词表为空时返回原 prompt 不动。
+fn optimize_prompt_with_hotwords(prompt: String, hotwords_raw: &str) -> String {
+    let words = parse_hotwords(hotwords_raw);
+    if words.is_empty() {
+        return prompt;
+    }
+    let list = words.join("、");
+    format!(
+        "{prompt}\n\n【本场景常用术语,遇同音字/近音字时优先匹配下列词】{list}"
+    )
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -81,6 +104,10 @@ async fn main() {
         // 同枚举集合,自动避免与主模型重复。
         ("asr.secondary_model", "sensevoice"),
         ("asr.gate_to_enrolled", "on"), // on=仅识别已启用声纹 | off=识别所有人
+        // 领域热词:每行一个词,可选 "词 权重"(权重 ≥1.0,默认 1.0)。
+        // 同时喂给:(a) ASR 声学层(Paraformer hotword= / Whisper initial_prompt);
+        // (b) LLM 润色 prompt 末尾(SenseVoice 不支持声学热词时的兜底)。
+        ("asr.hotwords", ""),
         // LLM config — defaults from env/const, then live-editable in console.
         ("vllm.model", c.vllm_model.as_str()),
         ("vllm.base", c.vllm_base.as_str()),
@@ -328,8 +355,11 @@ async fn asr_reader(
                         .config_get("vllm.base")
                         .unwrap_or_else(|| c.vllm_base.clone());
                     let opt_sys = hello.want_optimize.then(|| {
-                        db.config_get("llm.optimize_prompt")
-                            .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into())
+                        let base = db
+                            .config_get("llm.optimize_prompt")
+                            .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
+                        let hw = db.config_get("asr.hotwords").unwrap_or_default();
+                        optimize_prompt_with_hotwords(base, &hw)
                     });
                     let tr_sys = hello.want_translate.then(|| {
                         db.config_get("llm.translate_prompt")
@@ -457,12 +487,14 @@ async fn api_asr_config(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
         .db
         .config_get("asr.gate_to_enrolled")
         .unwrap_or_else(|| "on".into());
+    let hotwords = ctx.db.config_get("asr.hotwords").unwrap_or_default();
     Json(json!({
         "spk_threshold": f("asr.spk_threshold", 0.35),
         "sentence_gap_ms": f("asr.sentence_gap_ms", 1500.0) as i64,
         "model": model,
         "secondary_model": secondary_model,
         "gate_to_enrolled": gate_to_enrolled,
+        "hotwords": hotwords,
     }))
 }
 
@@ -620,10 +652,14 @@ async fn api_segment_rerun(
         .db
         .config_get("vllm.base")
         .unwrap_or_else(|| ctx.cfg.vllm_base.clone());
-    let opt_sys = ctx
-        .db
-        .config_get("llm.optimize_prompt")
-        .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
+    let opt_sys = {
+        let base = ctx
+            .db
+            .config_get("llm.optimize_prompt")
+            .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
+        let hw = ctx.db.config_get("asr.hotwords").unwrap_or_default();
+        optimize_prompt_with_hotwords(base, &hw)
+    };
     let tr_sys = ctx
         .db
         .config_get("llm.translate_prompt")
@@ -785,6 +821,8 @@ const CFG_META={
   hint:'连续静音超过该时长视为一句结束并下发。1000~2000 为常用区间。无需重启,~15s 内生效。'},
  'asr.gate_to_enrolled':{label:'声纹门控',group:'ASR',kind:'select',options:['on','off'],
   hint:'on = 只识别已在「声纹」tab 启用的声纹的语音段,其余直接丢弃;off = 识别所有人,命中已启用声纹时仍标注说话人。未注册任何声纹时,两种设置都等同于「识别所有人」。无需重启,~15s 内生效。'},
+ 'asr.hotwords':{label:'领域热词',group:'ASR',kind:'textarea',
+  hint:'每行一个词,可选「词 权重」形式(权重 ≥1.0,默认 1.0)。例:\n会话\n复盘 2.0\n请求头\n双向喂入:(a) ASR 声学层 — Paraformer 走 hotword=,Whisper 拼到 initial_prompt,SenseVoice 不支持热词会自动跳过;(b) LLM 润色 system prompt 末尾(SenseVoice 的兜底)。改完 ASR 服务 ~15s 内热生效,LLM 在处理下一条新分段时读取。'},
  'vllm.base':{label:'vLLM 服务地址',group:'LLM',
   hint:'OpenAI 兼容根地址(以 /v1 结尾)。容器内访问主机服务请用 host.docker.internal,例如 http://host.docker.internal:12340/v1。改完下一条新分段就用新值,无需重启。'},
  'vllm.model':{label:'vLLM 模型名',group:'LLM',

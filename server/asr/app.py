@@ -70,6 +70,32 @@ VP_REFRESH_SEC = int(os.environ.get("ASR_VP_REFRESH_SEC", "15"))
 _WHISPER_KINDS = ("whisper-turbo", "whisper-large-v3")
 VALID_ASR_KINDS = ("paraformer", "sensevoice") + _WHISPER_KINDS
 
+# 领域热词(由 orchestrator 的 asr.hotwords 配置驱动,每 15s 轮询):
+#   HOTWORDS_PARAFORMER  -> 空格分隔字符串,作为 Paraformer 的 hotword=
+#   HOTWORDS_WHISPER     -> 用作 Whisper DecodingOptions.prompt 的 initial_prompt
+# SenseVoice 不支持热词偏置,自动跳过(仍可在 LLM 润色侧兜底,由 orchestrator 处理)。
+HOTWORDS_PARAFORMER: str = ""
+HOTWORDS_WHISPER: str = ""
+
+
+def _parse_hotwords(raw: str):
+    """从 textarea 文本解析热词,返回 (paraformer_str, whisper_str)。
+
+    每行 "词" 或 "词 权重"。Paraformer 接受 "w1 w2 ..." 形式;Whisper 用
+    initial_prompt(自然语言"上下文"),所以把它们拼成中文顿号串作为提示。
+    """
+    words: list[str] = []
+    for line in (raw or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        w = s.split()[0]
+        if w:
+            words.append(w)
+    if not words:
+        return ("", "")
+    return (" ".join(words), "、".join(words))
+
 # Secondary recognizer kind for side-by-side comparison. Picked by the
 # orchestrator's `asr.secondary_model` config (hot-switchable). Per-session
 # opt-in via the hello's `want_secondary` flag — keeps default sessions at
@@ -205,6 +231,7 @@ def _refresh_asr_config():
     """
     global SPK_THRESHOLD, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND
     global GATE_TO_ENROLLED, SECONDARY_KIND, SECONDARY_MODEL
+    global HOTWORDS_PARAFORMER, HOTWORDS_WHISPER
     try:
         with urllib.request.urlopen(f"{ORCH_BASE}/api/asr-config", timeout=5) as r:
             d = json.loads(r.read().decode())
@@ -217,6 +244,10 @@ def _refresh_asr_config():
     if "gate_to_enrolled" in d:
         GATE_TO_ENROLLED = str(d["gate_to_enrolled"]).strip().lower() \
             not in ("0", "off", "false", "no")
+    if "hotwords" in d:
+        HOTWORDS_PARAFORMER, HOTWORDS_WHISPER = _parse_hotwords(
+            str(d.get("hotwords") or "")
+        )
     want = str(d.get("model", "")).strip().lower()
     if want and want in VALID_ASR_KINDS and want != ASR_KIND:
         print(f"[asr][cfg] switching ASR model {ASR_KIND} -> {want} ...",
@@ -286,6 +317,7 @@ def recognize_with(seg: np.ndarray, model, kind: str) -> str:
     if seg.size == 0 or model is None or not kind:
         return ""
     if kind == "sensevoice":
+        # SenseVoice 走 CTC 解码,FunASR 未暴露热词偏置接口 — 跳过(LLM 兜底)。
         res = model.generate(input=seg, cache={}, language="auto",
                              use_itn=True, batch_size_s=300)
         if not res:
@@ -298,13 +330,17 @@ def recognize_with(seg: np.ndarray, model, kind: str) -> str:
             "beam_size": None,
             "fp16": DEVICE.startswith("cuda"),
             "without_timestamps": True,
-            "prompt": None,
+            "prompt": HOTWORDS_WHISPER or None,
         }
         res = model.generate(input=seg, DecodingOptions=opts, batch_size_s=0)
         if not res:
             return ""
         return _SV_TAG_RE.sub("", res[0].get("text", "")).strip()
-    res = model.generate(input=seg, batch_size_s=300)
+    # Paraformer:原生 hotword 接口,空串时 FunASR 不做偏置。
+    kwargs = {"batch_size_s": 300}
+    if HOTWORDS_PARAFORMER:
+        kwargs["hotword"] = HOTWORDS_PARAFORMER
+    res = model.generate(input=seg, **kwargs)
     return res[0].get("text", "") if res else ""
 
 
@@ -318,10 +354,12 @@ async def voiceprint_loop():
             if SECONDARY_MODEL is not None
             else (f"pending={SECONDARY_KIND}" if SECONDARY_KIND else "off")
         )
+        hw_n = len(HOTWORDS_PARAFORMER.split()) if HOTWORDS_PARAFORMER else 0
         print(f"[asr][cfg] model={ASR_KIND} secondary={sec_state} "
               f"voiceprints={len(ENABLED_VPS)} "
               f"gate={'on' if GATE_TO_ENROLLED else 'off'} "
-              f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms", flush=True)
+              f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms "
+              f"hotwords={hw_n}", flush=True)
         await asyncio.sleep(VP_REFRESH_SEC)
 
 
@@ -406,13 +444,16 @@ def recognize(seg: np.ndarray) -> str:
             "beam_size": None,
             "fp16": DEVICE.startswith("cuda"),
             "without_timestamps": True,
-            "prompt": None,
+            "prompt": HOTWORDS_WHISPER or None,
         }
         res = model.generate(input=seg, DecodingOptions=opts, batch_size_s=0)
         if not res:
             return ""
         return _SV_TAG_RE.sub("", res[0].get("text", "")).strip()
-    res = model.generate(input=seg, batch_size_s=300)
+    kwargs = {"batch_size_s": 300}
+    if HOTWORDS_PARAFORMER:
+        kwargs["hotword"] = HOTWORDS_PARAFORMER
+    res = model.generate(input=seg, **kwargs)
     return res[0].get("text", "") if res else ""
 
 
@@ -436,11 +477,14 @@ async def emit_segment(ws, text, beg_ms, end_ms, speaker=None):
 async def _run_secondary(ws, seg: np.ndarray, beg: int, end: int):
     """Run the secondary recognizer off the event loop and emit a paired
     `secondary` event. Pairing key on the client side is (t_start,t_end) —
-    same values the primary segment carries, since both share VAD output."""
-    model, kind = _ensure_secondary_loaded()
+    same values the primary segment carries, since both share VAD output.
+    Both lazy-load and inference go through `run_in_executor` — the first
+    opt-in segment otherwise blocks the event loop for ~10-30s on weights
+    load, which stalls all in-flight sessions on this asr instance."""
+    loop = asyncio.get_event_loop()
+    model, kind = await loop.run_in_executor(None, _ensure_secondary_loaded)
     if model is None:
         return
-    loop = asyncio.get_event_loop()
     try:
         text = await loop.run_in_executor(None, recognize_with, seg, model, kind)
     except Exception as e:  # noqa: BLE001
