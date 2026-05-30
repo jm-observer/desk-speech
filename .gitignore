@@ -27,3 +27,5 @@ server/tts/GPT-SoVITS/
 # TTS bake-off scratch: generated audio is ignored,
 # gen/syn scripts + ref wavs + manifests are tracked
 server/tts/tts-voices/outputs/
+# sync_voices.py 的部署暂存区（合并后的 voices.json + wav 副本，产物不入 git）
+server/tts/tts-voices/_deploy/

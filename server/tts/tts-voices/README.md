@@ -36,9 +36,21 @@ tts-voices/
 
 ## 部署到服务端
 
-服务端要求 `/voices` 下**扁平**布局（`voices.json` + 同级 `*.wav`）。中文那套
-直接 `scp refs/zh/* fengqi@192.168.0.68:~/tts-voices/` 即可。英文 ref 目前仅本地
-实验，未并入服务端音色库（并入需把 en wav + 合并 entry 推到 `~/tts-voices/`）。
+服务端要求 `/voices` 下**扁平**布局（`voices.json` + 同级 `*.wav`），读 GB10
+`~/tts-voices/`。线上 voices.json 是 **zh + en 的合并产物**，统一用
+[`sync_voices.py`](sync_voices.py) 部署：
+
+```bash
+python sync_voices.py            # dry-run：在 _deploy/ 生成合并产物，不推送
+python sync_voices.py --push     # 生成 + scp 到 GB10（/voices 热重读，免重启）
+```
+
+脚本合并 `refs/zh/voices.json`（全部中文）+ `refs/en/en_voices.json` 中
+`ENABLED_EN` 列出的英文音色（当前 `en_m_3752` + `en_f_5895`，供 zero 英语教练
+agent 用）。加 / 减英文音色改脚本顶部的 `ENABLED_EN` 再 `--push`。
+
+> ⚠️ **不要**再手动 `scp refs/zh/voices.json` 到服务端——会**覆盖掉英文条目**。
+> 一律走 `sync_voices.py`。
 
 ## 复现
 
