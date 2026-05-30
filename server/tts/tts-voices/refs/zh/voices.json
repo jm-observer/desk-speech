@@ -1,0 +1,60 @@
+{
+  "prompt_text": "今天的会议讨论了下个季度的重点工作和团队分工安排。",
+  "voices": [
+    {
+      "id": "edge_xiaoxiao",
+      "file": "edge_xiaoxiao.wav",
+      "source": "edge-tts",
+      "source_voice": "zh-CN-XiaoxiaoNeural",
+      "gender": "F",
+      "tone": "温暖",
+      "license": "Microsoft Edge TTS — dev/personal use only; not for redistribution or commercial deployment"
+    },
+    {
+      "id": "edge_xiaoyi",
+      "file": "edge_xiaoyi.wav",
+      "source": "edge-tts",
+      "source_voice": "zh-CN-XiaoyiNeural",
+      "gender": "F",
+      "tone": "活泼",
+      "license": "Microsoft Edge TTS — dev/personal use only; not for redistribution or commercial deployment"
+    },
+    {
+      "id": "edge_yunxi",
+      "file": "edge_yunxi.wav",
+      "source": "edge-tts",
+      "source_voice": "zh-CN-YunxiNeural",
+      "gender": "M",
+      "tone": "活泼",
+      "license": "Microsoft Edge TTS — dev/personal use only; not for redistribution or commercial deployment"
+    },
+    {
+      "id": "edge_yunjian",
+      "file": "edge_yunjian.wav",
+      "source": "edge-tts",
+      "source_voice": "zh-CN-YunjianNeural",
+      "gender": "M",
+      "tone": "中性",
+      "license": "Microsoft Edge TTS — dev/personal use only; not for redistribution or commercial deployment"
+    },
+    {
+      "id": "edge_yunyang",
+      "file": "edge_yunyang.wav",
+      "source": "edge-tts",
+      "source_voice": "zh-CN-YunyangNeural",
+      "gender": "M",
+      "tone": "严肃",
+      "license": "Microsoft Edge TTS — dev/personal use only; not for redistribution or commercial deployment"
+    },
+    {
+      "id": "cosy_zero_shot",
+      "file": "cosy_zero_shot.wav",
+      "source": "cosyvoice2-official",
+      "source_voice": "asset/zero_shot_prompt.wav",
+      "gender": "F",
+      "tone": "活泼",
+      "license": "Apache-2.0",
+      "prompt_text_override": "希望你以后能够做的比我还好呦。"
+    }
+  ]
+}

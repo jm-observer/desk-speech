@@ -1,0 +1,72 @@
+{
+  "_comment": "English zero-shot prompt voices from LibriTTS-R dev-clean. 24kHz mono 16-bit, single speaker, 6-11s, clean natural sentences (>=15 words). file == id.",
+  "prompt_text": "",
+  "voices": [
+    {
+      "id": "en_f_84",
+      "file": "en_f_84.wav",
+      "source": "libritts-r",
+      "source_voice": "LibriTTS-R dev-clean reader 84",
+      "gender": "F",
+      "tone": "叙述-平稳",
+      "dur_sec": 6.84,
+      "license": "CC BY 4.0 (LibriTTS-R / LibriVox)",
+      "prompt_text_override": "Already my slow steps had carried me Into the ancient wood so far, that I Could not perceive where I had entered it."
+    },
+    {
+      "id": "en_f_2035",
+      "file": "en_f_2035.wav",
+      "source": "libritts-r",
+      "source_voice": "LibriTTS-R dev-clean reader 2035",
+      "gender": "F",
+      "tone": "叙述-清亮",
+      "dur_sec": 7.68,
+      "license": "CC BY 4.0 (LibriTTS-R / LibriVox)",
+      "prompt_text_override": "This Prince, Egfrid by name, was constantly engaged in wars with his Saxon cotemporaries, or the Picts and Scots."
+    },
+    {
+      "id": "en_f_5895",
+      "file": "en_f_5895.wav",
+      "source": "libritts-r",
+      "source_voice": "LibriTTS-R dev-clean reader 5895",
+      "gender": "F",
+      "tone": "叙述-柔和",
+      "dur_sec": 5.08,
+      "license": "CC BY 4.0 (LibriTTS-R / LibriVox)",
+      "prompt_text_override": "This was Homo. The old coachman who drove the horses was the philosopher himself."
+    },
+    {
+      "id": "en_m_2803",
+      "file": "en_m_2803.wav",
+      "source": "libritts-r",
+      "source_voice": "LibriTTS-R dev-clean reader 2803",
+      "gender": "M",
+      "tone": "沉稳-厚重",
+      "dur_sec": 8.4,
+      "license": "CC BY 4.0 (LibriTTS-R / LibriVox)",
+      "prompt_text_override": "The heavy, lumpy sea strained her cordage, her timbers creaked, and she labored painfully in the trough of the sea."
+    },
+    {
+      "id": "en_m_2902",
+      "file": "en_m_2902.wav",
+      "source": "libritts-r",
+      "source_voice": "LibriTTS-R dev-clean reader 2902",
+      "gender": "M",
+      "tone": "叙述-沉稳",
+      "dur_sec": 10.12,
+      "license": "CC BY 4.0 (LibriTTS-R / LibriVox)",
+      "prompt_text_override": "A picture of life in the fifth century must needs contain much which will be painful to any reader, and which the young and innocent will do well to leave altogether unread."
+    },
+    {
+      "id": "en_m_3752",
+      "file": "en_m_3752.wav",
+      "source": "libritts-r",
+      "source_voice": "LibriTTS-R dev-clean reader 3752",
+      "gender": "M",
+      "tone": "叙述-自然",
+      "dur_sec": 9.92,
+      "license": "CC BY 4.0 (LibriTTS-R / LibriVox)",
+      "prompt_text_override": "\"There were a few matters I noticed in Hobart Town that did not quite please me-the frequent use of profane language for instance-but on the whole I was delighted with the scheme."
+    }
+  ]
+}

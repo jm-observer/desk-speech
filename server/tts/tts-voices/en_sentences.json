@@ -1,0 +1,7 @@
+[
+  {"id": "en01_question", "label": "疑问-语调",   "text": "Are you sure this is the right address? What time does the next train leave?"},
+  {"id": "en02_numbers",  "label": "数字日期",     "text": "The meeting is scheduled for March 3rd, 2026, at 9:45 a.m. The total comes to one thousand two hundred dollars."},
+  {"id": "en03_pangram",  "label": "音素全覆盖",   "text": "The quick brown fox jumps over the lazy dog. How vexingly quick daft zebras jump!"},
+  {"id": "en04_emotion",  "label": "情绪-积极",     "text": "I'm so proud of everything you've accomplished this year. This is the best news I've heard all week!"},
+  {"id": "en05_casual",   "label": "口语-自然",     "text": "Honestly, I had no idea it was going to rain like this. Hang on a second, let me grab my coffee."}
+]

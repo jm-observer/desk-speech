@@ -19,3 +19,11 @@ server/tts/GPT-SoVITS/
 
 # Claude Code harness state (worktree links, local settings)
 .claude/
+
+# Python bytecode caches
+**/__pycache__/
+*.pyc
+
+# TTS bake-off scratch: generated audio is ignored,
+# gen/syn scripts + ref wavs + manifests are tracked
+server/tts/tts-voices/outputs/

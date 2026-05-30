@@ -1,6 +1,10 @@
-# Standalone TTS bake-off — deliberately NOT in server/compose.yaml so it
+# Standalone TTS service — deliberately NOT in server/compose.yaml so it
 # cannot disturb the production asr/orchestrator. Run from ~/server/tts on GB10:
 #   docker compose -f compose.tts.yaml up -d --build
+#
+# GPT-SoVITS was removed from this compose (2026-05-28) — CosyVoice2 is the
+# chosen engine after the bake-off. To bring sovits back temporarily, see
+# git history for the prior definition.
 services:
   cosyvoice:
     build:
@@ -8,37 +12,19 @@ services:
       dockerfile: Dockerfile.cosyvoice
     image: cosyvoice2:bakeoff
     runtime: nvidia
+    restart: unless-stopped
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - COSYVOICE_MODEL=/models/CosyVoice2-0.5B
       - COSYVOICE_FP16=0
       - TTS_PORT=8095
+      - VOICES_DIR=/voices
     volumes:
       - ${MODELS_DIR:-/home/fengqi/funasr-prep/models}:/models:ro
       - ${TTS_IO:-/home/fengqi/tts-io}:/io
+      # Voice library (voices.json + raw/*.wav). Host source of truth lives
+      # at the path below; CosyVoice2 reads it for the /tts and /voices
+      # endpoints. Hot-editable — /voices re-reads on each call.
+      - ${TTS_VOICES:-/home/fengqi/tts-voices}:/voices:ro
     ports:
       - "8095:8095"
-
-  gptsovits:
-    build:
-      context: .
-      dockerfile: Dockerfile.gptsovits
-    image: gptsovits:bakeoff
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-    volumes:
-      # Pretrained assets live on the host (kept out of the image).
-      - ${GS_ASSETS:-/home/fengqi/gpt-sovits-assets}/pretrained_models:/app/GPT-SoVITS/GPT_SoVITS/pretrained_models:ro
-      - ${GS_ASSETS:-/home/fengqi/gpt-sovits-assets}/G2PWModel:/app/GPT-SoVITS/GPT_SoVITS/text/G2PWModel:ro
-      - ${GS_ASSETS:-/home/fengqi/gpt-sovits-assets}/nltk_data:/root/nltk_data:ro
-      # Shared I/O: reference clips, outputs, fine-tune datasets + weights.
-      - ${TTS_IO:-/home/fengqi/tts-io}:/io
-      # Persist the FunASR/ModelScope/HF caches.
-      - ${GS_CACHE:-/home/fengqi/gpt-sovits-cache}/dot_cache:/root/.cache
-      # The fine-tune ASR step (funasr_asr.py) snapshot_downloads ~1.1GB of
-      # paraformer/punc/vad into tools/asr/models — pre-seed it so the first
-      # real fine-tune doesn't pay a ~30min download.
-      - ${GS_CACHE:-/home/fengqi/gpt-sovits-cache}/asr_models:/app/GPT-SoVITS/tools/asr/models
-    ports:
-      - "8096:9880"

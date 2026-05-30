@@ -1,0 +1,55 @@
+{
+  "_doc": [
+    "Verified-effective CosyVoice2 /tts/instruct prompts.",
+    "Format note: cosy_server.py auto-wraps with 'You are a helpful assistant. … <|endofprompt|>'.",
+    "So 'instruct' values below are the BODY only — no PFX/SFX needed by callers.",
+    "Anything not on this list (custom 'serious', 'calm', 'news anchor', etc.) was tested OOD and produced no audible effect — CosyVoice2 instruct2 does NOT generalize beyond its training prompts (cosyvoice/utils/common.py).",
+    "Dialect category exists in the model (17 dialects available) but is NOT exposed here per product decision (2026-05-28)."
+  ],
+  "categories": [
+    {
+      "id": "pace",
+      "label": "语速",
+      "strength": "strong",
+      "notes": "Audible difference: slow ≈ +45%, fast ≈ -42% vs baseline.",
+      "options": [
+        { "id": "slow", "instruct": "请用尽可能慢地语速说一句话。" },
+        { "id": "fast", "instruct": "请用尽可能快地语速说一句话。" }
+      ]
+    },
+    {
+      "id": "volume",
+      "label": "音量/气场",
+      "strength": "moderate",
+      "notes": "Difference is real but subtle; loud also tends to shorten output.",
+      "options": [
+        { "id": "loud", "instruct": "Please say a sentence as loudly as possible." },
+        { "id": "soft", "instruct": "Please say a sentence in a very soft voice." }
+      ]
+    },
+    {
+      "id": "emotion",
+      "label": "情感",
+      "strength": "context-dependent",
+      "notes": "Generic neutral text + emotion instruct sounds nearly identical to baseline. Effect becomes strong only when tts_text is also lexically emotional (e.g. '太棒了！' for happy). Recommend pairing emotion instruct with matching content, or skip if text is neutral business copy.",
+      "options": [
+        { "id": "happy", "instruct": "请非常开心地说一句话。" },
+        { "id": "sad",   "instruct": "请非常伤心地说一句话。" },
+        { "id": "angry", "instruct": "请非常生气地说一句话。" }
+      ]
+    }
+  ],
+  "deprecated_or_excluded": {
+    "dialect": "17 dialects available in model but excluded by product decision (2026-05-28).",
+    "style_peppa": "Training-set easter egg (小猪佩奇). Not for production UI.",
+    "style_robot": "Training-set easter egg (机器人). Not for production UI.",
+    "custom_OOD": "Anything outside the 26-prompt training set (e.g. '请用严肃低沉的语气说', '新闻播报风格') tested as no-op."
+  },
+  "inline_tags": {
+    "_status": "Tested 2026-05-28. Only [laughter] renders audibly. [breath]/[sigh] tested via both /tts/zero_shot (with and without spaces) and /tts/cross_lingual — no audible output. Conclusion: ship [laughter] only.",
+    "_route": "MUST go through /tts/cross_lingual endpoint. /tts/zero_shot only produces a brief '哈' fragment; cross_lingual gives full laughter rendering.",
+    "_usage": "Insert tag inline in tts_text with no surrounding spaces, e.g. '太棒了[laughter]这个真的不错'. Tag can appear multiple times.",
+    "supported": ["[laughter]"],
+    "unsupported_in_model": ["[breath]", "[sigh]"]
+  }
+}

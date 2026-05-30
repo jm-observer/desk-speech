@@ -1,0 +1,40 @@
+# English TTS test sentences — grouped by evaluation dimension
+
+## short / 短句（节奏、起停）
+Hello, how are you today?
+That sounds great to me.
+I'll be there in five minutes.
+
+## long / 长句（连贯性、换气）
+When the morning light spilled across the quiet harbor, the old fisherman untied his boat, checked the nets one last time, and rowed out toward the open water without saying a word.
+Although the proposal looked promising on paper, the team agreed that further testing was needed before committing any resources to a full-scale rollout.
+
+## question + exclamation / 疑问与感叹（语调）
+Are you sure this is the right address?
+What time does the next train leave?
+Watch out — that step is slippery!
+I can't believe we actually won!
+
+## numbers / dates / 数字与日期（规范化）
+The meeting is scheduled for March 3rd, 2026, at 9:45 a.m.
+Please call me back at 555-0172 before 6 p.m.
+The total comes to $1,284.50, including a 7% service fee.
+
+## proper nouns / 专有名词与缩写（发音）
+Dr. Anderson flew from San Francisco to Edinburgh via New York.
+The NASA team confirmed the launch with the FAA and the USAF.
+
+## conversational / 口语自然度
+Honestly? I had no idea it was going to rain like this.
+Well, you know, sometimes things just don't go the way you plan.
+Hang on a second, let me grab my coffee.
+
+## phonetic coverage / 音素全覆盖 pangram
+The quick brown fox jumps over the lazy dog.
+Pack my box with five dozen liquor jugs.
+How vexingly quick daft zebras jump!
+
+## emotional tone / 情绪表达
+I'm so proud of everything you've accomplished this year.
+It was a long, lonely winter, and the house felt emptier than ever.
+This is, without a doubt, the best news I've heard all week.
