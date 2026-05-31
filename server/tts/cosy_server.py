@@ -21,7 +21,6 @@ Endpoints (full reference: server/tts/API.md):
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -104,43 +103,20 @@ def _spool(raw: bytes) -> str:
     return path
 
 
-def _audio_bytes(chunks) -> bytes:
-    """Synthesize CosyVoice2 output chunks → MP3 bytes.
+def _wav_bytes(chunks) -> bytes:
+    """Synthesize CosyVoice2 output chunks → WAV bytes (24 kHz mono 16-bit PCM)。
 
-    Why mp3 not wav: WeChat 客服消息 send_voice 不识别裸 WAV PCM 气泡，
-    必须 mp3 / AMR / SILK / OggSpeex。zero 端 channel-weixin 调 SDK
-    `send_voice` 时按文件扩展名映射 `VoiceEncodeType`，下游期望 mp3。
-    详见 zero 仓 docs/2026-05-27-english-agent/HANDOFF.md 风险点 #1。
-
-    流程：CosyVoice2 → 内存 WAV → ffmpeg subprocess → MP3。ffmpeg 由
-    Dockerfile.cosyvoice apt 装入；wav→mp3 转码 CPU 开销 ~20-50ms /
-    短句，可忽略（zero 端按 (text,voice) 缓存命中后零成本）。
+    历史：2026-05-31 曾改为 mp3 输出（推测 WeChat 不接受 wav）。后查官方
+    npm 文档 README 明示 `voice_item` = "Voice (SILK encoded)"——微信客户端
+    实际只识别 SILK 编码（encode_type=6），mp3 也不显示气泡。修复回到 SDK
+    层：weixin-agent-sdk-rs 做 wav→silk 转码，本端恢复 wav 输出。
+    详见 zero 仓 docs/adr/2026-05-31-english-coach-router-entry.md。
     """
     speech = torch.cat([c["tts_speech"] for c in chunks], dim=1)
     arr = speech.squeeze(0).cpu().numpy()
-    wav_buf = io.BytesIO()
-    sf.write(wav_buf, arr, model().sample_rate, format="WAV")
-    wav_bytes = wav_buf.getvalue()
-
-    # ffmpeg pipe in WAV → pipe out MP3。64k CBR 对人声足够清晰、文件小。
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-loglevel", "error",
-            "-f", "wav", "-i", "pipe:0",
-            "-codec:a", "libmp3lame", "-b:a", "64k",
-            "-f", "mp3", "pipe:1",
-        ],
-        input=wav_bytes,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg wav→mp3 失败 (exit={proc.returncode}): "
-            f"{proc.stderr.decode('utf-8', errors='replace')[:500]}"
-        )
-    return proc.stdout
+    buf = io.BytesIO()
+    sf.write(buf, arr, model().sample_rate, format="WAV")
+    return buf.getvalue()
 
 
 @app.get("/health")
@@ -208,7 +184,7 @@ async def tts(req: TtsRequest):
     else:  # cross_lingual
         chunks = list(model().inference_cross_lingual(
             req.text, wav_path, stream=False))
-    return Response(content=_audio_bytes(chunks), media_type="audio/mpeg")
+    return Response(content=_wav_bytes(chunks), media_type="audio/wav")
 
 
 @app.post("/tts/zero_shot")
@@ -222,7 +198,7 @@ async def zero_shot(
         chunks = list(
             model().inference_zero_shot(tts_text, prompt_text, path, stream=False)
         )
-        return Response(content=_audio_bytes(chunks), media_type="audio/mpeg")
+        return Response(content=_wav_bytes(chunks), media_type="audio/wav")
     finally:
         os.unlink(path)
 
@@ -265,7 +241,7 @@ async def cross_lingual(
         chunks = list(
             model().inference_cross_lingual(tts_text, path, stream=False)
         )
-        return Response(content=_audio_bytes(chunks), media_type="audio/mpeg")
+        return Response(content=_wav_bytes(chunks), media_type="audio/wav")
     finally:
         os.unlink(path)
 
@@ -282,7 +258,7 @@ async def instruct(
         chunks = list(
             model().inference_instruct2(tts_text, wrapped, path, stream=False)
         )
-        return Response(content=_audio_bytes(chunks), media_type="audio/mpeg")
+        return Response(content=_wav_bytes(chunks), media_type="audio/wav")
     finally:
         os.unlink(path)
 
