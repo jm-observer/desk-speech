@@ -8,8 +8,10 @@
 FROM funasr-asr:arm64
 
 RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends git ca-certificates build-essential python3-dev \
+ && apt-get install -y --no-install-recommends git ca-certificates build-essential python3-dev ffmpeg \
  && rm -rf /var/lib/apt/lists/*
+# ffmpeg：cosy_server.py `_audio_bytes` 通过 subprocess 把 PCM WAV 转 MP3
+# （WeChat 客服消息 send_voice 不接受裸 WAV，必须 mp3/AMR/SILK/OggSpeex）。
 
 WORKDIR /app
 RUN git config --global http.postBuffer 524288000 \
