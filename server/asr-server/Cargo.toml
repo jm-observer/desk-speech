@@ -14,3 +14,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+# Plan C: from-source HTTP 下载（流式 + 体积上限）。rustls 避免 slim 镜像缺 openssl。
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "http2"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }

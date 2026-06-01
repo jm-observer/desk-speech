@@ -100,7 +100,10 @@ pub fn run() {
         .setup(|app| {
             if let Some(icon) = app.default_window_icon().cloned() {
                 info!("[tray] creating tray icon");
-                TrayIconBuilder::new()
+                // ID `main` lets `app.tray_by_id("main")` retrieve the handle
+                // later — used by `commands::notify::bounce_tray_twice` to
+                // animate the tray icon when a segment finishes optimize + translate.
+                TrayIconBuilder::with_id("main")
                     .icon(icon)
                     .tooltip("StreamSpeech")
                     .on_tray_icon_event(|tray, event| {

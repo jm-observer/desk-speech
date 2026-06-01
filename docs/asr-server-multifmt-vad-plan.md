@@ -1,6 +1,6 @@
 # asr-server 多格式输入 + VAD 切段 + 同机路径端点
 
-> 时间：2026-05-30
+> 时间：2026-05-30（**2026-05-31 复核：现状未变，本计划仍准确可照做**——见文末 §6「2026-05-31 复核 + zero Plan 5 契约对齐」）
 > 范围：仅 `server/asr-server/`，与 orchestrator/asr/tts 互不影响
 > 目的：让外部调用方（zero 的 douyin skill、未来其它视频内容理解链路）
 > 直接把 mp4 / 长视频喂进来拿文本，不必在自己一侧装 ffmpeg、切段、
@@ -46,9 +46,9 @@
 
 | Plan | 标题 | 前置 | 状态 |
 |---|---|---|---|
-| **A** | 多格式输入（ffmpeg 内嵌） | 无 | 待启动 |
-| **B** | VAD 切段 + 多段返回 | A 完成（A 把 PCM 解码统一了） | 待启动 |
-| **C** | `from-source` 端点（路径 / URL） | A 完成 | 待启动 |
+| **A** | 多格式输入（ffmpeg 内嵌） | 无 | ✅ 已实现（2026-05-31，本地 cargo check + 单测过；GB10 镜像构建+curl 实测待跑） |
+| **B** | VAD 切段 + 多段返回 | A 完成（A 把 PCM 解码统一了） | ✅ 已实现（同上） |
+| **C** | `from-source` 端点（路径 / URL） | A 完成 | ✅ 已实现（同上；见 §6 末 bind 修正） |
 
 A 是地基（统一 "任意输入 → 16k mono PCM" 这一步），B 和 C 都依赖它。
 B 和 C 之间没有依赖，可并行或单独裁掉。
@@ -395,3 +395,53 @@ asr-server 一侧需要（已在 Plan C 完成条件中固化）：
 - zero 端写新工具 `douyin_transcribe`，参数 `aweme_id` / `vad`
 
 zero 一侧的 plan 在 zero 仓库另立。
+
+---
+
+## 6. 2026-05-31 复核 + zero Plan 5 契约对齐
+
+**复核结论**：现状未变——asr-server 仍是 `src/main.rs` 最小版（只认 16k mono WAV），Plan A/B/C 一行未动，本计划全部仍待实施、描述准确，可直接照做。`silero_vad.onnx` 现成在 `src-tauri/assets/`（Plan B 用）。
+
+**zero 调用方已从 MVP-4 演进为 Plan 5「逐条知识录入」**（zero 仓 `docs/2026-05-30-douyin-knowledge/plan-5-per-item-ingestion.md`）。对本计划的影响，**仅以下几点需在实施时对齐**，其余照 Plan A/B/C 原文：
+
+1. **`vad=true` 必出 `segments[]`**：zero 用 `segments[{start,end,text}]` 生成字幕时间轴，是硬需求（不再是 Plan B 描述的"可选增强"）。Plan B 的 `segments[]` 响应即满足，无需改设计，仅明确其为字幕必需项。
+2. **下载实际路径多一层 `douyin/`**：zero 下载落 `~/.config/zero/downloads/douyin/<aweme_id>.mp4`（Plan C 原文写的是 `downloads/<aweme_id>.mp4`）。`--source-allowlist` 配父目录 `/home/fengqi/.config/zero/downloads`（或精确到 `/downloads/douyin`）即可覆盖。
+3. **容器文件可见性（Plan C 未覆盖，补充）**：asr-server 跑在容器内，`file://` 读的是**容器内路径**。需在 `server/compose.yaml` 的 asr-server profile 把宿主 `~/.config/zero/downloads` 挂进容器同路径（`volumes`），否则容器看不到 zero 下载的 mp4，`from-source` 必 404。这是 zero↔asr-server 跨容器联调的关键前置，别漏。
+4. **调用方不是 `douyin_transcribe` 单工具**：zero 侧改为 douyin binary 的 `process-submit/status`（下载+ASR 合并为一个异步任务），但**对 asr-server 的请求/响应契约不变**（仍是本节开头那个 from-source POST）。asr-server 无需关心 zero 侧如何编排。
+
+实施完成后请回执 zero 侧：端点/请求体/响应体是否与上述完全一致、allowlist 实配的容器内路径、是否需要额外字段（如指定 model）。zero 据此落 `process-submit/status` 的下载+调用逻辑。
+
+---
+
+## 7. 2026-05-31 实施记录
+
+A/B/C 三个 Plan 已落地（`server/asr-server/`）：
+
+- **Plan A**：`main.rs::decode_any` = `is_fast_wav`(只读头判定) 快路径 + `ffmpeg_decode`
+  (`pipe:0`→`pipe:1`，stdin/stdout/stderr 三任务并发避免管道死锁，超时 `start_kill`)。
+- **Plan B**：新增 `src/vad.rs`（移植自重构前 `recording.rs` 的 silero_vad 循环，复制非共享）。
+  `vad=true` 走 `transcribe_blocking` 多段路径；whisper 段 >30s 在 `recognize_long`
+  内 25s 窗/步长 23s 子切。`silero_vad.onnx` 已 COPY 进 `server/asr-server/`，Dockerfile
+  `COPY` 到 `/opt/asr-server/silero_vad.onnx`。VAD `max_speech_duration=100s` 故意设大，
+  让连续长段保持单 segment、由 whisper 子切窗兜底（满足 §B `test_long_audio_whisper_subsegment`）。
+- **Plan C**：`/v1/audio/transcriptions/from-source`，`--source-allowlist` 启动期 canonical 化，
+  请求期 `canonicalize` + prefix 比对；HTTP 走 reqwest 流式下载 + `TempFile` Drop guard。
+
+**bind 修正（实施时发现 plan §C 完成条件与 Docker 网络矛盾）**：plan 原文要求
+「`--bind` 默认 `127.0.0.1:8091` + compose `ports: 127.0.0.1:8091:8091`」。但**容器内若
+bind `127.0.0.1`，docker 端口转发（连容器 eth0）将无法到达，published 端口失效**。
+实际落地：
+- 二进制 `--bind` 默认值 = `127.0.0.1:8091`（满足 plan 的「安全默认」，适用于裸机直跑）；
+- **Dockerfile CMD / compose command 显式 `--bind 0.0.0.0:8091`**（容器内必须，否则不可达）；
+- compose `ports: ["127.0.0.1:8091:8091"]` 把**对外暴露**限制在 GB10 本机。
+
+安全目标（仅 GB10 localhost 可达）由 `ports` 这层达成，与 plan 意图一致。
+
+**zero 联调前置**（compose 已固化）：asr-server profile 已挂
+`/home/fengqi/.config/zero/downloads:.../downloads:ro` 并配 `--source-allowlist
+/home/fengqi/.config/zero/downloads`（覆盖 `downloads/douyin/` 子目录）。
+
+**仍待在 GB10 跑的验证**（本地无模型/无法跑端到端）：镜像 build、`curl -F file=@x.mp4`、
+`vad=true` 拿 segments、from-source `file://` 实测。计划里的 recognizer-backed 集成测试
+（`tests/transcribe_multifmt.rs` 等）需模型，未随本次提交；已用 `main.rs` 内 9 个纯逻辑
+单测覆盖 WAV 头判定 / vad 字段解析 / file:// 校验 / 白名单前缀。

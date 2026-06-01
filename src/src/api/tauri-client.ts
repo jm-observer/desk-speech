@@ -57,6 +57,11 @@ export interface AppSettings {
    *  Takes effect at the next session start (toggling mid-session needs a
    *  stop+start, like a URL change). */
   want_secondary: boolean;
+  /** Play a short system "Star" sound when a segment finishes optimize +
+   *  translate (paired with the tray-icon bounce). Default ON. Turn OFF if
+   *  recording with speakers + mic where the chirp leaks into the next
+   *  segment. Takes effect immediately. */
+  notify_sound: boolean;
 }
 
 /** Built-in orchestrator URL — always shown as the first option in the

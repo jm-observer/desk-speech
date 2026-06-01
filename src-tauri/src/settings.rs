@@ -43,6 +43,12 @@ pub(crate) struct CombinedSettings {
     remote_url_presets: Vec<String>,
     #[serde(default)]
     want_secondary: bool,
+    #[serde(default = "default_notify_sound_dto")]
+    notify_sound: bool,
+}
+
+fn default_notify_sound_dto() -> bool {
+    true
 }
 
 pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<CombinedSettings, String> {
@@ -58,6 +64,7 @@ pub(crate) fn get_settings(state: tauri::State<'_, AppState>) -> Result<Combined
         remote_url: url,
         remote_url_presets: presets,
         want_secondary: llm.want_secondary,
+        notify_sound: llm.notify_sound,
     })
 }
 
@@ -110,6 +117,7 @@ pub(crate) async fn apply_settings(
         auto_copy_mode: new_settings.auto_copy_mode,
         merge_window_ms: new_settings.merge_window_ms.min(MAX_MERGE_WINDOW_MS),
         want_secondary: new_settings.want_secondary,
+        notify_sound: new_settings.notify_sound,
     };
     let new_url = new_settings.remote_url.trim().to_string();
 
@@ -154,6 +162,12 @@ pub(crate) async fn apply_settings(
     )
     .await
     .map_err(|e| e.to_string())?;
+    db.upsert_setting(
+        "ui.notify_sound".to_string(),
+        if new_llm.notify_sound { "1".into() } else { "0".into() },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     db.upsert_setting("remote.url".to_string(), new_url)
         .await
         .map_err(|e| e.to_string())?;
@@ -190,6 +204,9 @@ pub(crate) async fn load_llm_settings_from_db(db: &db::SpeechDatabase) -> LlmSet
     }
     if let Ok(Some(v)) = db.get_setting("ui.want_secondary".to_string()).await {
         s.want_secondary = !matches!(v.as_str(), "0" | "off" | "false" | "");
+    }
+    if let Ok(Some(v)) = db.get_setting("ui.notify_sound".to_string()).await {
+        s.notify_sound = !matches!(v.as_str(), "0" | "off" | "false");
     }
     s
 }

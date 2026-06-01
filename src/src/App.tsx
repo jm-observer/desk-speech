@@ -51,6 +51,7 @@ function App() {
   const [remoteUrl, setRemoteUrl] = useState<string>(DEFAULT_REMOTE_URL);
   const [remoteUrlPresets, setRemoteUrlPresets] = useState<string[]>([]);
   const [wantSecondary, setWantSecondary] = useState(false);
+  const [notifySound, setNotifySound] = useState(true);
   const [autoRecordingEnabled, setAutoRecordingEnabled] = useState(() => {
     const saved = window.localStorage.getItem(AUTO_RECORDING_STORAGE_KEY);
     return saved === null ? true : saved === 'true';
@@ -139,6 +140,7 @@ function App() {
         setRemoteUrl(s.remote_url || DEFAULT_REMOTE_URL);
         setRemoteUrlPresets(s.remote_url_presets || []);
         setWantSecondary(!!s.want_secondary);
+        setNotifySound(s.notify_sound !== false);
       })
       .catch((err) => console.warn('Load settings failed', err));
   }, []);
@@ -431,6 +433,7 @@ function App() {
       remote_url: url,
       remote_url_presets: remoteUrlPresets,
       want_secondary: wantSecondary,
+      notify_sound: notifySound,
     };
     persistAndMaybeReconnect(next, true);
   };
@@ -451,8 +454,28 @@ function App() {
       remote_url: trimmed,
       remote_url_presets: presetsNext,
       want_secondary: wantSecondary,
+      notify_sound: notifySound,
     };
     persistAndMaybeReconnect(next, urlChanged);
+  };
+
+  const handleNotifySoundChange = (val: boolean) => {
+    if (val === notifySound) return;
+    setNotifySound(val);
+    const next: AppSettings = {
+      asr_language: asrLanguage,
+      auto_copy_mode: autoCopyMode,
+      merge_window_ms: mergeWindowMs,
+      remote_url: remoteUrl,
+      remote_url_presets: remoteUrlPresets,
+      want_secondary: wantSecondary,
+      notify_sound: val,
+    };
+    // Sound flag is read live by run_remote_session each time a segment
+    // completes — no reconnect needed.
+    TauriAPI.applySettings(next).catch((err) =>
+      console.error('apply notify_sound failed', err)
+    );
   };
 
   const handleWantSecondaryChange = (val: boolean) => {
@@ -465,6 +488,7 @@ function App() {
       remote_url: remoteUrl,
       remote_url_presets: remoteUrlPresets,
       want_secondary: val,
+      notify_sound: notifySound,
     };
     // hello.want_secondary is sent once at session start, so toggling needs
     // a reconnect for the new value to take effect. Same pattern as URL.
@@ -485,6 +509,7 @@ function App() {
       remote_url: fallback,
       remote_url_presets: presetsNext,
       want_secondary: wantSecondary,
+      notify_sound: notifySound,
     };
     persistAndMaybeReconnect(next, urlChanged);
   };
@@ -597,6 +622,7 @@ function App() {
                 remote_url: remoteUrl,
                 remote_url_presets: remoteUrlPresets,
                 want_secondary: wantSecondary,
+                notify_sound: notifySound,
               };
               TauriAPI.applySettings(next).catch((err) => console.error('apply asr_language failed', err));
             }}
@@ -610,6 +636,7 @@ function App() {
                 remote_url: remoteUrl,
                 remote_url_presets: remoteUrlPresets,
                 want_secondary: wantSecondary,
+                notify_sound: notifySound,
               };
               TauriAPI.applySettings(next).catch((err) => console.error('apply auto_copy_mode failed', err));
             }}
@@ -623,6 +650,7 @@ function App() {
                 remote_url: remoteUrl,
                 remote_url_presets: remoteUrlPresets,
                 want_secondary: wantSecondary,
+                notify_sound: notifySound,
               };
               TauriAPI.applySettings(next).catch((err) => console.error('apply merge_window_ms failed', err));
             }}
@@ -633,6 +661,8 @@ function App() {
             onRemoteUrlRemove={handleRemoteUrlRemove}
             wantSecondary={wantSecondary}
             onWantSecondaryChange={handleWantSecondaryChange}
+            notifySound={notifySound}
+            onNotifySoundChange={handleNotifySoundChange}
             onToggleMode={() => store.setUiMode(store.uiMode === 'detailed' ? 'simple' : 'detailed')}
             disabled={isBusy}
           />

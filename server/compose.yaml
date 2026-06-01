@@ -51,10 +51,27 @@ services:
     restart: unless-stopped
     environment:
       - RUST_LOG=info
+    # from-source 的 file:// 读的是容器内路径:把宿主 zero 下载目录挂进容器
+    # 同路径,否则 from-source 必 404(见 plan §6.3)。下载实际落 downloads/douyin/。
     volumes:
       - ${ASR_SERVER_MODELS_DIR:-/home/fengqi/asr-server-models}:/models:ro
+      - ${ZERO_DOWNLOADS_DIR:-/home/fengqi/.config/zero/downloads}:/home/fengqi/.config/zero/downloads:ro
+    # command 注入部署相关参数:from-source 白名单(配父目录即覆盖 douyin/ 子目录)。
+    # 容器内 bind 0.0.0.0(docker 端口转发需要);对外暴露由下方 ports 限本机。
+    command:
+      - "--bind"
+      - "0.0.0.0:8091"
+      - "--model"
+      - "sense-voice"
+      - "--model-dir"
+      - "/models/sherpa-sense-voice"
+      - "--vad-model"
+      - "/opt/asr-server/silero_vad.onnx"
+      - "--source-allowlist"
+      - "/home/fengqi/.config/zero/downloads"
+    # 仅暴露给 GB10 本机(zero 同机调用);要对局域网开放需显式改这里。
     ports:
-      - "8091:8091"
+      - "127.0.0.1:8091:8091"
 
 volumes:
   orch-data:

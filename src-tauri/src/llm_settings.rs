@@ -21,6 +21,13 @@ fn default_merge_window_ms() -> u64 {
     DEFAULT_MERGE_WINDOW_MS
 }
 
+/// Notify-on-completion beep defaults ON. Users with desktop speakers + mic
+/// (where the beep contaminates the next recording segment) can flip it off
+/// from the desktop control panel.
+fn default_notify_sound() -> bool {
+    true
+}
+
 /// Remote-only client: prompts/api-key/model selection all live on the GB10
 /// orchestrator (managed in the web console). The client-side LLM choices are
 /// what to auto-copy when an optimized/translated event arrives, and how long
@@ -40,6 +47,10 @@ pub struct LlmSettings {
     /// the primary transcription. Default OFF so existing users see no change.
     #[serde(default)]
     pub want_secondary: bool,
+    /// Play a short Windows "Star" event sound when a segment finishes both
+    /// optimize + translate (paired with the tray-icon bounce). Default ON.
+    #[serde(default = "default_notify_sound")]
+    pub notify_sound: bool,
 }
 
 impl Default for LlmSettings {
@@ -48,6 +59,7 @@ impl Default for LlmSettings {
             auto_copy_mode: AutoCopyMode::default(),
             merge_window_ms: DEFAULT_MERGE_WINDOW_MS,
             want_secondary: false,
+            notify_sound: true,
         }
     }
 }

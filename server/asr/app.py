@@ -81,8 +81,10 @@ HOTWORDS_WHISPER: str = ""
 def _parse_hotwords(raw: str):
     """从 textarea 文本解析热词,返回 (paraformer_str, whisper_str)。
 
-    每行 "词" 或 "词 权重"。Paraformer 接受 "w1 w2 ..." 形式;Whisper 用
-    initial_prompt(自然语言"上下文"),所以把它们拼成中文顿号串作为提示。
+    每行 "词" 或 "词 权重"。
+    - Paraformer 接受 "w1 w2 ..." 形式(原生 hotword 接口)。
+    - Whisper 走 initial_prompt(自然语言"上下文"),孤立词偏置很弱,所以
+      包装成一句完整中文提示句,显著提升对术语的命中率。
     """
     words: list[str] = []
     for line in (raw or "").splitlines():
@@ -94,7 +96,9 @@ def _parse_hotwords(raw: str):
             words.append(w)
     if not words:
         return ("", "")
-    return (" ".join(words), "、".join(words))
+    whisper_prompt = "本段语音内容涉及以下术语,如出现同音字应优先识别为:" \
+        + "、".join(words) + "。"
+    return (" ".join(words), whisper_prompt)
 
 # Secondary recognizer kind for side-by-side comparison. Picked by the
 # orchestrator's `asr.secondary_model` config (hot-switchable). Per-session

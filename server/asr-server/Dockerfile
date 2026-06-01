@@ -12,30 +12,43 @@
 
 FROM rust:1-bookworm AS build
 
-# Crates 国内镜像(GB10 网络,与 orchestrator 一致)
+# Crates 国内镜像(GB10 网络)。USTC sparse 源 + 强制 HTTP/1.1:rsproxy.cn 实测会
+# 抽风(<10B/s 超时 + HTTP/2 framing 错误),multiplexing=false 关 HTTP/2 更耐抖动。
+# 留 rsproxy 备注以便回切。
 RUN mkdir -p $CARGO_HOME && printf '%s\n' \
     '[source.crates-io]' \
-    "replace-with = 'rsproxy-sparse'" \
-    '[source.rsproxy-sparse]' \
-    'registry = "sparse+https://rsproxy.cn/index/"' \
+    "replace-with = 'mirror'" \
+    '[source.mirror]' \
+    'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' \
     '[net]' \
-    'retry = 5' \
+    'retry = 10' \
     '[http]' \
     'timeout = 120' \
+    'multiplexing = false' \
     > $CARGO_HOME/config.toml
 
 WORKDIR /src
 COPY Cargo.toml ./
 COPY src ./src
+COPY silero_vad.onnx ./silero_vad.onnx
 # sherpa-onnx 用 features=["shared"]:sherpa-onnx-sys/build.rs 会从其 release 下
 # linux-aarch64 prebuilt(github)。若 GB10 拉不到,可在宿主预下载并通过
 # `--build-arg SHERPA_PREBUILT_URL=file://...` 或挂载方式注入,然后改用
 # SHERPA_ONNX_LIB_DIR 跳过 build.rs 的下载。当前先尝试 build.rs 默认行为。
-RUN cargo build --release --bin asr-server
+#
+# registry 缓存挂载:镜像源抽风时,重试能复用已下载的 crate,不必每次从头拉。
+# 注意只缓存 registry——target 不能缓存,否则下方 COPY --from=build 取不到产物。
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo build --release --bin asr-server
 
 FROM debian:bookworm-slim
+# ffmpeg(Plan A 多格式输入)来自 debian apt,不走 GitHub。约 +60MB,可接受。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libgomp1 && rm -rf /var/lib/apt/lists/*
+    ca-certificates libgomp1 ffmpeg && rm -rf /var/lib/apt/lists/*
+
+# silero_vad.onnx(Plan B):COPY 进镜像而非挂载——避免再造外部契约,
+# 挂载只留给 sherpa 那种 >100MB 的生产模型。
+COPY --from=build /src/silero_vad.onnx /opt/asr-server/silero_vad.onnx
 
 # sherpa-onnx-sys 把 prebuilt arm64 libs 解到 /src/target/release/ 根目录(实测路径)。
 # 三个运行期必备:libsherpa-onnx-c-api.so / libonnxruntime.so / libsherpa-onnx-cxx-api.so。
@@ -47,4 +60,7 @@ ENV LD_LIBRARY_PATH=/usr/local/lib/sherpa
 
 EXPOSE 8091
 ENTRYPOINT ["/usr/local/bin/asr-server"]
-CMD ["--bind", "0.0.0.0:8091", "--model", "sense-voice", "--model-dir", "/models/sherpa-sense-voice"]
+# 容器内必须 bind 0.0.0.0 才能被 docker 端口转发到达(转发连的是容器 eth0,
+# 不是 loopback)。对外的 localhost 限制由 compose `ports: 127.0.0.1:8091:8091`
+# 完成。--source-allowlist 不在此设默认值(部署相关),由 compose command 注入。
+CMD ["--bind", "0.0.0.0:8091", "--model", "sense-voice", "--model-dir", "/models/sherpa-sense-voice", "--vad-model", "/opt/asr-server/silero_vad.onnx"]

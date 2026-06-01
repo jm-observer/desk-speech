@@ -34,3 +34,12 @@ tokio = { version = "1", features = ["full"] }
 # Remote ASR (redesign): WebSocket client to the GB10 orchestrator.
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# MessageBeep: short system event sound paired with the tray bounce
+# (commands/notify.rs). System-managed so the user can mute it via Windows
+# Sound settings → "Star" event sound → None.
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging",      # MB_ICONASTERISK constant
+    "Win32_System_Diagnostics_Debug",    # MessageBeep lives here (yes, weird)
+] }

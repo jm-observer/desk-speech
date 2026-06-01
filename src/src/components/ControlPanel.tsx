@@ -36,6 +36,8 @@ interface ControlPanelProps {
   onRemoteUrlRemove: (url: string) => void;
   wantSecondary: boolean;
   onWantSecondaryChange: (val: boolean) => void;
+  notifySound: boolean;
+  onNotifySoundChange: (val: boolean) => void;
   onToggleMode: () => void;
   disabled?: boolean;
 }
@@ -86,6 +88,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onRemoteUrlRemove,
   wantSecondary,
   onWantSecondaryChange,
+  notifySound,
+  onNotifySoundChange,
   onToggleMode,
   disabled,
 }) => {
@@ -192,6 +196,13 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             <span className="text-[11px] text-[var(--ink-4)]">同段并行跑次模型(中文),在原文下方对照展示。变更需停-启录音生效</span>
           </div>
           <Switch checked={wantSecondary} onCheckedChange={onWantSecondaryChange} disabled={disabled} />
+        </div>
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col">
+            <span className="text-[13px] font-medium text-[var(--ink-2)]">完成提示音</span>
+            <span className="text-[11px] text-[var(--ink-4)]">每段优化+翻译完成时伴随托盘图标跳动播放短促系统音；扬声器+麦克风录音时建议关闭以避免被采入</span>
+          </div>
+          <Switch checked={notifySound} onCheckedChange={onNotifySoundChange} />
         </div>
       </div>
 

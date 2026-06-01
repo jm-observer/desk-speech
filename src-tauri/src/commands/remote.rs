@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info, warn};
@@ -24,6 +24,7 @@ use std::sync::RwLock;
 
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
+use crate::commands::notify::bounce_tray_twice;
 use crate::commands::recording::build_input_stream;
 
 /// Target sample rate for the upstream PCM the orchestrator expects.
@@ -33,28 +34,42 @@ use crate::llm_settings::{AutoCopyMode, LlmSettings};
 use crate::lock_utils::read_lock;
 use crate::settings::VadSettings;
 
-/// Tracks the last clipboard write so the next one can decide whether to
-/// merge (same thought, short gap) or replace (new thought, long gap).
+/// Tracks the previous auto-copied segment on the **audio timeline** (not
+/// the client's wall clock) so the merge decision is independent of LLM
+/// round-trip latency. `t_end` is the end second of the last segment whose
+/// text we wrote to the clipboard; the next segment merges if its
+/// `t_start` is within `window` seconds of that value.
 struct AutoCopyAccum {
-    written_at: Instant,
+    t_end: f64,
     text: String,
     ref_id: i64,
 }
 
-/// Decide what to actually paste into the clipboard for this segment:
-/// if the previous auto-copy is still within the stitch `window` and the
-/// segment id differs, concatenate; otherwise start fresh. A zero `window`
-/// disables merging (every segment replaces the clipboard). Mutates `acc`
-/// in place to remember the final pasted text for the next call.
+/// Decide what to actually paste into the clipboard for this segment.
+///
+/// Merges with the previous auto-copy when:
+/// - the gap **on the audio timeline** (`t_start - prev.t_end`) is below
+///   `window` — i.e. the user actually spoke them close together;
+/// - the segment id differs (not a re-emit of the same segment);
+/// - prev text is non-empty.
+///
+/// Using the audio timeline (not `Instant::elapsed`) means slow vLLM
+/// optimization no longer breaks merging: two sentences spoken 1 s apart
+/// stitch together even if each took 10 s to optimize. A zero `window`
+/// disables merging entirely. Mutates `acc` in place to remember the
+/// pasted text and `t_end` for the next call.
 fn next_clipboard_text(
     acc: &mut Option<AutoCopyAccum>,
     text: &str,
     ref_id: i64,
+    t_start: f64,
+    t_end: f64,
     window: Duration,
 ) -> String {
+    let window_secs = window.as_secs_f64();
     let merged = match acc.as_ref() {
         Some(prev)
-            if prev.written_at.elapsed() < window
+            if (t_start - prev.t_end) < window_secs
                 && prev.ref_id != ref_id
                 && !prev.text.is_empty() =>
         {
@@ -63,11 +78,27 @@ fn next_clipboard_text(
         _ => text.to_string(),
     };
     *acc = Some(AutoCopyAccum {
-        written_at: Instant::now(),
+        t_end,
         text: merged.clone(),
         ref_id,
     });
     merged
+}
+
+/// Add `secs` seconds to a `"YYYY-MM-DD HH:MM:SS"` wall-clock string,
+/// returning the formatted result. Used to derive `wall_end` from
+/// `wall_start` + segment duration so SegmentCard shows a real time range
+/// instead of `15:42:46 → 15:42:46`. Falls back to the input on parse
+/// failure or non-positive duration.
+fn add_seconds_to_wall(wall: &str, secs: f64) -> String {
+    if !(secs > 0.0) {
+        return wall.to_string();
+    }
+    let Ok(dt) = NaiveDateTime::parse_from_str(wall, "%Y-%m-%d %H:%M:%S") else {
+        return wall.to_string();
+    };
+    let added = dt + chrono::Duration::seconds(secs.round() as i64);
+    added.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 /// Returns the configured remote orchestrator URL from app state, if non-empty.
@@ -178,6 +209,9 @@ struct SegState {
     t1: f64,
     wall: String,
     speaker: Option<String>,
+    /// True after we've already flashed the taskbar for this segment, so a
+    /// repeated event (or out-of-order updates) doesn't flash twice.
+    flashed: bool,
 }
 
 /// Emit the *full current* segment state as `segment_updated` (DbSegmentDto
@@ -190,6 +224,10 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
         "[remote][emit] id={id} raw={:?} opt={:?} eng={:?} sec={:?} t=[{:.2},{:.2}]",
         s.raw, s.opt, s.eng, s.sec, s.t0, s.t1
     );
+    // wall_end = wall_start + (t1 - t0). Without this both fields shared
+    // the single first-event timestamp and SegmentCard showed
+    // `15:42:46 → 15:42:46` regardless of segment length.
+    let wall_end = add_seconds_to_wall(&s.wall, s.t1 - s.t0);
     let _ = app.emit(
         "segment_updated",
         serde_json::json!({
@@ -199,7 +237,7 @@ fn emit_state(app: &tauri::AppHandle, id: i64, s: &SegState) {
             "start_sec": s.t0,
             "end_sec": s.t1,
             "wall_start": s.wall,
-            "wall_end": s.wall,
+            "wall_end": wall_end,
             "text_raw": s.raw,
             "optimize_status": optimize_status,
             "translate_status": translate_status,
@@ -431,13 +469,28 @@ async fn run_one_connection(
                     }
                     st.opt = Some(text.clone());
                     emit_state(&app_r, id, st);
+                    info!(
+                        "[remote][flash-check] after optimized id={id} opt={} eng={} flashed={}",
+                        st.opt.is_some(), st.eng.is_some(), st.flashed
+                    );
+                    if !st.flashed && st.opt.is_some() && st.eng.is_some() {
+                        info!("[remote][flash-trigger] id={id} (triggered by optimized)");
+                        st.flashed = true;
+                        let play_beep = read_lock(&llm_settings_r).notify_sound;
+                        bounce_tray_twice(&app_r, play_beep);
+                    }
                     let (copy, window_ms) = {
                         let s = read_lock(&llm_settings_r);
                         (matches!(s.auto_copy_mode, AutoCopyMode::OptimizedZh), s.merge_window_ms)
                     };
                     if copy && !text.is_empty() {
                         let merged = next_clipboard_text(
-                            &mut copy_acc, &text, id, Duration::from_millis(window_ms),
+                            &mut copy_acc,
+                            &text,
+                            id,
+                            st.t0,
+                            st.t1,
+                            Duration::from_millis(window_ms),
                         );
                         let merged_for_log = merged.clone();
                         match app_r.clipboard().write_text(merged) {
@@ -459,13 +512,28 @@ async fn run_one_connection(
                     }
                     st.eng = Some(text.clone());
                     emit_state(&app_r, id, st);
+                    info!(
+                        "[remote][flash-check] after translated id={id} opt={} eng={} flashed={}",
+                        st.opt.is_some(), st.eng.is_some(), st.flashed
+                    );
+                    if !st.flashed && st.opt.is_some() && st.eng.is_some() {
+                        info!("[remote][flash-trigger] id={id} (triggered by translated)");
+                        st.flashed = true;
+                        let play_beep = read_lock(&llm_settings_r).notify_sound;
+                        bounce_tray_twice(&app_r, play_beep);
+                    }
                     let (copy, window_ms) = {
                         let s = read_lock(&llm_settings_r);
                         (matches!(s.auto_copy_mode, AutoCopyMode::English), s.merge_window_ms)
                     };
                     if copy && !text.is_empty() {
                         let merged = next_clipboard_text(
-                            &mut copy_acc, &text, id, Duration::from_millis(window_ms),
+                            &mut copy_acc,
+                            &text,
+                            id,
+                            st.t0,
+                            st.t1,
+                            Duration::from_millis(window_ms),
                         );
                         let merged_for_log = merged.clone();
                         match app_r.clipboard().write_text(merged) {
@@ -529,5 +597,133 @@ async fn run_one_connection(
             }
             Err(_) => continue, // timeout: re-check stop / reader
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    // ---- next_clipboard_text: audio-timeline merge semantics ----
+
+    #[test]
+    fn first_call_writes_text_as_is() {
+        let mut acc = None;
+        let out = next_clipboard_text(&mut acc, "你好", 1, 0.0, 2.0, w(3000));
+        assert_eq!(out, "你好");
+        let a = acc.as_ref().unwrap();
+        assert_eq!(a.text, "你好");
+        assert_eq!(a.t_end, 2.0);
+        assert_eq!(a.ref_id, 1);
+    }
+
+    #[test]
+    fn merges_when_audio_gap_within_window() {
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "你好", 1, 0.0, 2.0, w(3000));
+        // seg2 starts at 4.0 s, prev ended at 2.0 s → audio gap 2 s, < 3 s
+        let out = next_clipboard_text(&mut acc, "世界", 2, 4.0, 6.0, w(3000));
+        assert_eq!(out, "你好 世界");
+        assert_eq!(acc.as_ref().unwrap().t_end, 6.0);
+    }
+
+    #[test]
+    fn does_not_merge_when_audio_gap_exceeds_window() {
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "A", 1, 0.0, 2.0, w(3000));
+        // seg2 starts at 10.0 s, gap = 8 s, > 3 s
+        let out = next_clipboard_text(&mut acc, "B", 2, 10.0, 11.0, w(3000));
+        assert_eq!(out, "B");
+    }
+
+    #[test]
+    fn merge_ignores_real_time_only_audio_timeline() {
+        // Simulates slow LLM: real-time gap between two clipboard writes
+        // could be huge, but the audio gap is tiny → must merge. This is
+        // the whole point of switching off Instant::elapsed.
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "上半句", 1, 10.0, 12.0, w(3000));
+        // Pretend many real seconds passed (LLM was slow), but on the
+        // audio timeline seg2 follows immediately.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let out = next_clipboard_text(&mut acc, "下半句", 2, 12.5, 14.0, w(3000));
+        assert_eq!(out, "上半句 下半句");
+    }
+
+    #[test]
+    fn does_not_merge_same_ref_id() {
+        // A re-emit of the same segment must not concatenate with itself.
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "A", 1, 0.0, 2.0, w(3000));
+        let out = next_clipboard_text(&mut acc, "A v2", 1, 2.5, 4.0, w(3000));
+        assert_eq!(out, "A v2");
+    }
+
+    #[test]
+    fn zero_window_disables_merging() {
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "A", 1, 0.0, 2.0, w(0));
+        let out = next_clipboard_text(&mut acc, "B", 2, 2.0, 3.0, w(0));
+        assert_eq!(out, "B");
+    }
+
+    #[test]
+    fn chain_grows_across_many_segments() {
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "一", 1, 0.0, 1.0, w(3000));
+        next_clipboard_text(&mut acc, "二", 2, 1.5, 2.5, w(3000));
+        let out = next_clipboard_text(&mut acc, "三", 3, 3.0, 4.0, w(3000));
+        assert_eq!(out, "一 二 三");
+    }
+
+    #[test]
+    fn chain_resets_after_long_pause() {
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "一", 1, 0.0, 1.0, w(3000));
+        next_clipboard_text(&mut acc, "二", 2, 1.5, 2.5, w(3000));
+        // 10 s of silence on the audio timeline → fresh chain
+        let out = next_clipboard_text(&mut acc, "三", 3, 12.5, 13.5, w(3000));
+        assert_eq!(out, "三");
+    }
+
+    // ---- add_seconds_to_wall: wall_end derivation ----
+
+    #[test]
+    fn wall_end_adds_rounded_duration() {
+        let out = add_seconds_to_wall("2026-05-27 15:42:46", 9.4);
+        assert_eq!(out, "2026-05-27 15:42:55");
+    }
+
+    #[test]
+    fn wall_end_rounds_half_up() {
+        let out = add_seconds_to_wall("2026-05-27 15:42:46", 0.6);
+        assert_eq!(out, "2026-05-27 15:42:47");
+    }
+
+    #[test]
+    fn wall_end_zero_or_negative_returns_input() {
+        assert_eq!(
+            add_seconds_to_wall("2026-05-27 15:42:46", 0.0),
+            "2026-05-27 15:42:46"
+        );
+        assert_eq!(
+            add_seconds_to_wall("2026-05-27 15:42:46", -3.0),
+            "2026-05-27 15:42:46"
+        );
+    }
+
+    #[test]
+    fn wall_end_falls_back_on_parse_failure() {
+        assert_eq!(add_seconds_to_wall("not a date", 5.0), "not a date");
+    }
+
+    #[test]
+    fn wall_end_crosses_minute_boundary() {
+        let out = add_seconds_to_wall("2026-05-27 15:42:58", 5.0);
+        assert_eq!(out, "2026-05-27 15:43:03");
     }
 }

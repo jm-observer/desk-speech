@@ -77,7 +77,10 @@ fn optimize_prompt_with_hotwords(prompt: String, hotwords_raw: &str) -> String {
     }
     let list = words.join("、");
     format!(
-        "{prompt}\n\n【本场景常用术语,遇同音字/近音字时优先匹配下列词】{list}"
+        "{prompt}\n\n【ASR 同音字纠错】本场景必出现术语:{list}。\
+         请主动检查原文是否包含与上列任一术语同音或近音的字串(汉字不同但读音相同/相近,例如 \
+         huìhuà 既可写作\"绘画\"也可写作\"会话\");若有,即使字面看起来已通顺,\
+         也应改为术语词。这是高优先级修正,优先于一般的口语病规整。"
     )
 }
 
