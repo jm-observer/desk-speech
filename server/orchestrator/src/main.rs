@@ -68,6 +68,36 @@ fn parse_hotwords(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// 构造发给 LLM 的 user message。
+/// - context: 20 秒内历史优化文本(按时序排列),供 LLM 感知话题连贯性。
+/// - primary: 主模型原始识别文本。
+/// - secondary: 可选的次模型识别文本;有则以双候选形式呈现,让 LLM 择优合并。
+/// 无 context 且无 secondary 时直接返回 primary,与旧行为完全相同。
+fn build_optimize_user_msg(context: &[String], primary: &str, secondary: Option<&str>) -> String {
+    if context.is_empty() && secondary.is_none() {
+        return primary.to_string();
+    }
+    let mut s = String::new();
+    if !context.is_empty() {
+        s.push_str("【近期上文，仅供参考，禁止输出】\n");
+        for ctx in context {
+            s.push_str(ctx);
+            s.push('\n');
+        }
+        s.push('\n');
+    }
+    match secondary {
+        Some(sec) => {
+            s.push_str("【模型A识别】");
+            s.push_str(primary);
+            s.push_str("\n【模型B识别】");
+            s.push_str(sec);
+        }
+        None => s.push_str(primary),
+    }
+    s
+}
+
 /// 把 asr.hotwords 词表拼到中文润色 prompt 末尾,作为 SenseVoice 等不支持声学热词
 /// 的模型的兜底。词表为空时返回原 prompt 不动。
 fn optimize_prompt_with_hotwords(prompt: String, hotwords_raw: &str) -> String {
@@ -368,12 +398,19 @@ async fn asr_reader(
                         db.config_get("llm.translate_prompt")
                             .unwrap_or_else(|| DEFAULT_TRANSLATE_PROMPT.into())
                     });
+                    // 取本段开始前 20 秒内的历史优化文本作上下文(同步 DB 读,开销极小)。
+                    let ctx_texts = if hello.want_optimize {
+                        db.segments_context_before(&session_id, t0, 20.0)
+                    } else {
+                        Vec::new()
+                    };
                     let db2 = db.clone();
                     let tx2 = cli_tx.clone();
                     llm_tasks.push(tokio::spawn(async move {
+                        let opt_user = build_optimize_user_msg(&ctx_texts, &text, None);
                         let opt_fut = async {
                             match &opt_sys {
-                                Some(s) => llm(&base, &model, s, &text).await.ok(),
+                                Some(s) => llm(&base, &model, s, &opt_user).await.ok(),
                                 None => None,
                             }
                         };
@@ -419,11 +456,56 @@ async fn asr_reader(
                 db.segment_set_secondary(seg_id as i64, &text);
                 send(
                     &cli_tx,
-                    ServerEvent::Secondary { r#ref: seg_id, text, kind }.json(),
+                    ServerEvent::Secondary { r#ref: seg_id, text: text.clone(), kind }.json(),
                 )
                 .await;
                 // Comparison done for this window — free the map entry.
                 seg_by_time.remove(&time_key(t0, t1));
+
+                // 若开启润色,且次模型结果与主模型不同,则以主+次双候选触发 re-polish。
+                // 客户端收到第二个 Optimized{ref} 时会覆盖更新,体验与首次优化一致。
+                if hello.want_optimize && !text.is_empty() {
+                    if let Some(seg) = db.segment_get(seg_id as i64) {
+                        if seg.text != text {
+                            let ctx_texts =
+                                db.segments_context_before(&session_id, t0, 20.0);
+                            let sys = {
+                                let base = db
+                                    .config_get("llm.optimize_prompt")
+                                    .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
+                                let hw =
+                                    db.config_get("asr.hotwords").unwrap_or_default();
+                                optimize_prompt_with_hotwords(base, &hw)
+                            };
+                            let user_msg =
+                                build_optimize_user_msg(&ctx_texts, &seg.text, Some(&text));
+                            let model = db
+                                .config_get("vllm.model")
+                                .unwrap_or_else(|| c.vllm_model.clone());
+                            let base_url = db
+                                .config_get("vllm.base")
+                                .unwrap_or_else(|| c.vllm_base.clone());
+                            let db3 = db.clone();
+                            let tx3 = cli_tx.clone();
+                            llm_tasks.push(tokio::spawn(async move {
+                                if let Ok(opt) =
+                                    llm(&base_url, &model, &sys, &user_msg).await
+                                {
+                                    db3.segment_set_optimized(seg_id as i64, &opt);
+                                    send(
+                                        &tx3,
+                                        ServerEvent::Optimized {
+                                            r#ref: seg_id,
+                                            text: opt,
+                                        }
+                                        .json(),
+                                    )
+                                    .await;
+                                }
+                            }));
+                        }
+                    }
+                }
             }
             Some("error") => {
                 let m = v.get("message").and_then(|x| x.as_str()).unwrap_or("asr error");

@@ -244,6 +244,31 @@ impl Db {
             .execute("UPDATE segments SET secondary=?2 WHERE id=?1", (sid, text));
     }
 
+    /// Optimized texts for segments in the same session whose t_end falls in
+    /// [before_t - window_sec, before_t). Returned oldest-first so they can
+    /// be presented as chronological context to the LLM.
+    pub fn segments_context_before(
+        &self,
+        session_id: &str,
+        before_t: f64,
+        window_sec: f64,
+    ) -> Vec<String> {
+        let c = self.lock();
+        let mut stmt = match c.prepare(
+            "SELECT optimized FROM segments \
+             WHERE session_id=?1 AND t_end >= ?2 AND t_end < ?3 \
+             AND optimized IS NOT NULL \
+             ORDER BY t_end ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let from = before_t - window_sec;
+        stmt.query_map(rusqlite::params![session_id, from, before_t], |r| r.get(0))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     /// Largest segment id on disk (0 if none). Used to seed the in-memory
     /// SEG_ID counter on startup so a restart never reuses an id and
     /// overwrites an existing segment row / its retained audio.
