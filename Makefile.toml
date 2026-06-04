@@ -9,6 +9,15 @@ args = ["build", "--workspace", "--release", "--features", "prod"]
 [tasks.default]
 alias = "prod"
 
+[tasks.bundle]
+description = "Tauri release 打包：前端构建 + Tauri release bundle（NSIS .exe）"
+command = "npm"
+args = ["run", "build"]
+
+[tasks.release]
+description = "Tauri 桌面端发布打包（bundle 别名）"
+alias = "bundle"
+
 [tasks.check]
 description = "Run all checks: fmt, clippy, and tests"
 dependencies = ["_check_fmt", "_check_clippy"]

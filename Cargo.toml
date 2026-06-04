@@ -3,4 +3,9 @@ resolver = "2"
 members = [
     "src-tauri",
     "server/asr-server",
+    "server/orchestrator",
 ]
+
+# 注：custom-utils（trace 客户端）不放 [workspace.dependencies]——两个服务都以自身
+# 子目录为 Docker 构建上下文独立编译，容器内无父 workspace，无法解析 `workspace = true`，
+# 故各 crate 直接写显式 registry 版本（custom-utils 0.15+ 已发布 crates.io，trace-model 已内联）。

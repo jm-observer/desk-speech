@@ -19,6 +19,10 @@ pub struct Hello {
     pub want_translate: bool,
     #[serde(default)]
     pub want_secondary: bool,
+    /// 可选 W3C traceparent。客户端无法在 WS 升级时塞请求头(浏览器限制)时,
+    /// 走 hello 帧字段兜底,串到 zero/桌面端起点的同一棵 trace。
+    #[serde(default)]
+    pub traceparent: Option<String>,
 }
 
 /// 客户端 → 服务端:控制帧(stop / reset)。
@@ -33,7 +37,9 @@ pub enum ClientControl {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
-    Ready { session_id: String },
+    Ready {
+        session_id: String,
+    },
     Segment {
         id: u64,
         text: String,
@@ -42,8 +48,14 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         speaker: Option<String>,
     },
-    Optimized { r#ref: u64, text: String },
-    Translated { r#ref: u64, text: String },
+    Optimized {
+        r#ref: u64,
+        text: String,
+    },
+    Translated {
+        r#ref: u64,
+        text: String,
+    },
     /// 次模型对比识别结果。客户端按 `ref` 与主段 `Segment.id` 关联,在同一
     /// 行下方展示;不参与后续优化/翻译流水线。
     Secondary {
@@ -52,15 +64,20 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
     },
-    Error { code: String, message: String, fatal: bool },
-    Done { session_id: String },
+    Error {
+        code: String,
+        message: String,
+        fatal: bool,
+    },
+    Done {
+        session_id: String,
+    },
 }
 
 impl ServerEvent {
     pub fn json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
-            r#"{"type":"error","code":"enc","message":"serialize failed","fatal":true}"#
-                .to_string()
+            r#"{"type":"error","code":"enc","message":"serialize failed","fatal":true}"#.to_string()
         })
     }
 }

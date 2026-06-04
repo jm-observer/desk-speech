@@ -91,7 +91,8 @@ fn next_clipboard_text(
 /// instead of `15:42:46 → 15:42:46`. Falls back to the input on parse
 /// failure or non-positive duration.
 fn add_seconds_to_wall(wall: &str, secs: f64) -> String {
-    if !(secs > 0.0) {
+    // 等价于 !(secs > 0.0)：NaN 或非正时回退（clippy: 避免对偏序类型用取反比较）。
+    if secs.is_nan() || secs <= 0.0 {
         return wall.to_string();
     }
     let Ok(dt) = NaiveDateTime::parse_from_str(wall, "%Y-%m-%d %H:%M:%S") else {

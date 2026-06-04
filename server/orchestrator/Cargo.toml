@@ -3,10 +3,9 @@ name = "orchestrator"
 version = "0.1.0"
 edition = "2021"
 
-# Built independently on GB10 (cargo deps + linux toolchain), not part of the
-# Windows workspace. `[workspace]` keeps `cargo` from inheriting the parent
-# manifest when this crate is checked locally on Windows.
-[workspace]
+# 本机开发态属于仓库根 workspace（统一 Cargo.lock / reqwest 版本，并为 Phase 3
+# 追踪接入备好 [workspace.dependencies]）。Docker 镜像仍以本子目录为上下文独立编译：
+# 容器里没有父 workspace，cargo 视其为独立包——故本 manifest 不得使用 `workspace = true`。
 
 # P0 编排层:对客户端的 WebSocket(protocol-draft.md)+ 串 ASR + vLLM。
 # 纯业务胶水,不做推理。后续可复用现有 Tauri 后端的分段/词修正逻辑。
@@ -18,9 +17,19 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# 显式 0.13（不可 workspace=true：见上方 Docker 独立构建注释）。
+# 0.13 改了 TLS feature 名：旧 `rustls-tls` → `rustls`（0.13.3 的 rustls 自带 webpki 根，
+# 不依赖系统证书 / slim 镜像 openssl）。注：0.13.4 起把根拆成独立 feature，若升到 0.13.4+
+# 需补 `webpki-roots`。
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"
 # Embedded persistence (sessions/segments/speakers/config) on a GB10 volume.
-rusqlite = { version = "0.32", features = ["bundled"] }
+# 0.38 与 src-tauri 经 deadpool-sqlite 间接拉的版本对齐：同一 workspace 下
+# libsqlite3-sys(links="sqlite3") 只允许一份，版本须一致。
+rusqlite = { version = "0.38", features = ["bundled"] }
+# trace-hub 接入：custom-utils trace 客户端（异步非阻塞推送 span+body）。
+# 显式 registry 依赖、不走 workspace=true——Docker 镜像以本子目录为构建上下文
+# 独立编译，容器内无父 workspace，与 asr-server 同理。
+custom-utils = { version = "0.15", default-features = false, features = ["trace"] }

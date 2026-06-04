@@ -4,11 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Multipart, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
+use custom_utils::trace::{self, SpanRecord, SpanStatus, TraceContext};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{
@@ -111,6 +112,13 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    // 全链路追踪（trace-hub）：仅当设 TRACE_HUB_ENDPOINT 才启用，未设则全程 no-op。
+    // 须在 tokio 运行时内 init（本函数是 #[tokio::main]，OK）。
+    if let Ok(ep) = std::env::var("TRACE_HUB_ENDPOINT") {
+        trace::init(trace::TraceConfig::new(ep, "asr-server"));
+        tracing::info!("trace-hub tracing enabled");
+    }
+
     let args = Args::parse();
     let is_whisper = args.model == "whisper-turbo";
     tracing::info!(model = %args.model, dir = ?args.model_dir, "loading recognizer");
@@ -137,7 +145,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(?allowlist, "from-source enabled with allowlist");
     }
     if !args.vad_model.exists() {
-        tracing::warn!("vad model not found at {:?}; vad=true requests will fail", args.vad_model);
+        tracing::warn!(
+            "vad model not found at {:?}; vad=true requests will fail",
+            args.vad_model
+        );
     }
 
     let max_body = args.max_body_bytes;
@@ -221,7 +232,10 @@ fn err(status: StatusCode, kind: &'static str, msg: impl Into<String>) -> ApiErr
     (
         status,
         Json(ErrorResponse {
-            error: ErrorBody { message: msg.into(), r#type: kind },
+            error: ErrorBody {
+                message: msg.into(),
+                r#type: kind,
+            },
         }),
     )
 }
@@ -230,12 +244,113 @@ fn parse_bool_field(s: &str) -> bool {
     matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1")
 }
 
+// ===================== 全链路追踪辅助（trace-hub）=====================
+
+/// 从入站请求头提取 traceparent：有上游则 `.child()` 出本服务子树根（父=上游 span），
+/// 无则起独立 trace。该 ctx 即本次请求 `asr_transcribe` span 的身份；其子 span 用 `ctx.child()`。
+fn trace_root(headers: &HeaderMap) -> TraceContext {
+    trace::extract_traceparent(|h| headers.get(h).and_then(|v| v.to_str().ok()).map(str::to_string))
+        .map(|remote| remote.child())
+        .unwrap_or_else(TraceContext::root)
+}
+
+/// 以 `span` 自身为身份记一个 span（顶层 span 传 ctx；子 span 传 `ctx.child()`）。
+/// 调用方须先 `trace::enabled()` 判断后再构造 payload，避免关闭时白做 JSON/clone。
+fn emit_span(
+    span: &TraceContext,
+    kind: &str,
+    start_ms: i64,
+    end_ms: i64,
+    summary: serde_json::Value,
+    detail: serde_json::Value,
+    response_body: Option<String>,
+) {
+    trace::record_span(SpanRecord {
+        trace_id: span.trace_id.clone(),
+        span_id: span.span_id.clone(),
+        parent_span_id: span.parent_span_id.clone(),
+        service: String::new(), // record_span 自动填 "asr-server"
+        kind: kind.to_string(),
+        flow_name: None,
+        start_ms,
+        end_ms,
+        status: SpanStatus::Ok,
+        summary,
+        detail,
+        request_body: None,
+        response_body,
+        body_truncated: false,
+        links: Vec::new(),
+    });
+}
+
+/// 解码 + 识别的统一入口，集中记 `asr_transcribe`（顶层）与 `audio_decode`（子）span，
+/// `vad_segment` / `asr_decode` 子 span 在阻塞线程内记（见 `transcribe_blocking`）。
+/// 两个 handler 共用此函数，避免重复埋点。
+async fn run_traced(
+    state: Arc<AppState>,
+    ctx: TraceContext,
+    t0: i64,
+    bytes: Vec<u8>,
+    vad_flag: bool,
+    source_kind: &'static str,
+) -> Result<TranscriptionResponse, ApiError> {
+    let model = state.args.model.clone();
+
+    // audio_decode 子 span
+    let d0 = trace::now_ms();
+    let fast = is_fast_wav(&bytes);
+    let samples = decode_any(&bytes, &state.args).await?;
+    let d1 = trace::now_ms();
+    let n_samples = samples.len();
+    if trace::enabled() {
+        emit_span(
+            &ctx.child(),
+            "audio_decode",
+            d0,
+            d1,
+            serde_json::json!({ "fast_path": fast, "samples": n_samples, "decode_ms": (d1 - d0).max(0) }),
+            serde_json::Value::Null,
+            None,
+        );
+    }
+
+    // 识别（vad_segment + 逐段 asr_decode 在阻塞线程内记）
+    let resp = run_transcription(state, samples, vad_flag, ctx.clone()).await?;
+
+    // asr_transcribe 顶层 span（= 本服务子树根，身份即 ctx）
+    if trace::enabled() {
+        let t1 = trace::now_ms();
+        let segments_count = resp.segments.as_ref().map(|s| s.len()).unwrap_or(0);
+        emit_span(
+            &ctx,
+            "asr_transcribe",
+            t0,
+            t1,
+            serde_json::json!({
+                "model": model,
+                "vad": vad_flag,
+                "source_kind": source_kind,
+                "text_len": resp.text.chars().count(),
+                "segments_count": segments_count,
+                "total_ms": (t1 - t0).max(0),
+            }),
+            serde_json::Value::Null,
+            Some(resp.text.clone()), // 转写全文 = ASR 的「body」
+        );
+    }
+    Ok(resp)
+}
+
 // ===================== /v1/audio/transcriptions (multipart) =====================
 
 async fn transcribe(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<TranscriptionResponse>, ApiError> {
+    let ctx = trace_root(&headers);
+    let t0 = trace::now_ms();
     let mut audio_bytes: Option<Vec<u8>> = None;
     let mut vad_flag = false;
 
@@ -266,8 +381,7 @@ async fn transcribe(
     }
 
     let bytes = audio_bytes.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid_request", "missing field 'file'"))?;
-    let samples = decode_any(&bytes, &state.args).await?;
-    let resp = run_transcription(state, samples, vad_flag).await?;
+    let resp = run_traced(state, ctx, t0, bytes, vad_flag, "file").await?;
     Ok(Json(resp))
 }
 
@@ -282,8 +396,11 @@ struct FromSourceRequest {
 
 async fn from_source(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<FromSourceRequest>,
 ) -> Result<Json<TranscriptionResponse>, ApiError> {
+    let ctx = trace_root(&headers);
+    let t0 = trace::now_ms();
     if state.allowlist.is_empty() {
         return Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -305,11 +422,19 @@ async fn from_source(
             .canonicalize()
             .map_err(|_| err(StatusCode::NOT_FOUND, "not_found", "source file not found"))?;
         if !path_in_allowlist(&canon, &state.allowlist) {
-            return Err(err(StatusCode::FORBIDDEN, "forbidden_source", "path not in --source-allowlist"));
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "forbidden_source",
+                "path not in --source-allowlist",
+            ));
         }
-        bytes = tokio::fs::read(&canon)
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", format!("read source: {e}")))?;
+        bytes = tokio::fs::read(&canon).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                format!("read source: {e}"),
+            )
+        })?;
     } else if req.source.starts_with("http://") || req.source.starts_with("https://") {
         let (b, guard) = fetch_http(
             &req.source,
@@ -320,11 +445,15 @@ async fn from_source(
         bytes = b;
         _tmp = guard;
     } else {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid_request", "unsupported source scheme"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "unsupported source scheme",
+        ));
     }
 
-    let samples = decode_any(&bytes, &state.args).await?;
-    let resp = run_transcription(state, samples, req.vad).await?;
+    let source_kind = if req.source.starts_with("http") { "http" } else { "file" };
+    let resp = run_traced(state, ctx, t0, bytes, req.vad, source_kind).await?;
     Ok(Json(resp))
 }
 
@@ -341,11 +470,19 @@ fn validate_file_path(source: &str, rest: &str) -> Result<PathBuf, ApiError> {
     }
     // file:///abs → rest 以 '/' 开头；否则形如 file://host/... 或缺斜杠，不支持。
     if !rest.starts_with('/') {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid_request", "unsupported file:// path"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "unsupported file:// path",
+        ));
     }
     // 拒绝 Windows 风格 file:///C:/...（本服务只跑 GB10 linux）。
     if is_windows_style(rest) {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid_request", "unsupported file:// path"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "unsupported file:// path",
+        ));
     }
     Ok(PathBuf::from(rest))
 }
@@ -380,21 +517,29 @@ async fn fetch_http(url: &str, max_bytes: u64, timeout_secs: u64) -> Result<(Vec
         let resp = reqwest::get(url)
             .await
             .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid_request", format!("fetch failed: {e}")))?;
-        let mut file = tokio::fs::File::create(&tmp_path)
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", format!("temp create: {e}")))?;
+        let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                format!("temp create: {e}"),
+            )
+        })?;
         let mut stream = resp.bytes_stream();
         let mut total: u64 = 0;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid_request", format!("fetch read: {e}")))?;
+            let chunk =
+                chunk.map_err(|e| err(StatusCode::BAD_REQUEST, "invalid_request", format!("fetch read: {e}")))?;
             total += chunk.len() as u64;
             if total > max_bytes {
                 return Err(err(StatusCode::BAD_REQUEST, "invalid_request", "fetch too large"));
             }
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", format!("temp write: {e}")))?;
+            file.write_all(&chunk).await.map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    format!("temp write: {e}"),
+                )
+            })?;
         }
         file.flush().await.ok();
         Ok::<(), ApiError>(())
@@ -406,9 +551,13 @@ async fn fetch_http(url: &str, max_bytes: u64, timeout_secs: u64) -> Result<(Vec
         Err(_) => return Err(err(StatusCode::BAD_REQUEST, "invalid_request", "fetch timeout")),
     }
 
-    let bytes = tokio::fs::read(&tmp_path)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", format!("read temp: {e}")))?;
+    let bytes = tokio::fs::read(&tmp_path).await.map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            format!("read temp: {e}"),
+        )
+    })?;
     Ok((bytes, guard))
 }
 
@@ -422,7 +571,11 @@ async fn decode_any(bytes: &[u8], args: &Args) -> Result<Vec<f32>, ApiError> {
     };
     // 解码出的音频 < 0.1 s（1600 样本 @16k）视为无效输入。
     if samples.len() < 1600 {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid_request", "decoded audio too short"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "decoded audio too short",
+        ));
     }
     Ok(samples)
 }
@@ -464,16 +617,32 @@ async fn ffmpeg_decode(bytes: &[u8], timeout_secs: u64) -> Result<Vec<f32>, ApiE
 
     let mut child = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error",
-            "-i", "pipe:0",
-            "-f", "s16le", "-ar", "16000", "-ac", "1", "-acodec", "pcm_s16le",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-acodec",
+            "pcm_s16le",
             "pipe:1",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", format!("spawn ffmpeg: {e}")))?;
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                format!("spawn ffmpeg: {e}"),
+            )
+        })?;
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let mut stdout = child.stdout.take().expect("piped stdout");
@@ -497,7 +666,13 @@ async fn ffmpeg_decode(bytes: &[u8], timeout_secs: u64) -> Result<Vec<f32>, ApiE
     });
 
     let status = match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {
-        Ok(s) => s.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", format!("ffmpeg wait: {e}")))?,
+        Ok(s) => s.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                format!("ffmpeg wait: {e}"),
+            )
+        })?,
         Err(_) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
@@ -532,6 +707,7 @@ async fn run_transcription(
     state: Arc<AppState>,
     samples: Vec<f32>,
     vad_flag: bool,
+    ctx: TraceContext,
 ) -> Result<TranscriptionResponse, ApiError> {
     if vad_flag && !state.args.vad_model.exists() {
         return Err(err(
@@ -540,32 +716,75 @@ async fn run_transcription(
             format!("vad model not available: {:?}", state.args.vad_model),
         ));
     }
-    tokio::task::spawn_blocking(move || transcribe_blocking(&state, samples, vad_flag))
+    tokio::task::spawn_blocking(move || transcribe_blocking(&state, samples, vad_flag, &ctx))
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", format!("join: {e}")))?
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, "server_error", e.to_string()))
 }
 
-/// 阻塞执行：持 recognizer 锁，按 vad_flag 走单段 / 多段。
+/// 单段识别 + 记一条 `asr_decode` 子 span（trace 关闭时仅多一次 now_ms，无 JSON/clone）。
+fn recognize_traced(
+    recognizer: &OfflineRecognizer,
+    samples: &[f32],
+    is_whisper: bool,
+    long: bool,
+    ctx: &TraceContext,
+    seg_index: usize,
+    seg_dur_s: f64,
+) -> anyhow::Result<String> {
+    let a0 = trace::now_ms();
+    let text = if long {
+        recognize_long(recognizer, samples, is_whisper)?
+    } else {
+        recognize(recognizer, samples)?
+    };
+    if trace::enabled() {
+        let a1 = trace::now_ms();
+        emit_span(
+            &ctx.child(),
+            "asr_decode",
+            a0,
+            a1,
+            serde_json::json!({
+                "seg_index": seg_index,
+                "seg_dur_s": seg_dur_s,
+                "decode_ms": (a1 - a0).max(0),
+                "text_len": text.chars().count(),
+            }),
+            serde_json::Value::Null,
+            if text.is_empty() { None } else { Some(text.clone()) }, // 该段文本 = body
+        );
+    }
+    Ok(text)
+}
+
+/// 阻塞执行：持 recognizer 锁，按 vad_flag 走单段 / 多段。`ctx` 为本请求 span，
+/// 子 span（vad_segment / asr_decode）记为其 child。record_span 内部用 try_send，
+/// 在 spawn_blocking 线程上安全（不依赖 tokio 运行时上下文）。
 fn transcribe_blocking(
     state: &AppState,
     samples: Vec<f32>,
     vad_flag: bool,
+    ctx: &TraceContext,
 ) -> anyhow::Result<TranscriptionResponse> {
     let recognizer = state.recognizer.lock().expect("recognizer mutex poisoned");
+    let total_dur = samples.len() as f64 / vad::SAMPLE_RATE as f64;
 
     if !vad_flag {
-        let text = recognize(&recognizer, &samples)?;
+        let text = recognize_traced(&recognizer, &samples, state.is_whisper, false, ctx, 0, total_dur)?;
         return Ok(TranscriptionResponse { text, segments: None });
     }
 
     // 音频 < 1 s：跳过 VAD，整段直推，segments 退化为单元素。
     if samples.len() < vad::SAMPLE_RATE as usize {
-        let text = recognize(&recognizer, &samples)?;
-        let end = samples.len() as f64 / vad::SAMPLE_RATE as f64;
+        let text = recognize_traced(&recognizer, &samples, state.is_whisper, false, ctx, 0, total_dur)?;
         return Ok(TranscriptionResponse {
             text: text.clone(),
-            segments: Some(vec![SegmentOut { start: 0.0, end, text }]),
+            segments: Some(vec![SegmentOut {
+                start: 0.0,
+                end: total_dur,
+                text,
+            }]),
         });
     }
 
@@ -574,18 +793,40 @@ fn transcribe_blocking(
         .vad_model
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("vad model path not utf-8"))?;
+    let v0 = trace::now_ms();
     let segs = vad::segment(vad_model, &samples)?;
+    if trace::enabled() {
+        let v1 = trace::now_ms();
+        emit_span(
+            &ctx.child(),
+            "vad_segment",
+            v0,
+            v1,
+            serde_json::json!({ "segments_count": segs.len(), "vad_ms": (v1 - v0).max(0) }),
+            serde_json::json!({
+                "boundaries": segs.iter().map(|s| serde_json::json!({ "start": s.start, "end": s.end })).collect::<Vec<_>>()
+            }),
+            None,
+        );
+    }
 
     let mut segments = Vec::new();
-    for s in &segs {
-        let text = recognize_long(&recognizer, &s.samples, state.is_whisper)?;
+    for (i, s) in segs.iter().enumerate() {
+        let text = recognize_traced(&recognizer, &s.samples, state.is_whisper, true, ctx, i, s.end - s.start)?;
         if text.is_empty() {
             continue;
         }
-        segments.push(SegmentOut { start: s.start, end: s.end, text });
+        segments.push(SegmentOut {
+            start: s.start,
+            end: s.end,
+            text,
+        });
     }
     let text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
-    Ok(TranscriptionResponse { text, segments: Some(segments) })
+    Ok(TranscriptionResponse {
+        text,
+        segments: Some(segments),
+    })
 }
 
 fn recognize(recognizer: &OfflineRecognizer, samples: &[f32]) -> anyhow::Result<String> {

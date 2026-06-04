@@ -12,16 +12,19 @@ use axum::{
     body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
-use std::collections::HashMap;
+use custom_utils::trace::{self, LlmCall, SpanRecord, SpanStatus, TraceContext};
 use db::Db;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientControl, Hello, ServerEvent};
 use serde_json::json;
+use std::collections::HashMap;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 #[derive(Clone)]
@@ -43,10 +46,8 @@ fn cfg() -> Cfg {
     Cfg {
         bind: std::env::var("ORCH_BIND").unwrap_or_else(|_| "0.0.0.0:8090".into()),
         asr_ws: std::env::var("ASR_WS").unwrap_or_else(|_| "ws://asr:9100".into()),
-        asr_embed: std::env::var("ASR_EMBED")
-            .unwrap_or_else(|_| "http://asr:9101/embed".into()),
-        vllm_base: std::env::var("VLLM_BASE")
-            .unwrap_or_else(|_| "http://host.docker.internal:1234/v1".into()),
+        asr_embed: std::env::var("ASR_EMBED").unwrap_or_else(|_| "http://asr:9101/embed".into()),
+        vllm_base: std::env::var("VLLM_BASE").unwrap_or_else(|_| "http://host.docker.internal:1234/v1".into()),
         vllm_model: std::env::var("VLLM_MODEL").unwrap_or_else(|_| "default".into()),
     }
 }
@@ -72,6 +73,7 @@ fn parse_hotwords(raw: &str) -> Vec<String> {
 /// - context: 20 秒内历史优化文本(按时序排列),供 LLM 感知话题连贯性。
 /// - primary: 主模型原始识别文本。
 /// - secondary: 可选的次模型识别文本;有则以双候选形式呈现,让 LLM 择优合并。
+///
 /// 无 context 且无 secondary 时直接返回 primary,与旧行为完全相同。
 fn build_optimize_user_msg(context: &[String], primary: &str, secondary: Option<&str>) -> String {
     if context.is_empty() && secondary.is_none() {
@@ -117,14 +119,18 @@ fn optimize_prompt_with_hotwords(prompt: String, hotwords_raw: &str) -> String {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+    // 全链路追踪(trace-hub):仅当设 TRACE_HUB_ENDPOINT 才启用,未设则全程 no-op。
+    // 须在 tokio 运行时内 init(本函数是 #[tokio::main],OK)。
+    if let Ok(ep) = std::env::var("TRACE_HUB_ENDPOINT") {
+        trace::init(trace::TraceConfig::new(ep, "orchestrator"));
+        tracing::info!("trace-hub tracing enabled");
+    }
     let c = cfg();
     let bind = c.bind.clone();
 
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into());
     let _ = std::fs::create_dir_all(&data_dir);
-    let db = Arc::new(
-        Db::open(&format!("{data_dir}/app.db")).expect("open app.db"),
-    );
+    let db = Arc::new(Db::open(&format!("{data_dir}/app.db")).expect("open app.db"));
     // Resume the segment-id counter past anything on disk so a restart
     // never reuses an id and overwrites an existing row / its audio.
     SEG_ID.store(db.max_segment_id() as u64 + 1, Ordering::Relaxed);
@@ -192,16 +198,22 @@ async fn main() {
     axum::serve(listener, app).await.expect("serve");
 }
 
-async fn ws_upgrade(State(ctx): State<AppCtx>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |s| handle_client(s, ctx))
+async fn ws_upgrade(State(ctx): State<AppCtx>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    // WS 升级首选:从 HTTP 升级请求头取 traceparent。浏览器侧无法塞自定义头时
+    // 走 hello 帧的 traceparent 字段兜底(见 handle_client)。
+    let upgrade_remote = trace::extract_traceparent(|h| {
+        headers.get(h).and_then(|v| v.to_str().ok()).map(str::to_string)
+    });
+    ws.on_upgrade(move |s| handle_client(s, ctx, upgrade_remote))
 }
 
-async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
+async fn handle_client(mut sock: WebSocket, ctx: AppCtx, upgrade_remote: Option<TraceContext>) {
     let c = ctx.cfg.clone();
     let db = ctx.db.clone();
     let session_id = format!("s{}", SEG_ID.load(Ordering::Relaxed));
     db.session_start(&session_id);
     let started = Instant::now();
+    let stream_start_ms = trace::now_ms();
 
     // 1) hello
     let hello: Hello = match sock.recv().await {
@@ -211,14 +223,40 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
         },
         _ => return,
     };
+
+    // ws_stream 根 span:本会话子树根。优先用 WS 升级头的 traceparent;否则 hello 帧
+    // 字段兜底;再不行则起独立 trace(不孤儿,仍能看本服务内部)。
+    let remote = upgrade_remote.or_else(|| {
+        hello
+            .traceparent
+            .as_deref()
+            .and_then(TraceContext::from_traceparent)
+    });
+    let stream_ctx = remote
+        .as_ref()
+        .map(TraceContext::child)
+        .unwrap_or_else(TraceContext::root);
+    let hello_flags = (hello.want_optimize, hello.want_translate, hello.want_secondary);
     let _ = sock
         .send(Message::Text(
-            ServerEvent::Ready { session_id: session_id.clone() }.json(),
+            ServerEvent::Ready {
+                session_id: session_id.clone(),
+            }
+            .json(),
         ))
         .await;
 
-    // 2) 连接 ASR 服务
-    let (asr, _) = match tokio_tungstenite::connect_async(&c.asr_ws).await {
+    // 2) 连接 ASR 服务(升级请求头注入 traceparent,asr-server 端按 HeaderMap 提取)
+    let asr_req = match c.asr_ws.as_str().into_client_request() {
+        Ok(mut r) => {
+            if let Ok(v) = HeaderValue::from_str(&stream_ctx.to_traceparent()) {
+                r.headers_mut().insert("traceparent", v);
+            }
+            r
+        }
+        Err(e) => return send_fatal(&mut sock, "asr_unreachable", &e.to_string()).await,
+    };
+    let (asr, _) = match tokio_tungstenite::connect_async(asr_req).await {
         Ok(x) => x,
         Err(e) => return send_fatal(&mut sock, "asr_unreachable", &e.to_string()).await,
     };
@@ -240,14 +278,18 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
     })
     .to_string();
     if let Err(e) = asr_tx.send(TMessage::text(cfg_msg)).await {
-        let _ = cli_tx.lock().await.send(Message::Text(
-            ServerEvent::Error {
-                code: "asr_handshake".into(),
-                message: format!("asr config handshake failed: {e}"),
-                fatal: false,
-            }
-            .json(),
-        )).await;
+        let _ = cli_tx
+            .lock()
+            .await
+            .send(Message::Text(
+                ServerEvent::Error {
+                    code: "asr_handshake".into(),
+                    message: format!("asr config handshake failed: {e}"),
+                    fatal: false,
+                }
+                .json(),
+            ))
+            .await;
     }
 
     // 本会话上行 PCM 的滚动缓冲(16k mono s16le)。asr_reader 收到段时按
@@ -265,6 +307,7 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
         session_id.clone(),
         db.clone(),
         pcm_buf.clone(),
+        stream_ctx.clone(),
     ));
 
     // 主循环:客户端音频/控制 -> ASR
@@ -300,16 +343,49 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx) {
     }
 
     // 等 asr_reader 处理完 flush 后的收尾(它负责发 Done)
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), reader).await;
+    let reader_out = tokio::time::timeout(std::time::Duration::from_secs(30), reader).await;
     db.session_end(&session_id, started.elapsed().as_secs_f64());
+
+    // ws_stream 根 span:本会话子树根。即便 reader 超时也尽量发出供查问题。
+    if trace::enabled() {
+        let segments_count = match &reader_out {
+            Ok(Ok(n)) => *n,
+            _ => 0,
+        };
+        let asr_model = ctx.db.config_get("asr.model").unwrap_or_default();
+        let llm_model = ctx.db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
+        let end_ms = trace::now_ms();
+        trace::record_span(SpanRecord {
+            trace_id: stream_ctx.trace_id.clone(),
+            span_id: stream_ctx.span_id.clone(),
+            parent_span_id: stream_ctx.parent_span_id.clone(),
+            service: String::new(),
+            kind: "ws_stream".into(),
+            flow_name: None,
+            start_ms: stream_start_ms,
+            end_ms,
+            status: SpanStatus::Ok,
+            summary: json!({
+                "session_id": session_id,
+                "segments": segments_count,
+                "total_ms": (end_ms - stream_start_ms).max(0),
+                "asr_model": asr_model,
+                "llm_model": llm_model,
+            }),
+            detail: json!({ "want_optimize": hello_flags.0, "want_translate": hello_flags.1, "want_secondary": hello_flags.2 }),
+            request_body: None,
+            response_body: None,
+            body_truncated: false,
+            links: Vec::new(),
+        });
+    }
 }
 
 /// 并发读取 ASR,逐段转发客户端,并按需调 vLLM 优化/翻译。收到 done 发 Done。
+/// 返回本会话累计段数(供 handle_client 写到 ws_stream 概要)。
 async fn asr_reader(
     mut asr_rx: futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     >,
     cli_tx: Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>,
     hello: Hello,
@@ -317,7 +393,9 @@ async fn asr_reader(
     session_id: String,
     db: Arc<Db>,
     pcm_buf: Arc<std::sync::Mutex<PcmBuf>>,
-) {
+    stream_ctx: TraceContext,
+) -> u64 {
+    let mut seg_count: u64 = 0;
     type CliTx = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
     async fn send(tx: &CliTx, json: String) {
         let _ = tx.lock().await.send(Message::Text(json)).await;
@@ -340,11 +418,41 @@ async fn asr_reader(
         match v.get("type").and_then(|x| x.as_str()) {
             Some("segment") => {
                 let id = SEG_ID.fetch_add(1, Ordering::Relaxed);
+                seg_count += 1;
                 let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let speaker = v.get("speaker").and_then(|x| x.as_str());
                 db.segment_upsert(id as i64, &session_id, &text, None, None, t0, t1, speaker);
+
+                // asr_segment 子 span:每段一条,response_body = 该段转写文本。
+                if trace::enabled() {
+                    let seg_span = stream_ctx.child();
+                    let dur_ms = ((t1 - t0) * 1000.0).round().max(0.0) as i64;
+                    trace::record_span(SpanRecord {
+                        trace_id: seg_span.trace_id,
+                        span_id: seg_span.span_id,
+                        parent_span_id: seg_span.parent_span_id,
+                        service: String::new(),
+                        kind: "asr_segment".into(),
+                        flow_name: None,
+                        start_ms: trace::now_ms() - dur_ms,
+                        end_ms: trace::now_ms(),
+                        status: SpanStatus::Ok,
+                        summary: json!({
+                            "seg_index": seg_count,
+                            "dur_ms": dur_ms,
+                            "text_len": text.chars().count(),
+                            "t_start": t0,
+                            "t_end": t1,
+                        }),
+                        detail: serde_json::Value::Null,
+                        request_body: None,
+                        response_body: Some(text.clone()),
+                        body_truncated: false,
+                        links: Vec::new(),
+                    });
+                }
                 // Remember (t0,t1)→id so the asr's later `secondary` event
                 // (same VAD window, possibly arriving after several other
                 // segments) can be paired back to this client segment.
@@ -381,12 +489,8 @@ async fn asr_reader(
                 // segment N+1 is forwarded without waiting on N's LLM. Results
                 // are keyed by `ref` id, so out-of-order arrival is fine.
                 if hello.want_optimize || hello.want_translate {
-                    let model = db
-                        .config_get("vllm.model")
-                        .unwrap_or_else(|| c.vllm_model.clone());
-                    let base = db
-                        .config_get("vllm.base")
-                        .unwrap_or_else(|| c.vllm_base.clone());
+                    let model = db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
+                    let base = db.config_get("vllm.base").unwrap_or_else(|| c.vllm_base.clone());
                     let opt_sys = hello.want_optimize.then(|| {
                         let base = db
                             .config_get("llm.optimize_prompt")
@@ -406,17 +510,18 @@ async fn asr_reader(
                     };
                     let db2 = db.clone();
                     let tx2 = cli_tx.clone();
+                    let llm_ctx = stream_ctx.clone();
                     llm_tasks.push(tokio::spawn(async move {
                         let opt_user = build_optimize_user_msg(&ctx_texts, &text, None);
                         let opt_fut = async {
                             match &opt_sys {
-                                Some(s) => llm(&base, &model, s, &opt_user).await.ok(),
+                                Some(s) => llm(&base, &model, s, &opt_user, Some(&llm_ctx)).await.ok(),
                                 None => None,
                             }
                         };
                         let tr_fut = async {
                             match &tr_sys {
-                                Some(s) => llm(&base, &model, s, &text).await.ok(),
+                                Some(s) => llm(&base, &model, s, &text, Some(&llm_ctx)).await.ok(),
                                 None => None,
                             }
                         };
@@ -439,24 +544,21 @@ async fn asr_reader(
                 // drop the event rather than guess.
                 let t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                let text = v
-                    .get("text")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let kind = v.get("kind").and_then(|x| x.as_str()).map(str::to_string);
                 let Some(&seg_id) = seg_by_time.get(&time_key(t0, t1)) else {
-                    tracing::warn!(
-                        "[orch] secondary without matching segment t=[{:.3},{:.3}]",
-                        t0,
-                        t1
-                    );
+                    tracing::warn!("[orch] secondary without matching segment t=[{:.3},{:.3}]", t0, t1);
                     continue;
                 };
                 db.segment_set_secondary(seg_id as i64, &text);
                 send(
                     &cli_tx,
-                    ServerEvent::Secondary { r#ref: seg_id, text: text.clone(), kind }.json(),
+                    ServerEvent::Secondary {
+                        r#ref: seg_id,
+                        text: text.clone(),
+                        kind,
+                    }
+                    .json(),
                 )
                 .await;
                 // Comparison done for this window — free the map entry.
@@ -467,30 +569,22 @@ async fn asr_reader(
                 if hello.want_optimize && !text.is_empty() {
                     if let Some(seg) = db.segment_get(seg_id as i64) {
                         if seg.text != text {
-                            let ctx_texts =
-                                db.segments_context_before(&session_id, t0, 20.0);
+                            let ctx_texts = db.segments_context_before(&session_id, t0, 20.0);
                             let sys = {
                                 let base = db
                                     .config_get("llm.optimize_prompt")
                                     .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
-                                let hw =
-                                    db.config_get("asr.hotwords").unwrap_or_default();
+                                let hw = db.config_get("asr.hotwords").unwrap_or_default();
                                 optimize_prompt_with_hotwords(base, &hw)
                             };
-                            let user_msg =
-                                build_optimize_user_msg(&ctx_texts, &seg.text, Some(&text));
-                            let model = db
-                                .config_get("vllm.model")
-                                .unwrap_or_else(|| c.vllm_model.clone());
-                            let base_url = db
-                                .config_get("vllm.base")
-                                .unwrap_or_else(|| c.vllm_base.clone());
+                            let user_msg = build_optimize_user_msg(&ctx_texts, &seg.text, Some(&text));
+                            let model = db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
+                            let base_url = db.config_get("vllm.base").unwrap_or_else(|| c.vllm_base.clone());
                             let db3 = db.clone();
                             let tx3 = cli_tx.clone();
+                            let llm_ctx = stream_ctx.clone();
                             llm_tasks.push(tokio::spawn(async move {
-                                if let Ok(opt) =
-                                    llm(&base_url, &model, &sys, &user_msg).await
-                                {
+                                if let Ok(opt) = llm(&base_url, &model, &sys, &user_msg, Some(&llm_ctx)).await {
                                     db3.segment_set_optimized(seg_id as i64, &opt);
                                     send(
                                         &tx3,
@@ -511,8 +605,12 @@ async fn asr_reader(
                 let m = v.get("message").and_then(|x| x.as_str()).unwrap_or("asr error");
                 send(
                     &cli_tx,
-                    ServerEvent::Error { code: "asr".into(), message: m.into(), fatal: false }
-                        .json(),
+                    ServerEvent::Error {
+                        code: "asr".into(),
+                        message: m.into(),
+                        fatal: false,
+                    }
+                    .json(),
                 )
                 .await;
             }
@@ -523,7 +621,7 @@ async fn asr_reader(
                     let _ = h.await;
                 }
                 send(&cli_tx, ServerEvent::Done { session_id }.json()).await;
-                return;
+                return seg_count;
             }
             _ => {}
         }
@@ -531,6 +629,7 @@ async fn asr_reader(
     for h in llm_tasks.drain(..) {
         let _ = h.await;
     }
+    seg_count
 }
 
 // ── Web 管理台 HTTP API ──────────────────────────────────────────────────
@@ -541,10 +640,7 @@ async fn console() -> Html<&'static str> {
 async fn api_stats(State(ctx): State<AppCtx>) -> Json<db::Stats> {
     Json(ctx.db.stats())
 }
-async fn api_history(
-    State(ctx): State<AppCtx>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Json<Vec<db::SegmentRow>> {
+async fn api_history(State(ctx): State<AppCtx>, Query(q): Query<HashMap<String, String>>) -> Json<Vec<db::SegmentRow>> {
     let limit = q
         .get("limit")
         .and_then(|v| v.parse::<i64>().ok())
@@ -557,21 +653,10 @@ async fn api_speakers(State(ctx): State<AppCtx>) -> Json<Vec<db::Speaker>> {
 }
 /// Runtime-tunable asr config the asr service polls (threshold/gap).
 async fn api_asr_config(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
-    let f = |k: &str, d: f64| -> f64 {
-        ctx.db.config_get(k).and_then(|v| v.parse().ok()).unwrap_or(d)
-    };
-    let model = ctx
-        .db
-        .config_get("asr.model")
-        .unwrap_or_else(|| "paraformer".into());
-    let secondary_model = ctx
-        .db
-        .config_get("asr.secondary_model")
-        .unwrap_or_default();
-    let gate_to_enrolled = ctx
-        .db
-        .config_get("asr.gate_to_enrolled")
-        .unwrap_or_else(|| "on".into());
+    let f = |k: &str, d: f64| -> f64 { ctx.db.config_get(k).and_then(|v| v.parse().ok()).unwrap_or(d) };
+    let model = ctx.db.config_get("asr.model").unwrap_or_else(|| "paraformer".into());
+    let secondary_model = ctx.db.config_get("asr.secondary_model").unwrap_or_default();
+    let gate_to_enrolled = ctx.db.config_get("asr.gate_to_enrolled").unwrap_or_else(|| "on".into());
     let hotwords = ctx.db.config_get("asr.hotwords").unwrap_or_default();
     Json(json!({
         "spk_threshold": f("asr.spk_threshold", 0.35),
@@ -633,10 +718,7 @@ async fn api_speaker_enroll(
     }
 }
 
-async fn api_speaker_delete(
-    State(ctx): State<AppCtx>,
-    Path(id): Path<i64>,
-) -> Json<serde_json::Value> {
+async fn api_speaker_delete(State(ctx): State<AppCtx>, Path(id): Path<i64>) -> Json<serde_json::Value> {
     ctx.db.speaker_delete(id);
     Json(json!({"ok": true}))
 }
@@ -691,10 +773,7 @@ async fn api_segment_set_text(
 }
 
 /// Fetch a single segment as JSON (used by the standalone /segment/:id page).
-async fn api_segment_get(
-    State(ctx): State<AppCtx>,
-    Path(id): Path<i64>,
-) -> Response {
+async fn api_segment_get(State(ctx): State<AppCtx>, Path(id): Path<i64>) -> Response {
     match ctx.db.segment_get(id) {
         Some(row) => Json(row).into_response(),
         None => (StatusCode::NOT_FOUND, "segment not found").into_response(),
@@ -702,10 +781,7 @@ async fn api_segment_get(
 }
 
 /// Delete a segment (and its retained audio).
-async fn api_segment_delete(
-    State(ctx): State<AppCtx>,
-    Path(id): Path<i64>,
-) -> Json<serde_json::Value> {
+async fn api_segment_delete(State(ctx): State<AppCtx>, Path(id): Path<i64>) -> Json<serde_json::Value> {
     let ok = ctx.db.segment_delete(id);
     Json(json!({"ok": ok}))
 }
@@ -721,10 +797,7 @@ async fn api_segments_clear(State(ctx): State<AppCtx>) -> Json<serde_json::Value
 /// Re-run optimize + translate for an existing segment, using its current
 /// `text` and the latest DB-configured prompts/vLLM endpoint. Returns the
 /// updated row so the UI can refresh in-place.
-async fn api_segment_rerun(
-    State(ctx): State<AppCtx>,
-    Path(id): Path<i64>,
-) -> Json<serde_json::Value> {
+async fn api_segment_rerun(State(ctx): State<AppCtx>, Path(id): Path<i64>) -> Json<serde_json::Value> {
     let Some(row) = ctx.db.segment_get(id) else {
         return Json(json!({"ok": false, "error": "segment not found"}));
     };
@@ -749,8 +822,9 @@ async fn api_segment_rerun(
         .db
         .config_get("llm.translate_prompt")
         .unwrap_or_else(|| DEFAULT_TRANSLATE_PROMPT.into());
-    let opt_fut = llm(&base, &model, &opt_sys, &text);
-    let tr_fut = llm(&base, &model, &tr_sys, &text);
+    // 管理台触发的 rerun 没有客户端 trace 上下文;不挂 trace 即可(None=不记 span)。
+    let opt_fut = llm(&base, &model, &opt_sys, &text, None);
+    let tr_fut = llm(&base, &model, &tr_sys, &text, None);
     let (opt_res, tr_res) = tokio::join!(opt_fut, tr_fut);
     let mut errs: Vec<String> = Vec::new();
     let optimized = match opt_res {
@@ -790,10 +864,7 @@ async fn api_config_get(State(ctx): State<AppCtx>) -> Json<serde_json::Value> {
         .collect();
     Json(serde_json::Value::Object(m))
 }
-async fn api_config_set(
-    State(ctx): State<AppCtx>,
-    Json(b): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
+async fn api_config_set(State(ctx): State<AppCtx>, Json(b): Json<serde_json::Value>) -> Json<serde_json::Value> {
     if let Some(o) = b.as_object() {
         for (k, v) in o {
             if let Some(s) = v.as_str() {
@@ -1095,7 +1166,10 @@ impl PcmBuf {
     const CAP: usize = 180 * 16000 * 2; // ~180s of 16k mono s16le
 
     fn new() -> Self {
-        Self { data: Vec::new(), base: 0 }
+        Self {
+            data: Vec::new(),
+            base: 0,
+        }
     }
 
     fn push(&mut self, bytes: &[u8]) {
@@ -1149,7 +1223,14 @@ fn pcm16_to_wav(pcm: &[u8]) -> Vec<u8> {
 
 /// OpenAI 兼容 chat completions(指向主机上的 vLLM)。
 /// base/model 由调用方从 DB config 解析(回退 env),提示词同理。
-async fn llm(base: &str, model: &str, sys: &str, user: &str) -> anyhow::Result<String> {
+/// `ctx` Some 时记 `llm_call` span(含 request/response body);None 时纯执行。
+async fn llm(
+    base: &str,
+    model: &str,
+    sys: &str,
+    user: &str,
+    ctx: Option<&TraceContext>,
+) -> anyhow::Result<String> {
     let body = serde_json::json!({
         "model": model,
         "messages": [
@@ -1160,25 +1241,72 @@ async fn llm(base: &str, model: &str, sys: &str, user: &str) -> anyhow::Result<S
         "max_tokens": 256,
         "stream": false
     });
-    let resp = reqwest::Client::new()
-        .post(format!("{}/chat/completions", base))
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<serde_json::Value>()
-        .await?;
-    Ok(resp["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string())
+    let traced = ctx.is_some() && trace::enabled();
+    let start_ms = if traced { trace::now_ms() } else { 0 };
+    let request_body = if traced { body.to_string() } else { String::new() };
+    let result: anyhow::Result<(String, String)> = async {
+        let raw = reqwest::Client::new()
+            .post(format!("{}/chat/completions", base))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw)?;
+        let text = parsed["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok((text, raw))
+    }
+    .await;
+    match result {
+        Ok((text, raw)) => {
+            if traced {
+                if let Some(c) = ctx {
+                    trace::record_llm_call(LlmCall {
+                        ctx: c.child(),
+                        model: model.to_string(),
+                        request_body,
+                        response_body: raw,
+                        start_ms,
+                        end_ms: trace::now_ms(),
+                        status: SpanStatus::Ok,
+                    });
+                }
+            }
+            Ok(text)
+        }
+        Err(e) => {
+            if traced {
+                if let Some(c) = ctx {
+                    trace::record_llm_call(LlmCall {
+                        ctx: c.child(),
+                        model: model.to_string(),
+                        request_body,
+                        response_body: format!("ERROR: {e}"),
+                        start_ms,
+                        end_ms: trace::now_ms(),
+                        status: SpanStatus::Error(e.to_string()),
+                    });
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn send_fatal(sock: &mut WebSocket, code: &str, msg: &str) {
     let _ = sock
         .send(Message::Text(
-            ServerEvent::Error { code: code.into(), message: msg.into(), fatal: true }.json(),
+            ServerEvent::Error {
+                code: code.into(),
+                message: msg.into(),
+                fatal: true,
+            }
+            .json(),
         ))
         .await;
 }

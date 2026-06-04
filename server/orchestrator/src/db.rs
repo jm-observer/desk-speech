@@ -208,11 +208,7 @@ impl Db {
     }
     pub fn audio_get(&self, sid: i64) -> Option<Vec<u8>> {
         self.lock()
-            .query_row(
-                "SELECT wav FROM segment_audio WHERE segment_id=?1",
-                [sid],
-                |r| r.get(0),
-            )
+            .query_row("SELECT wav FROM segment_audio WHERE segment_id=?1", [sid], |r| r.get(0))
             .ok()
     }
     /// Purge audio blobs older than one day. Returns number removed.
@@ -247,12 +243,7 @@ impl Db {
     /// Optimized texts for segments in the same session whose t_end falls in
     /// [before_t - window_sec, before_t). Returned oldest-first so they can
     /// be presented as chronological context to the LLM.
-    pub fn segments_context_before(
-        &self,
-        session_id: &str,
-        before_t: f64,
-        window_sec: f64,
-    ) -> Vec<String> {
+    pub fn segments_context_before(&self, session_id: &str, before_t: f64, window_sec: f64) -> Vec<String> {
         let c = self.lock();
         let mut stmt = match c.prepare(
             "SELECT optimized FROM segments \
@@ -306,17 +297,13 @@ impl Db {
 
     pub fn stats(&self) -> Stats {
         let c = self.lock();
-        let g = |sql: &str| -> f64 {
-            c.query_row(sql, [], |r| r.get::<_, f64>(0)).unwrap_or(0.0)
-        };
+        let g = |sql: &str| -> f64 { c.query_row(sql, [], |r| r.get::<_, f64>(0)).unwrap_or(0.0) };
         Stats {
             sessions: g("SELECT COUNT(*) FROM sessions") as i64,
             segments: g("SELECT COUNT(*) FROM segments") as i64,
             total_recording_sec: g("SELECT COALESCE(SUM(dur_sec),0) FROM sessions"),
-            today_recording_sec: g(
-                "SELECT COALESCE(SUM(dur_sec),0) FROM sessions \
-                 WHERE substr(started_at,1,10)=date('now','localtime')",
-            ),
+            today_recording_sec: g("SELECT COALESCE(SUM(dur_sec),0) FROM sessions \
+                 WHERE substr(started_at,1,10)=date('now','localtime')"),
         }
     }
 
@@ -339,16 +326,13 @@ impl Db {
             .execute("UPDATE speakers SET name=?2 WHERE id=?1", (id, name));
     }
     pub fn speaker_set_enabled(&self, id: i64, enabled: bool) {
-        let _ = self.lock().execute(
-            "UPDATE speakers SET enabled=?2 WHERE id=?1",
-            (id, enabled as i64),
-        );
+        let _ = self
+            .lock()
+            .execute("UPDATE speakers SET enabled=?2 WHERE id=?1", (id, enabled as i64));
     }
     pub fn speakers_list(&self) -> Vec<Speaker> {
         let c = self.lock();
-        let mut stmt = match c
-            .prepare("SELECT id,name,enabled,created_at FROM speakers ORDER BY id")
-        {
+        let mut stmt = match c.prepare("SELECT id,name,enabled,created_at FROM speakers ORDER BY id") {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -365,9 +349,7 @@ impl Db {
     /// (name, embedding) for all enabled speakers — pushed to asr for gating.
     pub fn enabled_voiceprints(&self) -> Vec<(String, Vec<f32>)> {
         let c = self.lock();
-        let mut stmt = match c
-            .prepare("SELECT name,embedding FROM speakers WHERE enabled=1")
-        {
+        let mut stmt = match c.prepare("SELECT name,embedding FROM speakers WHERE enabled=1") {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -379,10 +361,7 @@ impl Db {
         rows.map(|it| {
             it.filter_map(Result::ok)
                 .map(|(n, csv)| {
-                    let v = csv
-                        .split(',')
-                        .filter_map(|x| x.trim().parse::<f32>().ok())
-                        .collect();
+                    let v = csv.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect();
                     (n, v)
                 })
                 .collect()

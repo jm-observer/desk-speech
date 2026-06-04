@@ -13,11 +13,16 @@ RUN mkdir -p $CARGO_HOME && printf '%s\n' \
     '[http]' \
     'timeout = 120' \
     > $CARGO_HOME/config.toml
+# reqwest 0.13 的 rustls 后端拉 aws-lc-rs，其 aws-lc-sys 构建期需 cmake（0.12 的 ring 不需要）。
+RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 
-# ── Layer A: 依赖层。仅当 Cargo.toml/lock 变动时重跑。
+# ── Layer A: 依赖层。仅当 Cargo.toml 变动时重跑。
 # 用 dummy main.rs 触发依赖编译,真实源码不参与,这样改 src/ 不会让 deps 失效。
-COPY Cargo.toml Cargo.lock ./
+# 注:orchestrator 已并入仓库根 workspace,Cargo.lock 移到仓库根;本镜像仍以
+# orchestrator 子目录为上下文独立编译(容器内无父 workspace),由 cargo 现场生成 lock
+# ——与 asr-server 镜像一致。
+COPY Cargo.toml ./
 RUN mkdir -p src && echo 'fn main(){}' > src/main.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \

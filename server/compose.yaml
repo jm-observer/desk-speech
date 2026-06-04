@@ -34,6 +34,8 @@ services:
       - VLLM_BASE=http://host.docker.internal:8085/v1
       - VLLM_MODEL=gemma-4-26B-A4B-it
       - DATA_DIR=/data                  # SQLite persistence (sessions/segments/speakers/config)
+      # 全链路追踪(trace-hub 宿主进程在 :9100)。未设此变量则零追踪、零影响。
+      - TRACE_HUB_ENDPOINT=http://host.docker.internal:9100/v1/spans
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -51,6 +53,12 @@ services:
     restart: unless-stopped
     environment:
       - RUST_LOG=info
+      # 全链路追踪（trace-hub 宿主进程在 :9100）。容器经 host.docker.internal 到宿主。
+      # 未设此变量则 asr-server 全程零追踪、零影响——要关闭追踪删掉本行即可。
+      - TRACE_HUB_ENDPOINT=http://host.docker.internal:9100/v1/spans
+    # trace-hub 在宿主，非 compose 内服务；同 orchestrator 连 vLLM 的方式打通。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # from-source 的 file:// 读的是容器内路径:把宿主 zero 下载目录挂进容器
     # 同路径,否则 from-source 必 404(见 plan §6.3)。下载实际落 downloads/douyin/。
     volumes:

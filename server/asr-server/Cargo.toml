@@ -15,6 +15,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 # Plan C: from-source HTTP 下载（流式 + 体积上限）。rustls 避免 slim 镜像缺 openssl。
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "http2"] }
+# 显式 0.13 与 custom-utils trace 客户端同源（不可 workspace=true：Docker 独立构建无父 workspace）。
+reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "http2"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
+
+# 全链路追踪（trace-hub）。仅当运行时设 TRACE_HUB_ENDPOINT 才启用，未设零运行时影响。
+# 显式 registry 版本（不可 workspace=true：Docker 独立构建无父 workspace）。0.15+ 已上
+# crates.io 且内联了 trace-model，GB10 经 crates 镜像源可拉到。default-features=false 去掉
+# logger 等，只取 trace。
+custom-utils = { version = "0.15", default-features = false, features = ["trace"] }

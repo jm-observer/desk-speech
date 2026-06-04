@@ -12,20 +12,24 @@
 
 FROM rust:1-bookworm AS build
 
-# Crates 国内镜像(GB10 网络)。USTC sparse 源 + 强制 HTTP/1.1:rsproxy.cn 实测会
-# 抽风(<10B/s 超时 + HTTP/2 framing 错误),multiplexing=false 关 HTTP/2 更耐抖动。
-# 留 rsproxy 备注以便回切。
+# Crates 国内镜像(GB10 网络)。改用 rsproxy.cn:USTC 镜像同步较慢,新发布的
+# custom-utils 0.15.0 当时只有 rsproxy 有(USTC 仍停在 0.14.3)。保留
+# multiplexing=false 关 HTTP/2 抗 rsproxy 抖动(<10B/s 超时 / framing 错误)。
+# 备用源(USTC,同步落后时回切):sparse+https://mirrors.ustc.edu.cn/crates.io-index/
 RUN mkdir -p $CARGO_HOME && printf '%s\n' \
     '[source.crates-io]' \
     "replace-with = 'mirror'" \
     '[source.mirror]' \
-    'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' \
+    'registry = "sparse+https://rsproxy.cn/index/"' \
     '[net]' \
     'retry = 10' \
     '[http]' \
     'timeout = 120' \
     'multiplexing = false' \
     > $CARGO_HOME/config.toml
+
+# reqwest 0.13 的 rustls 后端拉 aws-lc-rs，其 aws-lc-sys 构建期需 cmake（0.12 的 ring 不需要）。
+RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY Cargo.toml ./
