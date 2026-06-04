@@ -290,14 +290,30 @@ fn emit_span(
 async fn run_traced(
     state: Arc<AppState>,
     ctx: TraceContext,
-    t0: i64,
+    _t0: i64,
     bytes: Vec<u8>,
     vad_flag: bool,
     source_kind: &'static str,
 ) -> Result<TranscriptionResponse, ApiError> {
     let model = state.args.model.clone();
 
-    // audio_decode 子 span
+    // asr_transcribe 顶层 span：两阶段 emit。anchor 在解码/识别之前发——trace-hub
+    // 立刻能看到 ASR 请求在进行，输入 bytes 大小已可见；长音频（>30s ffmpeg + 多段
+    // VAD + 逐段推理）期间 UI 不再空着。完成后 emit_end 覆盖填全文。
+    let transcribe_scope = trace::enabled().then(|| {
+        let scope = trace::SpanScope::new(ctx.clone(), "asr_transcribe")
+            .with_summary(serde_json::json!({
+                "model": model,
+                "vad": vad_flag,
+                "source_kind": source_kind,
+                "input_bytes": bytes.len(),
+            }))
+            .with_request_body(format!("source={} bytes={}", source_kind, bytes.len()));
+        scope.emit_start();
+        scope
+    });
+
+    // audio_decode 子 span（短，一阶段记完即可）
     let d0 = trace::now_ms();
     let fast = is_fast_wav(&bytes);
     let samples = decode_any(&bytes, &state.args).await?;
@@ -318,25 +334,15 @@ async fn run_traced(
     // 识别（vad_segment + 逐段 asr_decode 在阻塞线程内记）
     let resp = run_transcription(state, samples, vad_flag, ctx.clone()).await?;
 
-    // asr_transcribe 顶层 span（= 本服务子树根，身份即 ctx）
-    if trace::enabled() {
-        let t1 = trace::now_ms();
+    if let Some(scope) = transcribe_scope {
         let segments_count = resp.segments.as_ref().map(|s| s.len()).unwrap_or(0);
-        emit_span(
-            &ctx,
-            "asr_transcribe",
-            t0,
-            t1,
-            serde_json::json!({
-                "model": model,
-                "vad": vad_flag,
-                "source_kind": source_kind,
+        scope.emit_end(
+            Some(resp.text.clone()), // 转写全文 = ASR 的「body」
+            SpanStatus::Ok,
+            Some(serde_json::json!({
                 "text_len": resp.text.chars().count(),
                 "segments_count": segments_count,
-                "total_ms": (t1 - t0).max(0),
-            }),
-            serde_json::Value::Null,
-            Some(resp.text.clone()), // 转写全文 = ASR 的「body」
+            })),
         );
     }
     Ok(resp)

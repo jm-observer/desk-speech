@@ -30,6 +30,7 @@ anyhow = "1"
 # libsqlite3-sys(links="sqlite3") 只允许一份，版本须一致。
 rusqlite = { version = "0.38", features = ["bundled"] }
 # trace-hub 接入：custom-utils trace 客户端（异步非阻塞推送 span+body）。
-# 显式 registry 依赖、不走 workspace=true——Docker 镜像以本子目录为构建上下文
-# 独立编译，容器内无父 workspace，与 asr-server 同理。
-custom-utils = { version = "0.15", default-features = false, features = ["trace"] }
+# 显式 git rev 依赖、不走 workspace=true——Docker 镜像以本子目录为构建上下文
+# 独立编译，容器内无父 workspace。git rev 暂指向含 SpanScope 两阶段 emit API
+# 的提交；待 0.16 发到 crates.io 后改回 version 依赖。
+custom-utils = { git = "https://github.com/jm-observer/custom-utils.git", rev = "6254e583ba356b08918c183d465737b3b4652caa", default-features = false, features = ["trace"] }

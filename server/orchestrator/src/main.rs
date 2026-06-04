@@ -237,6 +237,28 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx, upgrade_remote: Option<
         .map(TraceContext::child)
         .unwrap_or_else(TraceContext::root);
     let hello_flags = (hello.want_optimize, hello.want_translate, hello.want_secondary);
+
+    // ws_stream 两阶段 emit anchor：WS 实时会话可能持续数十秒-数分钟，trace-hub
+    // 在会话进行中就要看到「session 在进行」+ hello 参数；客户端意外断开 / 进程
+    // 崩溃也已落库。close 时下面 emit_end 用同 span_id 覆盖填累计段数 + 时长。
+    let stream_scope = trace::enabled().then(|| {
+        let scope = trace::SpanScope::new(stream_ctx.clone(), "ws_stream")
+            .with_summary(json!({
+                "session_id": session_id.clone(),
+                "want_optimize": hello_flags.0,
+                "want_translate": hello_flags.1,
+                "want_secondary": hello_flags.2,
+            }))
+            .with_request_body(json!({
+                "session_id": session_id.clone(),
+                "language": hello.language.clone(),
+                "want_optimize": hello_flags.0,
+                "want_translate": hello_flags.1,
+                "want_secondary": hello_flags.2,
+            }).to_string());
+        scope.emit_start();
+        scope
+    });
     let _ = sock
         .send(Message::Text(
             ServerEvent::Ready {
@@ -347,38 +369,24 @@ async fn handle_client(mut sock: WebSocket, ctx: AppCtx, upgrade_remote: Option<
     db.session_end(&session_id, started.elapsed().as_secs_f64());
 
     // ws_stream 根 span:本会话子树根。即便 reader 超时也尽量发出供查问题。
-    if trace::enabled() {
+    if let Some(scope) = stream_scope {
         let segments_count = match &reader_out {
             Ok(Ok(n)) => *n,
             _ => 0,
         };
         let asr_model = ctx.db.config_get("asr.model").unwrap_or_default();
         let llm_model = ctx.db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
-        let end_ms = trace::now_ms();
-        trace::record_span(SpanRecord {
-            trace_id: stream_ctx.trace_id.clone(),
-            span_id: stream_ctx.span_id.clone(),
-            parent_span_id: stream_ctx.parent_span_id.clone(),
-            service: String::new(),
-            kind: "ws_stream".into(),
-            flow_name: None,
-            start_ms: stream_start_ms,
-            end_ms,
-            status: SpanStatus::Ok,
-            summary: json!({
-                "session_id": session_id,
+        scope.emit_end(
+            None,
+            SpanStatus::Ok,
+            Some(json!({
                 "segments": segments_count,
-                "total_ms": (end_ms - stream_start_ms).max(0),
                 "asr_model": asr_model,
                 "llm_model": llm_model,
-            }),
-            detail: json!({ "want_optimize": hello_flags.0, "want_translate": hello_flags.1, "want_secondary": hello_flags.2 }),
-            request_body: None,
-            response_body: None,
-            body_truncated: false,
-            links: Vec::new(),
-        });
+            })),
+        );
     }
+    let _ = stream_start_ms; // 兼容旧打日志路径
 }
 
 /// 并发读取 ASR,逐段转发客户端,并按需调 vLLM 优化/翻译。收到 done 发 Done。

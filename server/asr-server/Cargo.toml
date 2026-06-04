@@ -22,6 +22,7 @@ uuid = { version = "1", features = ["v4"] }
 
 # 全链路追踪（trace-hub）。仅当运行时设 TRACE_HUB_ENDPOINT 才启用，未设零运行时影响。
 # 显式 registry 版本（不可 workspace=true：Docker 独立构建无父 workspace）。0.15+ 已上
-# crates.io 且内联了 trace-model，GB10 经 crates 镜像源可拉到。default-features=false 去掉
-# logger 等，只取 trace。
-custom-utils = { version = "0.15", default-features = false, features = ["trace"] }
+# 临时 git rev 依赖以拿到 SpanScope 两阶段 emit API（标准化 request/response 落库
+# 模式）；待 0.16 发布到 crates.io 后改回 version 依赖。Docker 构建时容器从公网拉
+# git rev，命中容器内 cargo git cache。
+custom-utils = { git = "https://github.com/jm-observer/custom-utils.git", rev = "6254e583ba356b08918c183d465737b3b4652caa", default-features = false, features = ["trace"] }
