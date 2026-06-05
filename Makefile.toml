@@ -11,12 +11,17 @@ alias = "prod"
 
 [tasks.bundle]
 description = "Tauri release 打包：前端构建 + Tauri release bundle（NSIS .exe）"
-command = "npm"
-args = ["run", "build"]
+script_runner = "@shell"
+script = "npm run build"
 
 [tasks.release]
 description = "Tauri 桌面端发布打包（bundle 别名）"
 alias = "bundle"
+
+[tasks.app]
+description = "Tauri build：只编译桌面程序可执行文件，不打安装包（--no-bundle）"
+script_runner = "@shell"
+script = "npx tauri build --no-bundle"
 
 [tasks.check]
 description = "Run all checks: fmt, clippy, and tests"
