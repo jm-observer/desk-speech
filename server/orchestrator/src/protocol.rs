@@ -19,6 +19,12 @@ pub struct Hello {
     pub want_translate: bool,
     #[serde(default)]
     pub want_secondary: bool,
+    /// 合并间隔(毫秒):相邻 VAD 段音频时间间隔小于此值时,服务端把它们的
+    /// 原始 ASR 累积进同一条「合并链」整体润色(按 chain_id 回发,客户端整体
+    /// 替换),从根上避免历史上文喂回造成的复制重复。与客户端复制 stitch 用
+    /// 同一个值。0 或缺省 = 关闭合并,回到逐段独立 + 历史上下文注入的旧行为。
+    #[serde(default)]
+    pub merge_window_ms: u64,
     /// 可选 W3C traceparent。客户端无法在 WS 升级时塞请求头(浏览器限制)时,
     /// 走 hello 帧字段兜底,串到 zero/桌面端起点的同一棵 trace。
     #[serde(default)]

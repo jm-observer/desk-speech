@@ -417,6 +417,27 @@ async fn asr_reader(
     fn time_key(t0: f64, t1: f64) -> (i64, i64) {
         ((t0 * 1000.0).round() as i64, (t1 * 1000.0).round() as i64)
     }
+    // 合并模式:断链边界 = 客户端「合并间隔」(hello.merge_window_ms,与
+    // 客户端复制 stitch 用同一个值),相邻段音频时间间隔 >= 间隔即开新链。
+    // 本会话内固定(改间隔需重连,语义同 want_*)。0 = 关闭合并(逐段独立 +
+    // 历史上下文注入的旧行为),与客户端 merge_window_ms=0 关 stitch 一致。
+    let merge_window_s = hello.merge_window_ms as f64 / 1000.0;
+    let merge_on = hello.merge_window_ms > 0;
+    // 当前活跃的合并链:累积相邻 VAD 段的原始 ASR,段间间隔超阈值即换新。
+    struct ActiveChain {
+        id: u64,
+        asr: String,
+        t_start: f64,
+        t_end: f64,
+    }
+    let mut chain: Option<ActiveChain> = None;
+    // chain_id -> 已发出 Optimized / Translated 的最大输入字符数。合并模式下
+    // 同一链随每个新段重复触发润色,并发结果可能乱序到达;只放行"输入不短
+    // 于已发出"的结果,保证较短的旧结果不会覆盖较长的新结果(latest-wins)。
+    let opt_emitted: Arc<std::sync::Mutex<HashMap<u64, usize>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let tr_emitted: Arc<std::sync::Mutex<HashMap<u64, usize>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
     while let Some(Ok(msg)) = asr_rx.next().await {
         let TMessage::Text(t) = msg else { continue };
         let v: serde_json::Value = match serde_json::from_str(&t) {
@@ -425,15 +446,43 @@ async fn asr_reader(
         };
         match v.get("type").and_then(|x| x.as_str()) {
             Some("segment") => {
-                let id = SEG_ID.fetch_add(1, Ordering::Relaxed);
                 seg_count += 1;
-                let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let raw_text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
                 let t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let t1 = v.get("t_end").and_then(|x| x.as_f64()).unwrap_or(0.0);
                 let speaker = v.get("speaker").and_then(|x| x.as_str());
-                db.segment_upsert(id as i64, &session_id, &text, None, None, t0, t1, speaker);
 
-                // asr_segment 子 span:每段一条,response_body = 该段转写文本。
+                // 合并模式:把本段并入当前链(与上段间隔超阈值则开新链),id 用
+                // 链 id,对外文本/时间范围用整条链;关闭时退化为每段一个新 id(旧行为)。
+                let (id, surface_text, seg_t0, seg_t1) = if merge_on {
+                    // 断链:本段 t0 与上段 t_end 的音频间隔 >= 合并间隔(与客户端
+                    // next_clipboard_text 的 `< window` 合并条件镜像)。
+                    let need_new = match &chain {
+                        Some(ch) => (t0 - ch.t_end) >= merge_window_s,
+                        None => true,
+                    };
+                    if need_new {
+                        let cid = SEG_ID.fetch_add(1, Ordering::Relaxed);
+                        chain = Some(ActiveChain {
+                            id: cid,
+                            asr: String::new(),
+                            t_start: t0,
+                            t_end: t1,
+                        });
+                    }
+                    let ch = chain.as_mut().expect("chain set above");
+                    ch.asr.push_str(&raw_text);
+                    ch.t_end = t1;
+                    (ch.id, ch.asr.clone(), ch.t_start, ch.t_end)
+                } else {
+                    let sid = SEG_ID.fetch_add(1, Ordering::Relaxed);
+                    (sid, raw_text.clone(), t0, t1)
+                };
+                db.segment_upsert(
+                    id as i64, &session_id, &surface_text, None, None, seg_t0, seg_t1, speaker,
+                );
+
+                // asr_segment 子 span:每段一条,response_body = 该段(原始)转写文本。
                 if trace::enabled() {
                     let seg_span = stream_ctx.child();
                     let dur_ms = ((t1 - t0) * 1000.0).round().max(0.0) as i64;
@@ -450,21 +499,20 @@ async fn asr_reader(
                         summary: json!({
                             "seg_index": seg_count,
                             "dur_ms": dur_ms,
-                            "text_len": text.chars().count(),
+                            "text_len": raw_text.chars().count(),
                             "t_start": t0,
                             "t_end": t1,
                         }),
                         detail: serde_json::Value::Null,
                         request_body: None,
-                        response_body: Some(text.clone()),
+                        response_body: Some(raw_text.clone()),
                         body_truncated: false,
                         links: Vec::new(),
                     });
                 }
-                // Remember (t0,t1)→id so the asr's later `secondary` event
-                // (same VAD window, possibly arriving after several other
-                // segments) can be paired back to this client segment.
-                if hello.want_secondary {
+                // Remember (t0,t1)→id so the asr's later `secondary` event can be
+                // paired back. 合并模式不跑次模型对比(链与逐段对照语义冲突)。
+                if hello.want_secondary && !merge_on {
                     seg_by_time.insert(time_key(t0, t1), id);
                 }
                 // forward the segment immediately — never blocked by LLM
@@ -472,21 +520,22 @@ async fn asr_reader(
                     &cli_tx,
                     ServerEvent::Segment {
                         id,
-                        text: text.clone(),
-                        t_start: Some(t0 as f32),
-                        t_end: Some(t1 as f32),
+                        text: surface_text.clone(),
+                        t_start: Some(seg_t0 as f32),
+                        t_end: Some(seg_t1 as f32),
                         speaker: speaker.map(str::to_string),
                     }
                     .json(),
                 )
                 .await;
 
-                // 逐段音频留存(尽力):按 [t0,t1] 从会话 PCM 缓冲切片存 WAV。
-                // 16k mono s16le => 32000 B/s;字节对齐到采样边界。
+                // 音频留存(尽力):按 [seg_t0,seg_t1] 从会话 PCM 缓冲切片存 WAV。
+                // 合并模式下即整条链区间(同 id 重切覆盖)。16k mono s16le =>
+                // 32000 B/s;字节对齐到采样边界。
                 {
                     const BPS: f64 = 16000.0 * 2.0;
-                    let a = (((t0 * BPS) as usize) / 2) * 2;
-                    let b = ((t1 * BPS).ceil() as usize).div_ceil(2) * 2;
+                    let a = (((seg_t0 * BPS) as usize) / 2) * 2;
+                    let b = ((seg_t1 * BPS).ceil() as usize).div_ceil(2) * 2;
                     let wav = pcm_buf.lock().ok().and_then(|buf| buf.slice_wav(a, b));
                     if let Some(w) = wav {
                         db.audio_put(id as i64, &w);
@@ -510,17 +559,24 @@ async fn asr_reader(
                         db.config_get("llm.translate_prompt")
                             .unwrap_or_else(|| DEFAULT_TRANSLATE_PROMPT.into())
                     });
-                    // 取本段开始前 20 秒内的历史优化文本作上下文(同步 DB 读,开销极小)。
-                    let ctx_texts = if hello.want_optimize {
+                    // 合并模式以整条链原始文本为输入,不注入历史上下文(链本身即
+                    // 上下文,且不喂回润色结果,从根上断开滚雪球);关闭时沿用
+                    // "近 20s 历史优化文本"作上下文。
+                    let ctx_texts = if hello.want_optimize && !merge_on {
                         db.segments_context_before(&session_id, t0, 20.0)
                     } else {
                         Vec::new()
                     };
+                    // 润色/翻译的输入:合并模式=整条链原始文本,否则=本段文本。
+                    let prim = surface_text.clone();
+                    let prim_len = prim.chars().count();
                     let db2 = db.clone();
                     let tx2 = cli_tx.clone();
                     let llm_ctx = stream_ctx.clone();
+                    let opt_emitted2 = opt_emitted.clone();
+                    let tr_emitted2 = tr_emitted.clone();
                     llm_tasks.push(tokio::spawn(async move {
-                        let opt_user = build_optimize_user_msg(&ctx_texts, &text, None);
+                        let opt_user = build_optimize_user_msg(&ctx_texts, &prim, None);
                         let opt_fut = async {
                             match &opt_sys {
                                 Some(s) => llm(&base, &model, s, &opt_user, Some(&llm_ctx)).await.ok(),
@@ -529,23 +585,51 @@ async fn asr_reader(
                         };
                         let tr_fut = async {
                             match &tr_sys {
-                                Some(s) => llm(&base, &model, s, &text, Some(&llm_ctx)).await.ok(),
+                                Some(s) => llm(&base, &model, s, &prim, Some(&llm_ctx)).await.ok(),
                                 None => None,
                             }
                         };
                         let (opt, en) = tokio::join!(opt_fut, tr_fut);
+                        // 合并模式下放行 latest-wins:只有"输入不短于已发出"才落库/回发,
+                        // 防并发的较短旧结果覆盖较长新结果。非合并模式每 id 唯一,直接放行。
                         if let Some(opt) = opt {
-                            db2.segment_set_optimized(id as i64, &opt);
-                            send(&tx2, ServerEvent::Optimized { r#ref: id, text: opt }.json()).await;
+                            let pass = !merge_on || {
+                                let mut g = opt_emitted2.lock().unwrap();
+                                if prim_len >= g.get(&id).copied().unwrap_or(0) {
+                                    g.insert(id, prim_len);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if pass {
+                                db2.segment_set_optimized(id as i64, &opt);
+                                send(&tx2, ServerEvent::Optimized { r#ref: id, text: opt }.json()).await;
+                            }
                         }
                         if let Some(en) = en {
-                            db2.segment_set_english(id as i64, &en);
-                            send(&tx2, ServerEvent::Translated { r#ref: id, text: en }.json()).await;
+                            let pass = !merge_on || {
+                                let mut g = tr_emitted2.lock().unwrap();
+                                if prim_len >= g.get(&id).copied().unwrap_or(0) {
+                                    g.insert(id, prim_len);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if pass {
+                                db2.segment_set_english(id as i64, &en);
+                                send(&tx2, ServerEvent::Translated { r#ref: id, text: en }.json()).await;
+                            }
                         }
                     }));
                 }
             }
             Some("secondary") => {
+                // 合并模式不做次模型对比(逐段对照与合并链语义冲突),丢弃。
+                if merge_on {
+                    continue;
+                }
                 // Pair the secondary recognition back to its primary segment
                 // id via (t_start,t_end). If asr races ahead of orchestrator
                 // (shouldn't happen — primary always emitted first) we just

@@ -43,6 +43,53 @@ struct AutoCopyAccum {
     t_end: f64,
     text: String,
     ref_id: i64,
+    /// 当前 `ref_id` 拼入之前的累计文本（即"链上前缀"）。空串表示当前段
+    /// 就是链头。Re-polish / 任何同 id 重发 Optimized 时,需要替换的只是
+    /// 本段贡献,链上前面的内容必须保留 —— 否则 acc 会被重置成只剩本段,
+    /// 后续邻段就接不上历史链了。
+    prefix: String,
+}
+
+/// 找出 `head` 后缀与 `tail` 前缀最长的重叠 char 数(>= MIN),返回剥掉
+/// 重叠后的 tail。按 char 对齐,中文安全;扫描上限 MAX,长链不会退化。
+///
+/// 背景:orchestrator 给润色 LLM 注入了近 20s 上文,LLM 偶尔会把上文一并
+/// 输出。客户端 stitch 若不去重,就会"复制重复"。最小重叠 2 char 避免
+/// "的""了"这类单字偶合误判。
+fn strip_overlap_prefix(head: &str, tail: &str) -> String {
+    const MAX_OVERLAP_CHARS: usize = 200;
+    const MIN_OVERLAP_CHARS: usize = 2;
+    let head_chars: Vec<char> = head.chars().collect();
+    let tail_chars: Vec<char> = tail.chars().collect();
+    let max_k = head_chars
+        .len()
+        .min(tail_chars.len())
+        .min(MAX_OVERLAP_CHARS);
+    if max_k < MIN_OVERLAP_CHARS {
+        return tail.to_string();
+    }
+    for k in (MIN_OVERLAP_CHARS..=max_k).rev() {
+        if head_chars[head_chars.len() - k..] == tail_chars[..k] {
+            return tail_chars[k..].iter().collect();
+        }
+    }
+    tail.to_string()
+}
+
+/// 把 `head` 和 `tail` 拼起来,先剥掉 head 尾部与 tail 头部的重叠。无重叠
+/// 用空格分隔(沿用旧行为);有重叠则视为连续延续,直接接续,不插空格。
+fn join_dedup(head: &str, tail: &str) -> String {
+    let rest = strip_overlap_prefix(head, tail);
+    if rest.is_empty() {
+        // tail 完全被 head 包含 —— 无需追加
+        head.to_string()
+    } else if rest.chars().count() == tail.chars().count() {
+        // 无重叠,常规拼接
+        format!("{} {}", head, tail)
+    } else {
+        // 部分重叠,延续不加空格
+        format!("{}{}", head, rest)
+    }
 }
 
 /// Decide what to actually paste into the clipboard for this segment.
@@ -50,14 +97,20 @@ struct AutoCopyAccum {
 /// Merges with the previous auto-copy when:
 /// - the gap **on the audio timeline** (`t_start - prev.t_end`) is below
 ///   `window` — i.e. the user actually spoke them close together;
-/// - the segment id differs (not a re-emit of the same segment);
 /// - prev text is non-empty.
+///
+/// 同 `ref_id` 再次到达（re-polish / 重发）时,不再把 acc 重置成"只剩当前段
+/// 的新文本",而是用 `prev.prefix + new_text` 替换本段贡献,保留前缀;下一
+/// 邻段进来时仍能接上完整链。
+///
+/// 拼接时调 `join_dedup` 去掉 head 尾 / tail 头的重叠,避免润色 LLM 把
+/// 上文带进输出后,客户端再 stitch 一次造成"复制重复"。
 ///
 /// Using the audio timeline (not `Instant::elapsed`) means slow vLLM
 /// optimization no longer breaks merging: two sentences spoken 1 s apart
 /// stitch together even if each took 10 s to optimize. A zero `window`
 /// disables merging entirely. Mutates `acc` in place to remember the
-/// pasted text and `t_end` for the next call.
+/// pasted text, `t_end` and the chain prefix for the next call.
 fn next_clipboard_text(
     acc: &mut Option<AutoCopyAccum>,
     text: &str,
@@ -67,20 +120,30 @@ fn next_clipboard_text(
     window: Duration,
 ) -> String {
     let window_secs = window.as_secs_f64();
-    let merged = match acc.as_ref() {
-        Some(prev)
-            if (t_start - prev.t_end) < window_secs
-                && prev.ref_id != ref_id
-                && !prev.text.is_empty() =>
-        {
-            format!("{} {}", prev.text, text)
+    // 决定本次的"链上前缀"和最终输出:
+    // - 同 ref_id 重发 → 沿用 prev.prefix,输出 join_dedup(prefix, text)
+    // - 新 ref_id 且 gap 在窗口内 → 新前缀 = prev.text,输出 join_dedup(prev.text, text)
+    // - 其它(超窗 / 首段 / prev 空) → 无前缀,输出 text
+    let (prefix, merged) = match acc.as_ref() {
+        Some(prev) if prev.ref_id == ref_id => {
+            if prev.prefix.is_empty() {
+                (String::new(), text.to_string())
+            } else {
+                (prev.prefix.clone(), join_dedup(&prev.prefix, text))
+            }
         }
-        _ => text.to_string(),
+        Some(prev)
+            if (t_start - prev.t_end) < window_secs && !prev.text.is_empty() =>
+        {
+            (prev.text.clone(), join_dedup(&prev.text, text))
+        }
+        _ => (String::new(), text.to_string()),
     };
     *acc = Some(AutoCopyAccum {
         t_end,
         text: merged.clone(),
         ref_id,
+        prefix,
     });
     merged
 }
@@ -355,6 +418,11 @@ pub(crate) async fn run_remote_session(
     // Dual-model comparison opt-in: read once at session start. Toggling
     // mid-session requires a stop/start (matches the URL-change reconnect).
     let want_secondary = read_lock(&llm_settings).want_secondary;
+    // 合并间隔(毫秒):随 hello 发给服务端做「合并链」断链边界 —— 服务端把
+    // 间隔内的相邻段累积成一条链整体润色,从根上消除复制重复。与客户端复制
+    // stitch 用同一个值。在 hello 时读一次,改间隔需停止再开始录音才对服务端
+    // 生效(客户端复制 stitch 仍按每事件 live 读取)。
+    let merge_window_ms = read_lock(&llm_settings).merge_window_ms;
     let stop = stop_signal;
 
     let mut pcm_rx = match spawn_capture(device_name, Arc::clone(&stop)) {
@@ -373,6 +441,7 @@ pub(crate) async fn run_remote_session(
         "format": "pcm_s16le", "language": language,
         "want_optimize": true, "want_translate": true,
         "want_secondary": want_secondary,
+        "merge_window_ms": merge_window_ms,
     })
     .to_string();
 
@@ -679,6 +748,90 @@ mod tests {
         next_clipboard_text(&mut acc, "二", 2, 1.5, 2.5, w(3000));
         let out = next_clipboard_text(&mut acc, "三", 3, 3.0, 4.0, w(3000));
         assert_eq!(out, "一 二 三");
+    }
+
+    // ---- join_dedup / strip_overlap_prefix: 去重拼接 ----
+
+    #[test]
+    fn dedup_no_overlap_falls_back_to_space_join() {
+        assert_eq!(join_dedup("你好", "世界"), "你好 世界");
+    }
+
+    #[test]
+    fn dedup_strips_repeated_tail_prefix() {
+        // 润色 LLM 把上文一并输出:head 末尾 "今天天气真好。" 与 tail 开头一致。
+        let out = join_dedup("今天天气真好。", "今天天气真好。然后我们出门了。");
+        assert_eq!(out, "今天天气真好。然后我们出门了。");
+    }
+
+    #[test]
+    fn dedup_partial_overlap_continues_without_space() {
+        // head 尾巴 "我们" 与 tail 头部 "我们" 重合。
+        let out = join_dedup("今天我们", "我们去公园");
+        assert_eq!(out, "今天我们去公园");
+    }
+
+    #[test]
+    fn dedup_tail_fully_contained_yields_head() {
+        // tail 完全是 head 末尾,返回 head 不变(不重复追加)。
+        let out = join_dedup("一 二 三", "二 三");
+        assert_eq!(out, "一 二 三");
+    }
+
+    #[test]
+    fn dedup_ignores_single_char_overlap() {
+        // 仅 1 char 重合("的""了"这类)不应触发去重,避免误判。
+        let out = join_dedup("我吃了", "了不起");
+        assert_eq!(out, "我吃了 了不起");
+    }
+
+    #[test]
+    fn autocopy_dedupes_llm_context_leakage() {
+        // 端到端:第二段润色输出把第一段也带了进来,客户端拼接必须去重。
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "今天天气真好。", 1, 0.0, 2.0, w(3000));
+        // 第二段 LLM 把第一段也带进来了
+        let out = next_clipboard_text(
+            &mut acc,
+            "今天天气真好。然后我们出门了。",
+            2,
+            2.5,
+            5.0,
+            w(3000),
+        );
+        assert_eq!(out, "今天天气真好。然后我们出门了。");
+        // 第三段正常输出,继续拼接,不再重复
+        let out = next_clipboard_text(&mut acc, "公园人很多。", 3, 5.5, 7.0, w(3000));
+        assert_eq!(out, "今天天气真好。然后我们出门了。 公园人很多。");
+    }
+
+    #[test]
+    fn same_ref_reemit_preserves_chain_prefix() {
+        // 模拟次模型 re-polish:同一段的 Optimized 事件第二次到达,新文本
+        // 是"A v2",前面已经 stitched 的链("一 二")必须保留,后续邻段进来
+        // 时仍能接上完整链。这是修复 next_clipboard_text 不再把 acc 重置
+        // 成只剩本段的回归。
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "一", 1, 0.0, 1.0, w(3000));
+        next_clipboard_text(&mut acc, "二", 2, 1.5, 2.5, w(3000));
+        // ref=2 同 id 重发 v2 → 应输出 "一 二v2",不是孤零零的 "二v2"
+        let out = next_clipboard_text(&mut acc, "二v2", 2, 1.5, 2.6, w(3000));
+        assert_eq!(out, "一 二v2");
+        // 紧接着邻段 3 进来 → 必须接到完整链尾,而不是只接到 "二v2"
+        let out = next_clipboard_text(&mut acc, "三", 3, 3.0, 4.0, w(3000));
+        assert_eq!(out, "一 二v2 三");
+    }
+
+    #[test]
+    fn same_ref_reemit_at_chain_head_replaces_text() {
+        // 链头段(prefix="")自己重发时,无前缀可保留,直接换成新文本。
+        let mut acc = None;
+        next_clipboard_text(&mut acc, "A", 1, 0.0, 2.0, w(3000));
+        let out = next_clipboard_text(&mut acc, "A v2", 1, 0.0, 2.0, w(3000));
+        assert_eq!(out, "A v2");
+        // 邻段接上时也应从 "A v2" 起拼。
+        let out = next_clipboard_text(&mut acc, "B", 2, 2.5, 3.5, w(3000));
+        assert_eq!(out, "A v2 B");
     }
 
     #[test]

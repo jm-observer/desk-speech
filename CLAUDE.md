@@ -87,6 +87,38 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
   `asr.sentence_gap_ms`, `asr.gate_to_enrolled`, `vllm.model`, `vllm.base`,
   `llm.optimize_prompt`, `llm.translate_prompt`). asr polls `/api/asr-config` every
   ~15s — most changes apply without redeploy.
+- **合并链模式（断链边界 = 客户端「合并间隔」`merge_window_ms`，主路径）**: 客户端把
+  `merge_window_ms`(默认 3000ms,与复制 stitch 同一个值)随 `hello` 发给服务端。
+  orchestrator 把**相邻**(`t0 - 上段t_end < 合并间隔`)VAD 段的**原始 ASR** 累积进一条
+  「合并链」,间隔超阈值即开新链(`relay_asr` 里的 `ActiveChain`,边界与客户端
+  `next_clipboard_text` 的 `< window` 合并条件镜像)。链 id 复用为该链首段的 `SEG_ID`,
+  `segment` / `optimized` / `translated` 事件全部以 `ref=chain_id` 回发,**整条链一并润色**
+  (输入是链的累积原始文本,**不再注入 `segments_context_before` 历史上文**),客户端按
+  id 整体替换。这从根上断开了"润色回显被当上文喂回 → 再回显"的滚雪球,是"复制重复"
+  的根因修复。同链随每个新段重复触发润色,并发结果用 `opt_emitted`/`tr_emitted`
+  的 latest-wins(输入字符数不短于已发出才放行)防乱序覆盖。合并模式下**次模型对比
+  被禁用**(逐段对照与链语义冲突)。`merge_window_ms=0` 关闭合并(与客户端关 stitch
+  一致),回到下面的旧上下文路径。改间隔需重连服务端才生效(hello 时读一次,语义同
+  `want_*`;客户端复制 stitch 仍每事件 live 读取)。
+- **润色 LLM 带历史上下文（旧路径，仅 `merge_max_chars=0` 时生效）**: orchestrator 调润色
+  前会把近 20s 内的历史已优化文本作为 user message 的「【近期上文，仅供参考，禁止
+  输出】」段拼进去 (`build_optimize_user_msg` + `segments_context_before`)。prompt 写了
+  禁止输出上文,但 LLM **不保证遵守**——Optimized 事件文本可能含前段片段。**任何在
+  客户端做拼接/stitch/合并的功能(如 `next_clipboard_text` 自动复制链)都必须考虑
+  去重**,否则会出现"复制重复"。次模型 re-polish 也走同一路径,同样带上下文。
+  (合并链模式开启后此路径不再走,但客户端 `join_dedup` 仍保留:既给旧路径兜底,
+  也用于合并模式下**跨链** stitch 的去重。)
+  - **现行去重方式**:`src-tauri/src/commands/remote.rs` 的 `join_dedup` / `strip_overlap_prefix`
+    按 char 找 head 后缀 与 tail 前缀的最长重叠(`MIN_OVERLAP_CHARS=2` 避免单字
+    误判,`MAX_OVERLAP_CHARS=200` 防退化);有重叠续接不插空格,无重叠空格拼,
+    tail 全含返 head 不追加。`AutoCopyAccum.prefix` 字段独立记录"当前 ref 之前的
+    链上累计",同 ref 重发用 `join_dedup(prefix, new_text)` 替换本段贡献保链
+    (回归锁:`same_ref_reemit_preserves_chain_prefix` 测试)。
+  - **已知误判方向**:用户连说两次的短词(如「你好你好」)可能被当成 LLM 漏出的
+    上文剥掉,表现为"少字"。中文典型句长 5+ char,实际碰撞低,2-char 阈值是
+    刻意选的折中。若日后出现"少字"症状,先怀疑 `join_dedup`:把 `MIN_OVERLAP_CHARS`
+    调到 4 试,或加日志打 head 尾/tail 头/剥掉 char 数。详见
+    `~/.claude/projects/D--git-streaming-speech/memory/polish_llm_context_contract.md`。
 - **次模型对比识别**: 桌面端 ControlPanel 开关「次模型对比识别」(默认关) →
   hello.want_secondary=true。orchestrator 给 asr 发 `{type:config,want_secondary}`,
   asr 在 finalize() 主段 emit 之后 run_in_executor 跑 `asr.secondary_model`,以
