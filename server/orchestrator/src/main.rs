@@ -431,6 +431,9 @@ async fn asr_reader(
         t_end: f64,
     }
     let mut chain: Option<ActiveChain> = None;
+    // chain_id -> 该链已累积的次模型识别文本。合并模式下次模型按 VAD 段产出,
+    // 多段属同一链,这里按链累积后整体展示(同 primary 链的累积方式)。
+    let mut sec_accum: HashMap<u64, String> = HashMap::new();
     // chain_id -> 已发出 Optimized / Translated 的最大输入字符数。合并模式下
     // 同一链随每个新段重复触发润色,并发结果可能乱序到达;只放行"输入不短
     // 于已发出"的结果,保证较短的旧结果不会覆盖较长的新结果(latest-wins)。
@@ -511,8 +514,9 @@ async fn asr_reader(
                     });
                 }
                 // Remember (t0,t1)→id so the asr's later `secondary` event can be
-                // paired back. 合并模式不跑次模型对比(链与逐段对照语义冲突)。
-                if hello.want_secondary && !merge_on {
+                // paired back。合并模式下多段共享 chain_id,次模型识别按链累积展示
+                // (但不跑 re-polish —— 逐段双候选与整链语义冲突)。
+                if hello.want_secondary {
                     seg_by_time.insert(time_key(t0, t1), id);
                 }
                 // forward the segment immediately — never blocked by LLM
@@ -626,12 +630,8 @@ async fn asr_reader(
                 }
             }
             Some("secondary") => {
-                // 合并模式不做次模型对比(逐段对照与合并链语义冲突),丢弃。
-                if merge_on {
-                    continue;
-                }
-                // Pair the secondary recognition back to its primary segment
-                // id via (t_start,t_end). If asr races ahead of orchestrator
+                // Pair the secondary recognition back to its primary segment /
+                // chain id via (t_start,t_end). If asr races ahead of orchestrator
                 // (shouldn't happen — primary always emitted first) we just
                 // drop the event rather than guess.
                 let t0 = v.get("t_start").and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -642,6 +642,25 @@ async fn asr_reader(
                     tracing::warn!("[orch] secondary without matching segment t=[{:.3},{:.3}]", t0, t1);
                     continue;
                 };
+                // Comparison done for this window — free the map entry.
+                seg_by_time.remove(&time_key(t0, t1));
+
+                // 合并模式:按链累积次模型文本后整体展示(客户端整段替换);不跑
+                // re-polish(逐段双候选与整链语义冲突)。非合并模式:逐段展示 + 可选
+                // 双候选 re-polish(旧行为)。
+                if merge_on {
+                    let acc = sec_accum.entry(seg_id).or_default();
+                    acc.push_str(&text);
+                    let full = acc.clone();
+                    db.segment_set_secondary(seg_id as i64, &full);
+                    send(
+                        &cli_tx,
+                        ServerEvent::Secondary { r#ref: seg_id, text: full, kind }.json(),
+                    )
+                    .await;
+                    continue;
+                }
+
                 db.segment_set_secondary(seg_id as i64, &text);
                 send(
                     &cli_tx,
@@ -653,8 +672,6 @@ async fn asr_reader(
                     .json(),
                 )
                 .await;
-                // Comparison done for this window — free the map entry.
-                seg_by_time.remove(&time_key(t0, t1));
 
                 // 若开启润色,且次模型结果与主模型不同,则以主+次双候选触发 re-polish。
                 // 客户端收到第二个 Optimized{ref} 时会覆盖更新,体验与首次优化一致。
