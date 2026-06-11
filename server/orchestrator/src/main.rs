@@ -445,7 +445,12 @@ async fn asr_reader(
         let TMessage::Text(t) = msg else { continue };
         let v: serde_json::Value = match serde_json::from_str(&t) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                // 静默丢弃会把协议/asr bug 藏起来——截断打 warn 便于排障。
+                let snippet: String = t.chars().take(200).collect();
+                tracing::warn!("[orch] unparseable asr message ({e}): {snippet}");
+                continue;
+            }
         };
         match v.get("type").and_then(|x| x.as_str()) {
             Some("segment") => {
