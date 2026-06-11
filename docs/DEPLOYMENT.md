@@ -13,9 +13,10 @@ GB10  192.168.0.68  (NVIDIA GB10 / arm64 / CUDA13 / Ubuntu24 / Docker)
    ├─ orchestrator 容器   :8090  WS 编排 + SQLite + Web 管理台 + /api/*
    ├─ asr 容器            :9100/9101(内部)  FunASR 流式识别 + 声纹门控 + /embed
    ├─ vLLM 主机进程       :8085  gemma-4-26B-A4B-it(润色/翻译)
-   └─ TTS bake-off(独立,与上面隔离)
-        ├─ tts-cosyvoice-1   :8095  CosyVoice 2(零样本+情感)
-        └─ tts-gptsovits-1   :8096  GPT-SoVITS v2Pro(零样本+每人微调)
+   ├─ asr-server 容器     :8091  sherpa-onnx OpenAI 兼容 HTTP(profile,外部调用)
+   └─ TTS(独立,与上面隔离;按需启动)
+        └─ cosyvoice       :8095  CosyVoice 2(bake-off 胜出;GPT-SoVITS
+                                  2026-05-28 弃用,已从 compose 移除)
 ```
 
 ## 2. GB10 接入与目录
@@ -40,8 +41,9 @@ GB10  192.168.0.68  (NVIDIA GB10 / arm64 / CUDA13 / Ubuntu24 / Docker)
 | orchestrator | 8090 | 是(客户端 WS + Web 台 + /api) | `orch-data:/data` |
 | asr | 9100/9101 | 否(内部) | `~/funasr-prep/models:/models:ro` |
 | vLLM | 8085 | 主机 | — |
-| CosyVoice 2 | 8095 | 是 | `~/funasr-prep/models:/models:ro`, `~/tts-io:/io` |
-| GPT-SoVITS | 8096 | 是 | `~/gpt-sovits-assets/*`, `~/gpt-sovits-cache/*`, `~/tts-io:/io` |
+| asr-server | 8091(仅本机 127.0.0.1) | 外部 HTTP 调用 | `~/asr-server-models:/models:ro` |
+| CosyVoice 2 | 8095(按需启动) | 是 | `~/funasr-prep/models:/models:ro`, `~/tts-io:/io`, `~/tts-voices:/voices:ro` |
+| ~~GPT-SoVITS~~ | ~~8096~~ | 已弃用(2026-05-28) | 卷与归档见 `server/tts/STATUS.md` |
 
 ## 4. 数据存储(SQLite)
 
@@ -116,13 +118,17 @@ vLLM 是主机进程(不在 compose),维持现状,不随上面重启。
 ### 5.2 TTS 栈(独立,不影响生产)
 
 ```bash
+# 同步改动文件(发布脚本不覆盖 tts,手动 scp)
+scp server/tts/<改动文件> fengqi@192.168.0.68:~/server/tts/
+# GB10 上:
 cd ~/server/tts
-# 日常部署/重启/掉电恢复 —— 用已构建镜像,不重建、不联网
+# 日常启动/掉电恢复 —— 用已构建镜像,不重建、不联网
 docker compose -f compose.tts.yaml up -d
-# 仅代码/Dockerfile 改动时才重建(GPT-SoVITS 重建需先备好 vendor 源码,见 server/tts/README.md)
-docker compose -f compose.tts.yaml build <cosyvoice|gptsovits>
-docker compose -f compose.tts.yaml up -d <cosyvoice|gptsovits>
+# 仅代码/Dockerfile 改动时才重建(cosy_server.py 在末层,缓存命中下秒级)
+docker compose -f compose.tts.yaml build cosyvoice
 ```
+容器**按需启动**(不用时 stop 省 GPU);启动即预热(权重 + dummy 合成,
+`/health` 可达即就绪,详见 `server/tts/API.md`)。
 
 ### 5.3 构建通用约定
 
@@ -158,11 +164,11 @@ curl -s http://192.168.0.68:8090/api/asr-config   # asr 运行配置
 # Web 管理台:浏览器 http://192.168.0.68:8090/
 ssh fengqi@192.168.0.68 'cd ~/server && docker compose logs --tail=40 asr'   # [asr][cfg]/[seg]/[spk]
 
-# TTS
-curl -s http://192.168.0.68:8095/health           # CosyVoice
-curl -s -o /tmp/t.wav -X POST http://192.168.0.68:8096/tts \
-  -H 'Content-Type: application/json' \
-  -d '{"text":"测试","text_lang":"zh","ref_audio_path":"/io/ref_sample.wav","prompt_text":"参考","prompt_lang":"zh"}'
+# asr-server(仅 GB10 本机可达)
+ssh fengqi@192.168.0.68 'curl -s http://127.0.0.1:8091/healthz'
+
+# TTS(容器启动后)
+curl -s http://192.168.0.68:8095/health           # CosyVoice;调用示例见 server/tts/API.md
 ```
 
 ## 8. 索引

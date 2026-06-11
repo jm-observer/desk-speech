@@ -58,13 +58,15 @@ GPT-SoVITS 微调流水线已归档到 `legacy/`,不再编排。
 
 - [ ] (可选)第三个对比项:GB10 上已有 `fish-speech-webui:cuda` 镜像
       (Fish Speech / OpenAudio S1),需补权重才能跑;视需要再说。
-- [ ] (可选)CosyVoice `fp16` 提速:compose 里 `COSYVOICE_FP16=1`。
 - [ ] (可选)若未来转为对外/商业用途,把 `edge_*` 音色替换为 AISHELL-3
       (CC-BY-4)或 Common Voice(CC-0)。当前家庭局域网/个人用,Edge TTS
       dev/personal 授权适用。
 
 ### 已完成
 
+- FP16 推理 + 启动预热 + ref wav 上传上限 10MB(2026-06-11):
+  `COSYVOICE_FP16=1`;startup 加载权重并跑 dummy 合成,消除首请求 ~30s
+  冷启动(`TTS_WARMUP=0` 关闭)。镜像已在 GB10 重建,容器按需启动。
 - A/B bake-off(2026-05-28):选 CosyVoice2,放弃 GPT-SoVITS 与个人声纹方案。
 - HTTP API 化(`/tts` + `/tts/{zero_shot,instruct,cross_lingual}` + `/voices`)。
 - 音色库 `~/tts-voices/` 落地,`voices.json` 热可编辑。

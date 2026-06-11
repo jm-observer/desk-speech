@@ -294,42 +294,36 @@ vLLM 是 GB10 主机进程（不在 compose 内、不感知 trace-hub），orche
 
 ## 13. 容器部署 runbook（asr-server + orchestrator）
 
-> 当前 GB10 上 streaming-speech 的容器**都没在跑**（`docker ps` 验证；可能从未起过或被停掉）。
-> 本节给出标准启动路径，把 asr-server 起来即可验证 §5 的 trace 接入，orchestrator 改完代码后同步起。
+> **2026-06-11 更新**：本节最初写于生产栈未跑、用临时目录 `~/streaming-speech-server`
+> 验证的时期。该目录已废弃（容器/网络已清），**统一走 `~/server` + 发布脚本**，
+> 与 `docs/DEPLOYMENT.md` 一致。下面是修订后的标准路径。
 
 ### 13.1 前置检查
 
 ```bash
 ssh fengqi@192.168.0.68 'docker ps && docker compose version'
-# 期望：可见 vllm 等容器；compose v2 可用
+# 期望：可见 server-asr-1 / server-orchestrator-1 等容器；compose v2 可用
 ```
 
 并确认 trace-hub 宿主进程在跑（默认 `~/.config/systemd/user/trace-hub.service`，监听 `:9100`）。
 
-### 13.2 拉源码到 GB10
+### 13.2 同步 + 构建 + 启动（一条命令）
 
-streaming-speech 在 GB10 上没源码挂载约定，按既有惯例：
-
-```bash
-# 本机
-scp -r D:/git/streaming-speech/server fengqi@192.168.0.68:~/streaming-speech-server
-# GB10
-ssh fengqi@192.168.0.68 'ls ~/streaming-speech-server/compose.yaml && \
-  cd ~/streaming-speech-server && \
-  docker compose --profile asr-server build asr-server'
+```powershell
+# 本机仓库根目录
+.\scripts\release-server.ps1 -Service asr-server
+# 同步 server/asr-server + compose.yaml 到 GB10 ~/server，
+# 自动带 --profile asr-server 构建并 up -d，最后冒烟 /healthz 与 /v1/models
 ```
 
-> 注：asr-server **默认不参与** `docker compose up -d`，因 `profiles: [asr-server]`。需要 `--profile asr-server` 才纳管，避免影响生产栈。
+> 注：asr-server **默认不参与** `docker compose up -d`，因 `profiles: [asr-server]`。
+> 脚本检测到 `-Service asr-server` 会自动追加 `--profile asr-server`，不影响生产栈。
 
-### 13.3 启动
+### 13.3 看日志确认 trace init
 
 ```bash
-# 只起 asr-server（不影响现有 asr/orchestrator/tts）
-cd ~/streaming-speech-server && docker compose --profile asr-server up -d asr-server
-
-# 看日志确认 trace init 行
-docker logs -f $(docker ps -qf name=asr-server) 2>&1 | head -30
-# 期望看到 asr-server 的 axum bind on 0.0.0.0:8091 + trace::init endpoint 行
+ssh fengqi@192.168.0.68 'docker logs server-asr-server-1 2>&1 | head -10'
+# 期望看到 trace-hub tracing enabled + recognizer pool ready + listening on 0.0.0.0:8091
 ```
 
 trace endpoint 已经在 `compose.yaml` 里写死：
@@ -360,9 +354,9 @@ ssh fengqi@192.168.0.68 \
 
 ### 13.5 orchestrator 起容器（待 §12 代码改完后）
 
-```bash
-cd ~/streaming-speech-server && docker compose up -d orchestrator
-# orchestrator 默认在主 profile 中，up -d 会一起带 asr（生产链路），不带 asr-server
+```powershell
+.\scripts\release-server.ps1 -Service orchestrator
+# orchestrator 默认在主 profile 中，不带 asr-server
 ```
 
 orchestrator 容器 `compose.yaml` 当前还缺 `TRACE_HUB_ENDPOINT` env——§12 代码改完一同补：

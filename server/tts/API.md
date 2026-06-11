@@ -47,13 +47,15 @@ curl http://192.168.0.68:8095/health
 {
   "ok": true,
   "model_loaded": true,
-  "fp16": false,
+  "fp16": true,
   "voices_dir": "/voices",
   "voice_count": 6
 }
 ```
 
-`model_loaded` 首次启动是 `false`,在第一次合成请求后变 `true`(模型懒加载)。
+2026-06-11 起服务**启动即预热**(加载权重 + 一次 dummy 合成,见 `cosy_server.py`
+`_warmup`):uvicorn 等预热完才开始服务,所以 `/health` 一旦可达,`model_loaded`
+即为 `true`。设 `TTS_WARMUP=0` 可回到旧的懒加载行为(此时首次合成请求约 30s)。
 
 ---
 
@@ -286,7 +288,13 @@ Common Voice(CC-0),操作流程参考 [STATUS.md](STATUS.md) 历史决策。
 ## FAQ
 
 **Q: 第一次请求很慢?**
-A: 模型懒加载,首次请求会加载 ~5GB 进显存(约 30 秒)。`/health` 的 `model_loaded` 变 `true` 后就稳定 < 5s/请求。
+A: 2026-06-11 起已不存在:启动时预热(权重 ~5GB + dummy 合成约 30s 发生在容器
+启动期),`/health` 可达即就绪。另外 FP16 默认开启(`COSYVOICE_FP16=1`),推理
+约提速 30-40%;若怀疑音质受损,compose 里改回 0 重启对比。
+
+**Q: 上传 ref wav 有大小限制吗?**
+A: 有,默认 10MB(`TTS_MAX_UPLOAD_BYTES` 可调),超限返回 413。零样本参考音
+5-10s 即够,正常远小于此。
 
 **Q: 并发?**
 A: 没做并发隔离。模型推理是 GPU-bound,串行调用最稳。建议调用方串行排队,或加上游限流。
