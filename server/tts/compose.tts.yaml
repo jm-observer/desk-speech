@@ -16,7 +16,8 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - COSYVOICE_MODEL=/models/CosyVoice2-0.5B
-      - COSYVOICE_FP16=0
+      # FP16 推理:~30-40% 提速。如发现音质劣化,改回 0 并重启即可。
+      - COSYVOICE_FP16=1
       - TTS_PORT=8095
       - VOICES_DIR=/voices
     volumes:

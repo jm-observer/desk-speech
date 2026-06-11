@@ -57,6 +57,12 @@ from cosyvoice.cli.cosyvoice import CosyVoice2
 MODEL_DIR = os.environ.get("COSYVOICE_MODEL", "/models/CosyVoice2-0.5B")
 FP16 = os.environ.get("COSYVOICE_FP16", "0") == "1"
 VOICES_DIR = Path(os.environ.get("VOICES_DIR", "/voices"))
+# 启动即加载模型并跑一次 dummy 合成(否则首个请求要扛 ~30s 权重加载 +
+# CUDA kernel 预热)。设 TTS_WARMUP=0 可回到懒加载。
+WARMUP = os.environ.get("TTS_WARMUP", "1") not in ("0", "off", "false")
+# 上传 ref wav 大小上限(零样本参考音 5-10s 即够,正常远小于此)。
+MAX_UPLOAD_BYTES = int(os.environ.get("TTS_MAX_UPLOAD_BYTES",
+                                      str(10 * 1024 * 1024)))
 
 app = FastAPI(title="CosyVoice2 TTS", version="1.0")
 _model = None
@@ -97,6 +103,9 @@ def model() -> CosyVoice2:
 
 
 def _spool(raw: bytes) -> str:
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413, f"prompt_wav too large ({len(raw)} > {MAX_UPLOAD_BYTES} bytes)")
     fd, path = tempfile.mkstemp(suffix=".wav")
     with os.fdopen(fd, "wb") as fh:
         fh.write(raw)
@@ -117,6 +126,31 @@ def _wav_bytes(chunks) -> bytes:
     buf = io.BytesIO()
     sf.write(buf, arr, model().sample_rate, format="WAV")
     return buf.getvalue()
+
+
+@app.on_event("startup")
+def _warmup():
+    """Eager-load weights + one dummy synthesis so the first real request
+    doesn't pay the ~30s cold start. Blocks startup: uvicorn only begins
+    serving once this returns, so /health reflects true readiness."""
+    if not WARMUP:
+        return
+    print("[tts] warmup: loading model ...", flush=True)
+    model()
+    try:
+        m = manifest()
+        voices = m.get("voices", [])
+        if voices:
+            v = voices[0]
+            wav = VOICES_DIR / v["file"]
+            pt = v.get("prompt_text_override", m.get("prompt_text", ""))
+            if wav.exists() and pt:
+                list(model().inference_zero_shot("预热。", pt, str(wav),
+                                                 stream=False))
+                print(f"[tts] warmup synth ok (voice={v['id']})", flush=True)
+    except Exception as e:  # noqa: BLE001 — warmup 失败不应挡服务启动
+        print(f"[tts] warmup synth skipped: {e}", flush=True)
+    print("[tts] warmup done", flush=True)
 
 
 @app.get("/health")
