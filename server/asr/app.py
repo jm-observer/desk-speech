@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import urllib.request
 
 import numpy as np
@@ -44,8 +45,11 @@ VAD = os.environ["ASR_VAD_DIR"]
 PUNC = os.environ.get("ASR_PUNC_DIR") or None
 DEVICE = os.environ.get("ASR_DEVICE", "cuda")
 PORT = int(os.environ.get("ASR_PORT", "9100"))
-# Streaming VAD chunk in ms (how often we poll VAD for endpoints).
-VAD_CHUNK_MS = int(os.environ.get("ASR_VAD_CHUNK_MS", "200"))
+# Streaming VAD chunk in ms (how often we poll VAD for endpoints). Smaller
+# => lower endpointing jitter (segment finalize waits for the next poll), at
+# the cost of more frequent (tiny) VAD generate() calls. 50ms cuts up to
+# ~150ms perceived latency vs the old 200ms default.
+VAD_CHUNK_MS = int(os.environ.get("ASR_VAD_CHUNK_MS", "50"))
 # Silence (ms) required to END a speech segment. Larger => fewer, longer
 # segments (short pauses won't split a sentence). Default 800 is too eager.
 VAD_MAX_END_SIL = int(os.environ.get("ASR_VAD_MAX_END_SIL", "1500"))
@@ -292,27 +296,35 @@ def _refresh_asr_config():
             print(f"[asr][cfg] secondary model now: {SECONDARY_KIND}", flush=True)
 
 
+# Serializes secondary weight loading: the session-config preheat and the
+# first finalized segment may both call _ensure_secondary_loaded from
+# executor threads concurrently — without the lock both would build a copy.
+_SECONDARY_BUILD_LOCK = threading.Lock()
+
+
 def _ensure_secondary_loaded():
     """Build the secondary recognizer on first opt-in. Returns (model, kind)
     or (None, "") if no secondary is configured / build failed."""
     global SECONDARY_MODEL, SECONDARY_KIND
-    if not SECONDARY_KIND:
-        return (None, "")
-    if SECONDARY_MODEL is not None:
+    with _SECONDARY_BUILD_LOCK:
+        if not SECONDARY_KIND:
+            return (None, "")
+        if SECONDARY_MODEL is not None:
+            return (SECONDARY_MODEL, SECONDARY_KIND)
+        if SECONDARY_KIND == ASR_KIND:
+            return (None, "")  # avoid loading a duplicate of the primary
+        print(f"[asr][sec] lazy-loading secondary model {SECONDARY_KIND} ...",
+              flush=True)
+        try:
+            SECONDARY_MODEL = _build_asr(SECONDARY_KIND)
+        except Exception as e:  # noqa: BLE001
+            print(f"[asr][sec] load failed: {e} — disabling secondary",
+                  flush=True)
+            SECONDARY_KIND = ""
+            SECONDARY_MODEL = None
+            return (None, "")
+        print(f"[asr][sec] secondary ready: {SECONDARY_KIND}", flush=True)
         return (SECONDARY_MODEL, SECONDARY_KIND)
-    if SECONDARY_KIND == ASR_KIND:
-        return (None, "")  # avoid loading a duplicate of the primary
-    print(f"[asr][sec] lazy-loading secondary model {SECONDARY_KIND} ...",
-          flush=True)
-    try:
-        SECONDARY_MODEL = _build_asr(SECONDARY_KIND)
-    except Exception as e:  # noqa: BLE001
-        print(f"[asr][sec] load failed: {e} — disabling secondary", flush=True)
-        SECONDARY_KIND = ""
-        SECONDARY_MODEL = None
-        return (None, "")
-    print(f"[asr][sec] secondary ready: {SECONDARY_KIND}", flush=True)
-    return (SECONDARY_MODEL, SECONDARY_KIND)
 
 
 def recognize_with(seg: np.ndarray, model, kind: str) -> str:
@@ -384,7 +396,12 @@ class Session:
     """Per-connection streaming state with sentence-level endpointing."""
 
     def __init__(self):
-        self.buf = np.zeros(0, dtype=np.float32)  # whole session audio @16k
+        self.buf = np.zeros(0, dtype=np.float32)  # recent session audio @16k
+        # Absolute ms position of buf[0] in the stream. VAD timestamps are
+        # absolute from stream start; finalized audio is trimmed from the
+        # head of buf (see trim_to) so long sessions don't grow unbounded —
+        # this offset keeps slice_ms/now_ms in absolute terms.
+        self.buf_beg_ms = 0
         self.vad_cache = {}
         self.pending = bytearray()  # bytes not yet fed to VAD
         self.speech_open = False    # VAD currently inside speech
@@ -399,7 +416,7 @@ class Session:
         self.sec_tasks: list = []
 
     def now_ms(self) -> int:
-        return len(self.buf) // SAMPLES_PER_MS
+        return self.buf_beg_ms + len(self.buf) // SAMPLES_PER_MS
 
     def add_pcm(self, raw: bytes):
         self.pending += raw
@@ -425,9 +442,29 @@ class Session:
         return f
 
     def slice_ms(self, beg_ms: int, end_ms: int) -> np.ndarray:
-        a = max(0, beg_ms * SAMPLES_PER_MS)
-        b = min(len(self.buf), end_ms * SAMPLES_PER_MS)
+        if beg_ms < self.buf_beg_ms:
+            # Shouldn't happen (trim keeps a margin past the last finalized
+            # end), but clamp + log rather than return garbage.
+            print(f"[asr][buf] slice beg={beg_ms} < buf_beg={self.buf_beg_ms}"
+                  f" — clamped", flush=True)
+        a = max(0, (beg_ms - self.buf_beg_ms) * SAMPLES_PER_MS)
+        b = min(len(self.buf), (end_ms - self.buf_beg_ms) * SAMPLES_PER_MS)
         return self.buf[a:b] if b > a else np.zeros(0, dtype=np.float32)
+
+    def trim_to(self, keep_from_ms: int):
+        """Drop buffered audio older than keep_from_ms (absolute ms).
+
+        Called after a sentence is finalized: everything up to its end has
+        been recognized and will never be sliced again (the next sentence
+        starts at least SENTENCE_GAP_MS later). .copy() releases the old
+        backing array instead of keeping a view alive.
+        """
+        cut = (keep_from_ms - self.buf_beg_ms) * SAMPLES_PER_MS
+        if cut <= 0:
+            return
+        cut = min(cut, len(self.buf))
+        self.buf = self.buf[cut:].copy()
+        self.buf_beg_ms += cut // SAMPLES_PER_MS
 
 
 def recognize(seg: np.ndarray) -> str:
@@ -519,9 +556,14 @@ async def finalize(ws, s: Session):
         s.last_end = None
         return
     beg, end = s.sent_beg, s.last_end
-    seg = s.slice_ms(beg, end)
+    # .copy() decouples seg from the session buffer so trim_to below can
+    # actually release the old backing array.
+    seg = s.slice_ms(beg, end).copy()
     s.sent_beg = None
     s.last_end = None
+    # This sentence is done; drop its audio (keep 1s margin in case VAD
+    # backdates the next speech onset slightly).
+    s.trim_to(end - 1000)
     text = recognize(seg)
     spk, score = best_speaker(seg)
     gated = GATE_TO_ENROLLED and bool(ENABLED_VPS)
@@ -555,8 +597,10 @@ async def feed_vad(ws, s: Session, chunk: np.ndarray, is_final: bool):
     """
     if chunk.size == 0 and not is_final:
         return
+    # disable_pbar: 50ms 轮询下 tqdm 进度条会每秒刷 20 行日志。
     res = VAD_MODEL.generate(input=chunk, cache=s.vad_cache,
-                             is_final=is_final, chunk_size=VAD_CHUNK_MS)
+                             is_final=is_final, chunk_size=VAD_CHUNK_MS,
+                             disable_pbar=True)
     val = res[0].get("value", []) if res else []
     if val:
         print(f"[asr][vad] is_final={is_final} value={val} "
@@ -629,6 +673,12 @@ async def handle(ws):
                 s.want_secondary = bool(ctrl.get("want_secondary"))
                 print(f"[asr][cfg] session want_secondary={s.want_secondary} "
                       f"(secondary kind={SECONDARY_KIND or 'off'})", flush=True)
+                # Preheat: start loading the secondary weights now instead of
+                # on the first finalized segment — otherwise the first
+                # comparison result lags 10-30s behind on a cold model.
+                if s.want_secondary and SECONDARY_KIND and SECONDARY_MODEL is None:
+                    asyncio.get_event_loop().run_in_executor(
+                        None, _ensure_secondary_loaded)
         elif t == "flush":
             tail = s._flush_tail()
             await feed_vad(ws, s, tail, is_final=True)
