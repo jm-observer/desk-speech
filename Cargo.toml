@@ -2,9 +2,10 @@
 resolver = "2"
 members = [
     "src-tauri",
-    "server/asr-server",
     "server/orchestrator",
 ]
+# 注：asr-server 已迁出至 toolkit 仓库（jm-observer/toolkit，crates/asr-server），
+# 作为统一工具中台的权威来源。本仓不再维护该 crate，详见 server/asr-server/MOVED.md。
 
 # 注：custom-utils（trace 客户端）不放 [workspace.dependencies]——两个服务都以自身
 # 子目录为 Docker 构建上下文独立编译，容器内无父 workspace，无法解析 `workspace = true`，

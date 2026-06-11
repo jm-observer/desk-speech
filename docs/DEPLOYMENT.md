@@ -3,6 +3,11 @@
 > 全系统部署与运维的**单一参考**。状态/续作看 `HANDOFF.md`;
 > TTS bake-off 细节看 `server/tts/README.md`(本文只做汇总与索引)。
 
+> ⚠️ **asr-server 已迁出本仓**（→ toolkit 仓 `crates/asr-server` + `deploy/asr-tts`）。
+> 下文涉及 asr-server（:8091、`~/asr-server-models`、profile 等）的条目均为历史记录，
+> 现以 toolkit 仓的部署为准；本仓生产栈只剩 asr(FunASR) + orchestrator。详见
+> `server/asr-server/MOVED.md`。
+
 ## 1. 拓扑
 
 ```

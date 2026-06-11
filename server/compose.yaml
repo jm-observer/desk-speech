@@ -43,43 +43,5 @@ services:
     ports:
       - "8090:8090"
 
-  # asr-server:外部 OpenAI 兼容 ASR(/v1/audio/transcriptions),sherpa-onnx 后端。
-  # 默认不参与 `docker compose up -d`,需 `--profile asr-server` 才纳管(避免影响生产栈)。
-  # v1 CPU SenseVoice;GPU/CUDA13 是后续工作(详见 asr-server/Dockerfile 注释)。
-  asr-server:
-    profiles: [asr-server]
-    build: ./asr-server
-    image: asr-server:latest
-    restart: unless-stopped
-    environment:
-      - RUST_LOG=info
-      # 全链路追踪（trace-hub 宿主进程在 :9100）。容器经 host.docker.internal 到宿主。
-      # 未设此变量则 asr-server 全程零追踪、零影响——要关闭追踪删掉本行即可。
-      - TRACE_HUB_ENDPOINT=http://host.docker.internal:9100/v1/spans
-    # trace-hub 在宿主，非 compose 内服务；同 orchestrator 连 vLLM 的方式打通。
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    # from-source 的 file:// 读的是容器内路径:把宿主 zero 下载目录挂进容器
-    # 同路径,否则 from-source 必 404(见 plan §6.3)。下载实际落 downloads/douyin/。
-    volumes:
-      - ${ASR_SERVER_MODELS_DIR:-/home/fengqi/asr-server-models}:/models:ro
-      - ${ZERO_DOWNLOADS_DIR:-/home/fengqi/.config/zero/downloads}:/home/fengqi/.config/zero/downloads:ro
-    # command 注入部署相关参数:from-source 白名单(配父目录即覆盖 douyin/ 子目录)。
-    # 容器内 bind 0.0.0.0(docker 端口转发需要);对外暴露由下方 ports 限本机。
-    command:
-      - "--bind"
-      - "0.0.0.0:8091"
-      - "--model"
-      - "sense-voice"
-      - "--model-dir"
-      - "/models/sherpa-sense-voice"
-      - "--vad-model"
-      - "/opt/asr-server/silero_vad.onnx"
-      - "--source-allowlist"
-      - "/home/fengqi/.config/zero/downloads"
-    # 仅暴露给 GB10 本机(zero 同机调用);要对局域网开放需显式改这里。
-    ports:
-      - "127.0.0.1:8091:8091"
-
 volumes:
   orch-data:

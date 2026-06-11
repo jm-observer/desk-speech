@@ -1,5 +1,10 @@
 # streaming-speech 全链路追踪接入设计
 
+> ⚠️ 历史设计文档。文中 `asr-server` 部分（Phase 1 主改动）已随 asr-server **迁出至
+> toolkit 仓**（`crates/asr-server`，trace 接入逻辑已带走）；本仓现存的追踪接入只涉及
+> orchestrator / asr(FunASR) / TTS。asr-server 相关段落保留作沿革记录。详见
+> `server/asr-server/MOVED.md`。
+
 > 创建 2026-06-03。把 streaming-speech 的语音能力（ASR 转写 / TTS 合成）接入
 > **trace-hub** 全生命周期追踪体系（`D:\git\trace-hub`，见其 `docs/DESIGN.md`）。
 > 体系要点：W3C `traceparent` 传播 + `custom-utils` trace 客户端（异步非阻塞推送）+

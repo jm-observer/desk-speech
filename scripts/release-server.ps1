@@ -5,17 +5,16 @@
 #   .\scripts\release-server.ps1                       # 默认 both:同步 + 重建 + 重启 + 冒烟生产栈
 #   .\scripts\release-server.ps1 -Service asr          # 只动 asr
 #   .\scripts\release-server.ps1 -Service orchestrator # 只动 orchestrator
-#   .\scripts\release-server.ps1 -Service asr-server   # 只动外部 OpenAI 兼容 ASR(profile)
 #   .\scripts\release-server.ps1 -NoBuild              # 同步后只 up -d(改 compose/env 用)
 #   .\scripts\release-server.ps1 -SyncOnly             # 只推文件,不动容器
 #
 # 说明:
 #   - 'both' 指生产栈 asr + orchestrator(给桌面客户端用的核心链路)。
-#   - 'asr-server' 是 OpenAI 兼容外部 ASR,compose 里挂了 profile,默认不参与;
-#     脚本检测到 -Service asr-server 时会自动追加 `--profile asr-server`。
+#   - asr-server(OpenAI 兼容外部 ASR)已迁出至 toolkit 仓库,在那里部署(deploy/asr-tts);
+#     本脚本不再涉及,详见 server/asr-server/MOVED.md。
 
 param(
-  [ValidateSet('asr','orchestrator','both','asr-server')]
+  [ValidateSet('asr','orchestrator','both')]
   [string]$Service = 'both',
   [switch]$NoBuild,
   [switch]$SyncOnly
@@ -32,7 +31,6 @@ function Ok($m)   { Write-Host "✓ $m" -ForegroundColor Green }
 $items = @('compose.yaml')
 if ($Service -in 'asr','both')          { $items += 'asr' }
 if ($Service -in 'orchestrator','both') { $items += 'orchestrator' }
-if ($Service -eq 'asr-server')          { $items += 'asr-server' }
 
 $tar    = Join-Path $env:TEMP "release-server-$([guid]::NewGuid().ToString('N')).tar"
 $tarExe = Join-Path $env:WINDIR 'System32\tar.exe'   # bsdtar:认 Windows 路径(避开 Git Bash 的 GNU tar)
@@ -56,8 +54,7 @@ Ok "同步完成"
 
 if ($SyncOnly) { Ok "SyncOnly 模式,结束"; exit 0 }
 
-# 计算 compose 子命令:asr-server 需要 --profile;其余裸跑(profile 服务自动跳过)。
-$composeBase = if ($Service -eq 'asr-server') { 'docker compose --profile asr-server' } else { 'docker compose' }
+$composeBase = 'docker compose'
 $svcArg      = if ($Service -eq 'both') { '' } else { $Service }
 
 if (-not $NoBuild) {
@@ -73,17 +70,9 @@ if ($LASTEXITCODE -ne 0) { throw "up 失败" }
 Step "冒烟(等 3s 让容器起来)"
 Start-Sleep -Seconds 3
 
-if ($Service -eq 'asr-server') {
-  $hz     = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8091/healthz"
-  $models = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8091/v1/models"
-  Write-Host "  /healthz    $hz"
-  Write-Host "  /v1/models  $models"
-  if ($hz -ne 'ok') { throw "asr-server 冒烟失败 — docker compose --profile asr-server logs --tail=80 asr-server" }
-} else {
-  $stats = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8090/api/stats"
-  $cfg   = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8090/api/asr-config"
-  Write-Host "  /api/stats      $stats"
-  Write-Host "  /api/asr-config $cfg"
-  if (-not $stats -or -not $cfg) { throw "冒烟失败 — 检查 docker compose logs --tail=80" }
-}
+$stats = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8090/api/stats"
+$cfg   = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8090/api/asr-config"
+Write-Host "  /api/stats      $stats"
+Write-Host "  /api/asr-config $cfg"
+if (-not $stats -or -not $cfg) { throw "冒烟失败 — 检查 docker compose logs --tail=80" }
 Ok "发布完成"

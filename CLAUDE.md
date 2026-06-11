@@ -14,9 +14,12 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24,
   mic capture → WS upload                ├─ orchestrator  :8090  WS + SQLite + Web 管理台 + /api/*
                                          ├─ asr           :9100/:9101 (内部)  FunASR + 声纹门控
                                          ├─ vLLM (主机)   :8085  gemma-4-26B (润色/翻译)
-                                         └─ asr-server    :8091  sherpa-onnx, OpenAI-兼容 HTTP (外部调用)
                                          └─ TTS bake-off  :8095/:8096 (CosyVoice2 / GPT-SoVITS,选型隔离)
 ```
+
+> 注：曾经的 `asr-server`（:8091 sherpa-onnx OpenAI 兼容 HTTP，供外部调用）已迁出至
+> **toolkit 工具中台**仓库（`jm-observer/toolkit`，`crates/asr-server`），不再属于本仓。
+> 本仓自身的实时转写走 `server/asr`（FunASR），与之无关。详见 `server/asr-server/MOVED.md`。
 
 **Authoritative docs** — read these before deep work:
 - `docs/HANDOFF.md` — current status, what's done, what's next, key commits
@@ -32,17 +35,18 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24,
 | `src/` | React 19 + TypeScript + Vite + Tailwind front-end of the Tauri app. |
 | `server/orchestrator/` | Rust/axum service on GB10: client WS termination + SQLite + Web admin + HTTP API. |
 | `server/asr/` | Python FunASR container: streaming VAD + Paraformer/SenseVoice recognition + speaker gating + `/embed`. |
-| `server/asr-server/` | Rust binary container: standalone sherpa-onnx behind OpenAI-compatible HTTP (`/v1/audio/transcriptions`). Opt-in via compose `profiles: [asr-server]`. |
+| `server/asr-server/` | **已迁出** → toolkit 仓 `crates/asr-server`。仅留 `MOVED.md` 指针。 |
 | `server/tts/` | CosyVoice2 + GPT-SoVITS bake-off (independent compose, see its README). |
-| `server/compose.yaml` | Production-stack compose (asr + orchestrator; asr-server profiled out). |
+| `server/compose.yaml` | Production-stack compose (asr + orchestrator). |
 | `scripts/release-server.ps1` | One-shot GB10 deploy (tar → scp → compose build/up → smoke). |
 | `docs/` | Architecture, protocol, deploy, handoff. |
 
 ## Workspace
 
 Root `Cargo.toml` is a Cargo workspace with two members: `src-tauri` (desktop client)
-and `server/asr-server` (Rust HTTP service). They are intentionally independent crates;
-nothing is shared at the library level.
+and `server/orchestrator` (Rust/axum GB10 service). They are intentionally independent
+crates; nothing is shared at the library level. (`server/asr-server` was a former member,
+now migrated to the toolkit repo — see `server/asr-server/MOVED.md`.)
 
 ## Commands
 
@@ -63,12 +67,10 @@ cd src-tauri && cargo test               # inline unit tests
 ```powershell
 .\scripts\release-server.ps1                     # default: sync + rebuild + restart asr + orchestrator
 .\scripts\release-server.ps1 -Service asr        # only asr
-.\scripts\release-server.ps1 -Service asr-server # external OpenAI-compat ASR (profile)
 .\scripts\release-server.ps1 -NoBuild            # sync + up -d, skip rebuild
 .\scripts\release-server.ps1 -SyncOnly           # push files only, don't touch containers
 ```
-Smoke endpoints: `curl http://192.168.0.68:8090/api/stats` (orchestrator) /
-`curl http://192.168.0.68:8091/healthz` (asr-server).
+Smoke endpoint: `curl http://192.168.0.68:8090/api/stats` (orchestrator).
 
 ### Web admin
 Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime config).
@@ -80,8 +82,6 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
   Auto-reconnect lives in `src-tauri/src/commands/remote.rs`.
 - **orchestrator ↔ asr**: internal WS `ws://asr:9100`.
 - **orchestrator ↔ vLLM**: HTTP `host.docker.internal:8085/v1` (vLLM runs on host, not in compose).
-- **asr-server**: standalone HTTP `/v1/audio/transcriptions` (OpenAI Audio API shape) for
-  external callers; not used by the desktop client.
 - **Runtime config**: many settings live in orchestrator's SQLite `config` table and are
   edited from the Web admin (`asr.model`, `asr.secondary_model`, `asr.spk_threshold`,
   `asr.sentence_gap_ms`, `asr.gate_to_enrolled`, `vllm.model`, `vllm.base`,
@@ -129,17 +129,14 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
 
 ## Important constraints
 
-- **Models live on the server**, not in the client. GB10 paths: `~/funasr-prep/models/`
-  (FunASR + CAM++ speaker model), `~/asr-server-models/` (sherpa-onnx models).
+- **Models live on the server**, not in the client. GB10 path: `~/funasr-prep/models/`
+  (FunASR + CAM++ speaker model). (sherpa-onnx models for the migrated asr-server now
+  live with the toolkit deployment, not this repo.)
 - **GB10 network gotchas**: GitHub direct is **unreliable** (clone/download often times out);
   use `hf-mirror.com` for HuggingFace assets and ModelScope (`~/ms_venv/bin/modelscope`)
   for ModelScope assets. crates.io is fronted by `rsproxy.cn` in every server Dockerfile.
-- **arm64 + CUDA13**: sherpa-onnx upstream CUDA prebuilts stop at CUDA 12.x, so the
-  current asr-server image is **CPU-only**. GPU build for asr-server is a follow-up that
-  requires building sherpa-onnx native libs from source for arm64+CUDA13.
 - **Production-stack autostart**: `asr` and `orchestrator` use `restart: unless-stopped`
-  so GB10 reboots bring the service back automatically. `asr-server` is opt-in (compose
-  profile), so it does not auto-start with the production stack — bring it up explicitly.
+  so GB10 reboots bring the service back automatically.
 - **vLLM is a host process**, not in compose. It's maintained out-of-band; the orchestrator
   reaches it via `host.docker.internal:8085`.
 - **Deploy = scp + rebuild**, not git pull. GitHub is blocked on GB10, and `~/server/`
@@ -149,7 +146,7 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
 
 1. Edit code locally under `server/*/`.
 2. `cd src-tauri && cargo check` (if Rust) or `python -c 'import server.asr.app'` smoke.
-3. `.\scripts\release-server.ps1 -Service <asr|orchestrator|asr-server>`.
+3. `.\scripts\release-server.ps1 -Service <asr|orchestrator>`.
 4. Watch smoke output; on failure, `ssh fengqi@192.168.0.68 'docker compose logs --tail=80 <svc>'`.
 
 The script uses Windows `System32\tar.exe` (bsdtar) explicitly — Git Bash's GNU tar
