@@ -1,6 +1,8 @@
-# syntax=docker/dockerfile:1.7
 # Rust 编排层 — 多阶段 + BuildKit cache mounts。GB10 网络不稳,缓存掉 cargo
 # registry / git / target,代码改动后增量 build 约 30s-2min(vs 冷构 15min+)。
+# 不写 `# syntax=docker/dockerfile:x` 指令:它每次构建都要联网解析 Docker Hub
+# manifest,GB10 经常 TLS 超时直接挡住构建;本文件只用 cache mounts,dockerd
+# 内置前端即支持,无需外部 frontend 镜像。
 FROM rust:1-bookworm AS build
 # GB10 has poor connectivity to crates.io; use a China mirror (sparse).
 RUN mkdir -p $CARGO_HOME && printf '%s\n' \
