@@ -135,10 +135,17 @@ asr-server 的 trace 客户端是**显式构造 `SpanRecord` + `record_span` 入
 | `vad_segment` | `{segments_count, vad_ms}` | detail `{boundaries:[{start,end}]}` |
 | `asr_decode` | `{seg_index, seg_dur_s, decode_ms, text_len}` | **response_body = 该段文本** |
 
-## 6. Phase 2 —— TTS（caller-side，在 zero 记）
+## 6. Phase 2 —— TTS（caller-side，在 zero 记）—— ✅ 已落地
 
-Python CosyVoice 容器本期不改。TTS span 由 **zero `bridge-claw/src/tts_client.rs`** 记（它在 zero 进程内、已接好 `custom_utils::trace`）：
-- `request_tts()` `:81`：注入 `traceparent`（为将来 Python 侧准备）+ 计时包裹 + `record_span`：
+Python CosyVoice 容器本期不改。TTS span 由 zero 侧记录，实际埋点位置**比设计稿上抬了一层**：
+- traceparent 注入在 `bridge-claw/src/tts_client.rs:99`（`request_tts` 出站请求头），
+- caller-side `record_span(kind="tts")` 在 `bridge-claw/src/tts_synthesize_tool.rs:101`
+  调 `record_tts_span()`（定义同文件 :126-158），**而非** `request_tts` 内部。
+  原因：`synthesize()` 命中本地缓存时根本不发请求（`tts_client.rs:72-74` 直接返回缓存路径），
+  埋在 `request_tts` 里会漏记缓存命中那次「合成」；tool 层不管缓存命中与否都记一条，更准。
+
+实现摘要（对照原设计稿）：
+- `request_tts()` `:87`：注入 `traceparent`（为将来 Python 侧准备）——已实现；
 ```rust
 // ctx 取自本轮 turn/session trace（见 6.1）
 let now = trace::now_ms();
@@ -155,9 +162,8 @@ trace::record_span(SpanRecord{
 });
 ```
 
-### 6.1 trace 上下文怎么到达 TTS 工具
-TTS 由 `TtsSynthesizeTool` 在 turn 内执行，需拿到本轮 trace。建议在 **bridge-claw 维护 `session_id → TraceContext` 映射**（`send_message` 起 turn 时写入，与已加的 `turn_trace` 同源），工具经 `ToolContext.session_id` 查表 → `child()`。
-> 这同时能把 §5 的 `llm_call`（已实现）、TTS、agent_task 统一到**同一棵 per-turn/session 树**，是对现有 `turn_trace`（目前每轮 root）的一次收敛（可选优化）。
+### 6.1 trace 上下文怎么到达 TTS 工具 —— ✅ 已实现
+TTS 由 `TtsSynthesizeTool` 在 turn 内执行，需拿到本轮 trace。bridge-claw 已维护 `session_id → TraceContext` 映射，工具经 `crate::session_trace(&context.session_id)` 反查 → `.child()`（见 `tts_synthesize_tool.rs:86-89`），缺失时跳过 `record_tts_span`（追踪未启用 / 无 session 映射场景安全降级）。`push_audio_tool` 也复用 `record_tts_span`。
 
 ## 7. Phase 3（可选）—— Python CosyVoice 内部 / orchestrator WS
 
@@ -169,14 +175,14 @@ TTS 由 `TtsSynthesizeTool` 在 turn 内执行，需拿到本轮 trace。建议�
 | 仓 | 文件:行 | 改动 |
 |---|---|---|
 | github-commit-info(douyin) | `crates/douyin/src/process.rs:565` | ASR 请求 `.header("traceparent", tp)`；tp 来自 worker 已有的 `<task_id>.trace` 侧文件 / `job.traceparent`（侧文件机制已实现，见 trace-hub `instrumentation.md`） |
-| zero | `crates/bridge-claw/src/tts_client.rs:81` | TTS 请求注入 traceparent + caller-side `record_span(kind="tts")`；§6.1 的 session→trace 映射 |
+| zero | `crates/bridge-claw/src/tts_client.rs:99` + `tts_synthesize_tool.rs:101` | ✅ 已落地：traceparent 注入在 `tts_client.rs`；`record_span(kind="tts")` 在 `tts_synthesize_tool.rs`（上抬一层覆盖缓存命中场景）；§6.1 session→trace 映射用 `session_trace()` 反查 |
 
 ## 9. 施工计划
 
 1. **Phase 1（本仓核心）—— ✅ 本机实现已落地**：asr-server 依赖+init+extract+`asr_transcribe`+
    三个子 span 已实现，本机 `cargo check`/`clippy -D warnings` 全绿。**尚未可部署**（见 §11）。
    待 douyin 注入 traceparent（跨仓，§8）后即可在抖音链路看到每段 ASR 时延 + 转写文本。
-2. **Phase 2**：zero TtsClient caller-side `tts` span + session→trace 映射收敛。（跨仓，本仓不负责）
+2. **Phase 2**：zero TtsClient caller-side `tts` span + session→trace 映射收敛。✅ 已在 zero 仓落地（埋点位置实际在 `tts_synthesize_tool.rs` 而非 `tts_client.rs`，原因见 §6）。
 3. **Phase 3（可选）**：cosyvoice Python 内部 span；orchestrator WS 实时链路。orchestrator 已并入
    workspace，依赖接法届时同 asr-server（但同样受 §11 的 Docker 上下文约束）。
 

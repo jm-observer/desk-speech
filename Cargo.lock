@@ -1005,8 +1005,7 @@ dependencies = [
 [[package]]
 name = "custom-utils"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f38650567879051a090a911f43a5ba7241056943262ae8da30325a0fb4b9462"
+source = "git+https://github.com/jm-observer/custom-utils.git?rev=6254e583ba356b08918c183d465737b3b4652caa#6254e583ba356b08918c183d465737b3b4652caa"
 dependencies = [
  "anyhow",
  "futures-util",
