@@ -392,6 +392,121 @@ async def http_embed(request: web.Request) -> web.Response:
     return web.json_response({"embedding": emb.tolist()})
 
 
+def _vad_regions_offline(audio: np.ndarray) -> list[tuple[int, int]]:
+    """One-shot offline FSMN-VAD over a whole clip → flat [(beg_ms,end_ms), ...].
+
+    Same model as the streaming path; cache is fresh so it doesn't interfere
+    with live sessions. Streaming VAD emits a mix of [beg,-1] / [-1,end] /
+    [beg,end] events — here we fold them into closed regions and then merge
+    neighbours separated by < SENTENCE_GAP_MS so the segment partitioning
+    mirrors what the realtime pipeline would produce on the same audio.
+    """
+    if audio.size == 0:
+        return []
+    res = VAD_MODEL.generate(input=audio, cache={}, is_final=True,
+                             chunk_size=VAD_CHUNK_MS, disable_pbar=True)
+    val = res[0].get("value", []) if res else []
+    regions: list[tuple[int, int]] = []
+    cur_beg: int | None = None
+    for beg, end in val:
+        if beg >= 0 and end == -1:
+            if cur_beg is None:
+                cur_beg = beg
+        elif beg == -1 and end >= 0:
+            if cur_beg is not None:
+                regions.append((cur_beg, end))
+                cur_beg = None
+        elif beg >= 0 and end >= 0:
+            regions.append((beg, end))
+    merged: list[tuple[int, int]] = []
+    for beg, end in regions:
+        if merged and beg - merged[-1][1] < SENTENCE_GAP_MS:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((beg, end))
+    return merged
+
+
+def _transcribe_blocking(audio: np.ndarray, want_vad: bool) -> dict:
+    """Heavy path: VAD + recognize (or whole-clip recognize). Returns the
+    JSON body shape directly. Runs on the executor so the event loop stays
+    free for live ws sessions on :9100."""
+    model, kind = ASR_MODEL, ASR_KIND
+    if not want_vad:
+        text = recognize_with(audio, model, kind).strip()
+        return {"text": text, "segments": [], "model": kind}
+    segments: list[dict] = []
+    pieces: list[str] = []
+    for beg_ms, end_ms in _vad_regions_offline(audio):
+        a = max(0, beg_ms * SAMPLES_PER_MS)
+        b = min(len(audio), end_ms * SAMPLES_PER_MS)
+        if b <= a:
+            continue
+        text = recognize_with(audio[a:b], model, kind).strip()
+        if not text:
+            continue
+        segments.append({
+            "t_start": beg_ms / 1000.0,
+            "t_end": end_ms / 1000.0,
+            "text": text,
+        })
+        pieces.append(text)
+    return {"text": "\n".join(pieces), "segments": segments, "model": kind}
+
+
+async def http_transcribe(request: web.Request) -> web.Response:
+    """POST multipart audio -> {text, segments, model}.
+
+    Form fields:
+      audio (file, required): wav / mp3 / mp4 / webm / … — anything ffmpeg
+                              can decode. Re-encoded to 16k mono f32 in-process.
+      vad   (str,  optional): "1"/"true" (default) → VAD-segmented output with
+                              per-region timestamps; "0"/"false" → single
+                              whole-clip recognize, segments=[].
+
+    Model selection is **not** per-request: the active recognizer is
+    governed by the orchestrator's `asr.model` config (hot-switchable),
+    the same as the streaming path. Returning `model` in the body lets the
+    caller stamp the transcript with what actually produced it.
+    """
+    if not request.content_type.startswith("multipart/"):
+        return web.json_response(
+            {"error": "expected multipart/form-data with an 'audio' part"},
+            status=400,
+        )
+    audio_bytes: bytes | None = None
+    want_vad = True
+    try:
+        reader = await request.multipart()
+        async for part in reader:
+            name = part.name
+            if name == "audio":
+                audio_bytes = await part.read(decode=False)
+            elif name == "vad":
+                v = (await part.text()).strip().lower()
+                want_vad = v not in ("0", "false", "off", "no", "")
+    except Exception as e:  # noqa: BLE001
+        return web.json_response({"error": f"bad multipart: {e}"}, status=400)
+    if not audio_bytes:
+        return web.json_response({"error": "missing 'audio' part"}, status=400)
+    try:
+        audio = _decode_audio(audio_bytes)
+    except Exception as e:  # noqa: BLE001
+        return web.json_response({"error": f"decode failed: {e}"}, status=400)
+    print(f"[asr][http] /transcribe bytes={len(audio_bytes)} "
+          f"dur={len(audio)/SR:.2f}s vad={want_vad} model={ASR_KIND}",
+          flush=True)
+    loop = asyncio.get_event_loop()
+    try:
+        body = await loop.run_in_executor(
+            None, _transcribe_blocking, audio, want_vad
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[asr][http] /transcribe failed: {e}", flush=True)
+        return web.json_response({"error": f"recognize failed: {e}"}, status=500)
+    return web.json_response(body)
+
+
 class Session:
     """Per-connection streaming state with sentence-level endpointing."""
 
@@ -697,14 +812,17 @@ async def handle(ws):
 
 
 async def main():
-    # /embed HTTP (enrollment) on HTTP_PORT
-    httpd = web.Application()
+    # /embed HTTP (enrollment) + /transcribe (offline transcription) on HTTP_PORT.
+    # Default 1 MiB body limit blows up on multipart mp4 (抖音单条 5-50 MiB)
+    # — bump to 256 MiB which covers any realistic short-video upload.
+    httpd = web.Application(client_max_size=256 * 1024 * 1024)
     httpd.router.add_post("/embed", http_embed)
+    httpd.router.add_post("/transcribe", http_transcribe)
     runner = web.AppRunner(httpd)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", HTTP_PORT).start()
-    print(f"[asr] ws :{PORT} (vad {VAD_CHUNK_MS}ms) | http :{HTTP_PORT} /embed",
-          flush=True)
+    print(f"[asr] ws :{PORT} (vad {VAD_CHUNK_MS}ms) | "
+          f"http :{HTTP_PORT} /embed /transcribe", flush=True)
     async with websockets.serve(handle, "0.0.0.0", PORT, max_size=None):
         await asyncio.gather(voiceprint_loop(), asyncio.Future())
 

@@ -20,6 +20,10 @@ services:
       - ${MODELS_DIR:-/home/fengqi/funasr-prep/models}:/models:ro
     expose:
       - "9100"
+    ports:
+      # /embed + /transcribe HTTP 给同机外部消费(toolkit 抖音管线调 /transcribe);
+      # 仅本机回环,避免无意暴露到 LAN。
+      - "127.0.0.1:9101:9101"
 
   orchestrator:
     build: ./orchestrator

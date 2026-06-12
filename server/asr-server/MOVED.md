@@ -1,21 +1,39 @@
-# asr-server 已迁出本仓
+# asr-server 已退役
 
-`server/asr-server/`（独立 sherpa-onnx + OpenAI 兼容 HTTP 转写服务）已于 2026-06 迁出，
-现归属 **toolkit 工具中台**仓库，作为统一权威来源：
+`server/asr-server/`（独立 sherpa-onnx + OpenAI 兼容 HTTP 转写服务）走过两段历史：
 
-- 仓库：`jm-observer/toolkit`（GitHub）/ 本地 `D:\git\toolkit`（暂仍为 `D:\git\github-commit-info`）
-- 路径：`crates/asr-server`
-- 部署编排：`deploy/asr-tts/`（ASR + TTS 同机 compose）
-- 对外入口：toolkit-server 的 `/api/web/audio/tts` 代理（TTS），ASR 直连 `:8091`
+1. **2026-06 早期**：从本仓迁出 → toolkit 中台仓库（`jm-observer/toolkit` 即本地
+   `D:\git\toolkit` / `D:\git\github-commit-info`）的 `crates/asr-server`，统一权威源。
+2. **2026-06 中后期**：在 toolkit 短暂落地后**物理退役**——sherpa-onnx 与本仓
+   FunASR 服务能力重叠，且 FunASR 在中文准确率、热词、声纹、模型丰富度上全面占优；
+   GB10 上 FunASR Paraformer 反正已 GPU 常驻（实时管线服务桌面客户端），多支持一个
+   离线 HTTP 端点是零边际成本。
 
-## 为什么迁走
+## 当前权威源
 
-asr-server 当初是为 **douyin / zero 外部调用**（下载视频后转写）而建的独立服务，
-**并非** streaming-speech 自身实时管线的一环——本仓的实时转写走 `server/asr`（FunASR）。
-该能力的真实消费方（抖音知识管线）已统一收敛到 toolkit 中台，故 asr-server 随之迁入，
-避免一份代码两处维护、反复同步漂移。
+**streaming-speech 仓自身**：`server/asr/` 的 FunASR 服务，HTTP `:9101` 同时提供：
+
+- `POST /embed`（旧）：声纹注册时提取 embedding。
+- `POST /transcribe`（**新，2026-06 加入**）：multipart 上传 wav/mp3/mp4/webm/...，
+  返回 `{text, segments:[{t_start,t_end,text}], model}`。可选 form 字段 `vad`
+  （默认 1 → VAD 切段含时间戳；0 → 整段一锤识别，segments 空数组）。模型由
+  orchestrator 的 `asr.model` 配置控制，与流式管线共用（Paraformer / SenseVoice /
+  Whisper turbo / Whisper large-v3 任选）。
+
+容器端口映射：`server/compose.yaml` 已在 `asr` 服务上加 `127.0.0.1:9101:9101`，
+**仅本机回环可达**。同机消费方（toolkit 抖音管线）走 `http://127.0.0.1:9101/transcribe`。
+
+## toolkit 侧已完成的退役动作
+
+- 删除 `crates/asr-server/`（含 silero_vad.onnx）。
+- workspace `Cargo.toml` 移除成员、`deploy-g10.ps1` 移除 bin。
+- `deploy/asr-tts/` 保留但只剩 TTS（CosyVoice2），README 改写说明 ASR 已外移。
+- `crates/douyin/src/process.rs`：从 `{source:"file://...", vad}` JSON post 改成
+  multipart 上传 mp4 字节；响应解析 `start/end` → `t_start/t_end`。
+- 默认 `asr_url` 全部从 `:8091/.../from-source` 改为 `:9101/transcribe`，
+  默认 `asr_model` 从 `sense-voice` 改为 `funasr` 兜底标签（实际模型由服务端回传）。
 
 ## 后续在哪里改
 
-asr-server 的任何优化（如池化、线程数、新端点）**直接在 toolkit 仓 `crates/asr-server` 改**，
-不要再在本仓恢复该目录。本仓相关引用（workspace 成员、compose profile、release 脚本）已一并移除。
+ASR 任何能力调整（新模型、热词、端点形状）都在本仓 `server/asr/app.py` 改。
+toolkit 那边只是消费方，跟着 contract 走。

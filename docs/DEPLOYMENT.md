@@ -3,10 +3,11 @@
 > 全系统部署与运维的**单一参考**。状态/续作看 `HANDOFF.md`;
 > TTS bake-off 细节看 `server/tts/README.md`(本文只做汇总与索引)。
 
-> ⚠️ **asr-server 已迁出本仓**（→ toolkit 仓 `crates/asr-server` + `deploy/asr-tts`）。
-> 下文涉及 asr-server（:8091、`~/asr-server-models`、profile 等）的条目均为历史记录，
-> 现以 toolkit 仓的部署为准；本仓生产栈只剩 asr(FunASR) + orchestrator。详见
-> `server/asr-server/MOVED.md`。
+> ⚠️ **asr-server 已物理退役**。先从本仓迁至 toolkit 仓 `crates/asr-server`（2026-06 早），
+> 后因与本仓 FunASR 能力重叠在 toolkit 又被整 crate 删除（2026-06 中后期）。
+> 外部离线转写**统一改走本仓 FunASR 的 `/transcribe` 端点**（`server/asr` :9101，
+> multipart 上传 wav/mp3/mp4）。文中所有 `:8091` / `~/asr-server-models` / sherpa profile
+> 的条目均为历史记录，**不再代表当前部署**。详见 `server/asr-server/MOVED.md`。
 
 ## 1. 拓扑
 
@@ -16,12 +17,16 @@ Windows 桌面客户端(Tauri/Rust,采麦+UI+剪贴板,远程模式)
    ▼
 GB10  192.168.0.68  (NVIDIA GB10 / arm64 / CUDA13 / Ubuntu24 / Docker)
    ├─ orchestrator 容器   :8090  WS 编排 + SQLite + Web 管理台 + /api/*
-   ├─ asr 容器            :9100/9101(内部)  FunASR 流式识别 + 声纹门控 + /embed
+   ├─ asr 容器            :9100(内部 WS) | 127.0.0.1:9101(HTTP)
+   │                      FunASR 流式识别 + 声纹门控 + /embed + /transcribe
    ├─ vLLM 主机进程       :8085  gemma-4-26B-A4B-it(润色/翻译)
-   ├─ asr-server 容器     :8091  sherpa-onnx OpenAI 兼容 HTTP(profile,外部调用)
    └─ TTS(独立,与上面隔离;按需启动)
         └─ cosyvoice       :8095  CosyVoice 2(bake-off 胜出;GPT-SoVITS
                                   2026-05-28 弃用,已从 compose 移除)
+
+外部消费方(同机 toolkit 抖音管线): http://127.0.0.1:9101/transcribe
+  multipart audio=<mp4 bytes> [vad=1|0]
+  → {text, segments:[{t_start,t_end,text}], model}
 ```
 
 ## 2. GB10 接入与目录
@@ -44,9 +49,9 @@ GB10  192.168.0.68  (NVIDIA GB10 / arm64 / CUDA13 / Ubuntu24 / Docker)
 | 服务 | 端口(宿主) | 对外 | 持久化卷 |
 |---|---|---|---|
 | orchestrator | 8090 | 是(客户端 WS + Web 台 + /api) | `orch-data:/data` |
-| asr | 9100/9101 | 否(内部) | `~/funasr-prep/models:/models:ro` |
+| asr | 9100(WS,容器内) / 127.0.0.1:9101(HTTP `/embed`+`/transcribe`) | 9100 内部 / 9101 仅本机 | `~/funasr-prep/models:/models:ro` |
 | vLLM | 8085 | 主机 | — |
-| asr-server | 8091(仅本机 127.0.0.1) | 外部 HTTP 调用 | `~/asr-server-models:/models:ro` |
+| ~~asr-server~~ | ~~8091~~ | 已物理退役(2026-06) | — |
 | CosyVoice 2 | 8095(按需启动) | 是 | `~/funasr-prep/models:/models:ro`, `~/tts-io:/io`, `~/tts-voices:/voices:ro` |
 | ~~GPT-SoVITS~~ | ~~8096~~ | 已弃用(2026-05-28) | 卷与归档见 `server/tts/STATUS.md` |
 
@@ -169,8 +174,9 @@ curl -s http://192.168.0.68:8090/api/asr-config   # asr 运行配置
 # Web 管理台:浏览器 http://192.168.0.68:8090/
 ssh fengqi@192.168.0.68 'cd ~/server && docker compose logs --tail=40 asr'   # [asr][cfg]/[seg]/[spk]
 
-# asr-server(仅 GB10 本机可达)
-ssh fengqi@192.168.0.68 'curl -s http://127.0.0.1:8091/healthz'
+# FunASR /transcribe(仅 GB10 本机可达;给同机 toolkit 抖音管线消费)
+# 用任意短 wav/mp3/mp4 文件冒烟:
+ssh fengqi@192.168.0.68 'curl -s -F audio=@/tmp/smoke.wav -F vad=1 http://127.0.0.1:9101/transcribe'
 
 # TTS(容器启动后)
 curl -s http://192.168.0.68:8095/health           # CosyVoice;调用示例见 server/tts/API.md

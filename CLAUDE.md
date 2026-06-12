@@ -11,20 +11,25 @@ post-refactor thin-client form. See `docs/HANDOFF.md` for migration history.)
 
 ```
 Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24, Docker)
-  mic capture → WS upload                ├─ orchestrator  :8090  WS + SQLite + Web 管理台 + /api/*
-                                         ├─ asr           :9100/:9101 (内部)  FunASR + 声纹门控
-                                         ├─ vLLM (主机)   :8085  gemma-4-26B (润色/翻译)
-                                         └─ TTS bake-off  :8095/:8096 (CosyVoice2 / GPT-SoVITS,选型隔离)
+  mic capture → WS upload                ├─ orchestrator   :8090  WS + SQLite + Web 管理台 + /api/*
+                                         ├─ asr            :9100 (内部 WS) | 127.0.0.1:9101 (HTTP /embed + /transcribe)
+                                         │                FunASR + 声纹门控
+                                         ├─ vLLM (主机)    :8085  gemma-4-26B (润色/翻译)
+                                         └─ TTS bake-off   :8095/:8096 (CosyVoice2 / GPT-SoVITS,选型隔离)
 ```
 
-> 注：曾经的 `asr-server`（:8091 sherpa-onnx OpenAI 兼容 HTTP，供外部调用）已迁出至
-> **toolkit 工具中台**仓库（`jm-observer/toolkit`，`crates/asr-server`），不再属于本仓。
-> 本仓自身的实时转写走 `server/asr`（FunASR），与之无关。详见 `server/asr-server/MOVED.md`。
+> 注：曾经的 `asr-server`（:8091 sherpa-onnx OpenAI 兼容 HTTP，供外部调用）
+> **已物理退役**——先迁至 toolkit 仓 `crates/asr-server`，2026-06 又因与本仓 FunASR
+> 能力重叠（且 FunASR 中文准确率/热词/声纹/模型丰富度全面占优）从 toolkit 整 crate
+> 删除。外部离线转写**统一改走本仓 FunASR 的 `/transcribe` 端点**（`server/asr` 的
+> `:9101`，multipart 上传 wav/mp3/mp4 → `{text, segments[{t_start,t_end,text}], model}`）。
+> 详见 [`server/asr-server/MOVED.md`](server/asr-server/MOVED.md)。
 
 **Authoritative docs** — read these before deep work:
 - `docs/HANDOFF.md` — current status, what's done, what's next, key commits
 - `docs/DEPLOYMENT.md` — full deploy/ops reference (ports, volumes, redeploy flow)
 - `docs/redesign-architecture-overview.md` + `docs/protocol-draft.md` — design decisions, WS protocol
+- `docs/asr-transcribe-api.md` — FunASR `/transcribe` HTTP API contract (multipart in / JSON out, for toolkit + any外部消费方)
 - `server/tts/README.md` — TTS bake-off runbook (independent track)
 
 ## Top-level layout
@@ -34,8 +39,8 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24,
 | `src-tauri/` | Tauri desktop client (Rust). Thin: mic + UI + clipboard + remote WS. **No** sherpa-onnx, **no** local models. |
 | `src/` | React 19 + TypeScript + Vite + Tailwind front-end of the Tauri app. |
 | `server/orchestrator/` | Rust/axum service on GB10: client WS termination + SQLite + Web admin + HTTP API. |
-| `server/asr/` | Python FunASR container: streaming VAD + Paraformer/SenseVoice recognition + speaker gating + `/embed`. |
-| `server/asr-server/` | **已迁出** → toolkit 仓 `crates/asr-server`。仅留 `MOVED.md` 指针。 |
+| `server/asr/` | Python FunASR container: streaming VAD + Paraformer/SenseVoice/Whisper + speaker gating + HTTP `/embed`（声纹注册）+ HTTP `/transcribe`（离线整段，给同机 toolkit 抖音管线 multipart 上传 mp4 字节）。 |
+| `server/asr-server/` | **已退役**（2026-06）。仅留 `MOVED.md` 记录历史 + 指引新入口（同仓 `server/asr` 的 `/transcribe`）。 |
 | `server/tts/` | CosyVoice2 + GPT-SoVITS bake-off (independent compose, see its README). |
 | `server/compose.yaml` | Production-stack compose (asr + orchestrator). |
 | `scripts/release-server.ps1` | One-shot GB10 deploy (tar → scp → compose build/up → smoke). |
@@ -46,7 +51,8 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24,
 Root `Cargo.toml` is a Cargo workspace with two members: `src-tauri` (desktop client)
 and `server/orchestrator` (Rust/axum GB10 service). They are intentionally independent
 crates; nothing is shared at the library level. (`server/asr-server` was a former member,
-now migrated to the toolkit repo — see `server/asr-server/MOVED.md`.)
+later moved to toolkit, then physically retired in 2026-06 — see
+`server/asr-server/MOVED.md` for the full timeline and where ASR lives now.)
 
 ## Commands
 
