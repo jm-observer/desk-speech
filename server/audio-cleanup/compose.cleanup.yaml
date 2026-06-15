@@ -1,0 +1,29 @@
+# 独立音频清洗服务 — 刻意 NOT 放进 server/compose.yaml，避免扰动生产 asr/orchestrator。
+# 在 GB10 ~/server/audio-cleanup 跑：
+#   docker compose -f compose.cleanup.yaml up -d --build
+#
+# 端口仅绑 127.0.0.1:8097 —— 同机 douyin 直连足够；zero-desktop 经 toolkit-server :8788 代理。
+# 不暴露到 LAN（要 LAN 用再改 ports 或走反代加鉴权）。
+services:
+  audio-cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: audio-cleanup:gb10
+    runtime: nvidia
+    restart: unless-stopped       # 被 douyin 自动管线消费，需 GB10 重启后自愈
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CLEAN_PORT=8097
+      # Demucs device：Plan 1 spike（2026-06-15）实测拍板 cuda（方案 B）——显存峰值仅
+      # 0.91GB、净算约 cpu 的 4×、子进程退出即释放。降级排查时可 export CLEAN_DEMUCS_DEVICE=cpu。
+      - CLEAN_DEMUCS_DEVICE=${CLEAN_DEMUCS_DEVICE:-cuda}
+      # 限额（可覆盖）。CPU 模式 Demucs ~1.5×音频时长，长音频易撞超时，必要时下调 MAX_DURATION。
+      - CLEAN_MAX_DURATION_SEC=${CLEAN_MAX_DURATION_SEC:-600}
+      - CLEAN_PROCESS_TIMEOUT_SEC=${CLEAN_PROCESS_TIMEOUT_SEC:-600}
+      - CLEAN_QUEUE_MAX=${CLEAN_QUEUE_MAX:-4}
+    volumes:
+      # demucs/DF 权重缓存，宿主持久化、不进镜像（silero 模型随 silero-vad wheel 内置）。
+      - ${TORCH_CACHE:-/home/fengqi/audio-cleanup/torch-cache}:/root/.cache/torch
+    ports:
+      - "127.0.0.1:8097:8097"

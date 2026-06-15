@@ -1,0 +1,23 @@
+# Plan 1 spike：仅用于在 GB10 上验证 Demucs(htdemucs) 能否跑通。
+# 不是生产镜像，验证完结论回填 README 后即可弃用（Plan 2 的正式 Dockerfile 复用结论）。
+#
+# 基于 GB10 已验证镜像 funasr-asr:arm64（含 torch 2.13.dev+cu130 / arm64 / sm_121）。
+# 关键：装 demucs 时绝不能让 pip 把 torch 拉成 PyPI 正式版——下方构建期断言守住这条线。
+FROM funasr-asr:arm64
+
+# pip 走 Aliyun 镜像（pypi.org/清华在 GB10 SSL 抖动）；--no-cache-dir 避免坏缓存。
+# 不重装 torch/torchaudio：复用基础镜像的 dev 版。
+RUN pip3 install --break-system-packages --no-cache-dir \
+    --default-timeout=600 --retries 10 \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    demucs
+
+# 构建期断言：torch 必须仍是 2.13 + cu130，否则 demucs 偷偷升级了 torch，立即让构建失败。
+RUN python3 -c "import torch; v=torch.__version__; assert v.startswith('2.13') and 'cu130' in v, 'torch drifted: '+v; print('torch OK', v)"
+
+WORKDIR /spike
+COPY run_spike.py /spike/run_spike.py
+
+# 入口默认跑验证脚本。测试 wav 路径由 env 传入（挂载进来）。
+ENV SPIKE_WAV=/spike/test.wav
+CMD ["python3", "/spike/run_spike.py"]
