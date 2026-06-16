@@ -109,10 +109,13 @@ fn optimize_prompt_with_hotwords(prompt: String, hotwords_raw: &str) -> String {
     }
     let list = words.join("、");
     format!(
-        "{prompt}\n\n【ASR 同音字纠错】本场景必出现术语:{list}。\
-         请主动检查原文是否包含与上列任一术语同音或近音的字串(汉字不同但读音相同/相近,例如 \
-         huìhuà 既可写作\"绘画\"也可写作\"会话\");若有,即使字面看起来已通顺,\
-         也应改为术语词。这是高优先级修正,优先于一般的口语病规整。"
+        "{prompt}\n\n【ASR 术语纠错】本场景必出现术语:{list}。\
+         请主动检查原文是否包含与上列任一术语读音相同/相近的字串,若有则一律改为术语词,\
+         即使字面看起来已通顺也要改。两类都要查:\
+         (1) 汉字同音/近音(汉字不同但读音相同相近,例如 huìhuà 既可写作\"绘画\"也可写作\"会话\");\
+         (2) 英文术语被识别成的英文近音串(例如术语 \"Claude Code\" 可能被错听成 \"cloud cold\"/\"cud cold\"/\"cloud code\",\
+         术语 \"codex\" 可能被错听成 \"co decks\"/\"codecs\");纠正后请用术语本身的标准写法与大小写。\
+         这是高优先级修正,优先于一般的口语病规整。"
     )
 }
 
@@ -138,10 +141,12 @@ async fn main() {
     for (k, v) in [
         ("asr.spk_threshold", "0.35"),
         ("asr.sentence_gap_ms", "1500"),
-        ("asr.model", "paraformer"), // paraformer|sensevoice|whisper-turbo|whisper-large-v3 (hot-switch)
+        // 中英文混合识别:默认 sensevoice(多语 zh/en,正确转出英文术语,低延迟适合流式);
+        // 纯中文场景可在控制台热切回 paraformer。paraformer|sensevoice|whisper-turbo|whisper-large-v3
+        ("asr.model", "sensevoice"),
         // 次模型(对比用):空=禁用。客户端 hello.want_secondary=true 时生效;
-        // 同枚举集合,自动避免与主模型重复。
-        ("asr.secondary_model", "sensevoice"),
+        // 同枚举集合,自动避免与主模型重复。默认 paraformer = 混合 vs 纯中文 A/B。
+        ("asr.secondary_model", "paraformer"),
         ("asr.gate_to_enrolled", "on"), // on=仅识别已启用声纹 | off=识别所有人
         // 领域热词:每行一个词,可选 "词 权重"(权重 ≥1.0,默认 1.0)。
         // 同时喂给:(a) ASR 声学层(Paraformer hotword= / Whisper initial_prompt);
@@ -1082,7 +1087,7 @@ async function render(){
 }
 const CFG_META={
  'asr.model':{label:'ASR 模型',group:'ASR',kind:'select',options:['paraformer','sensevoice','whisper-turbo','whisper-large-v3'],
-  hint:'识别后端模型。paraformer/sensevoice 为中文优先;whisper-turbo/whisper-large-v3 多语种自动识别(turbo 更快、large-v3 更准)。修改后 ASR 服务在 ~15s 内热切换(无需重启;切换期间在跑的那段会用旧模型完成)。首次切到 Whisper 会加载权重,耗时稍长。'},
+  hint:'识别后端模型。默认 sensevoice(中英文混合:中文为主、能正确转出英文术语,低延迟适合流式);paraformer 纯中文优先(英文会被音译);whisper-turbo/whisper-large-v3 多语种自动识别(turbo 更快、large-v3 更准,延迟较高)。修改后 ASR 服务在 ~15s 内热切换(无需重启;切换期间在跑的那段会用旧模型完成)。首次切到 Whisper 会加载权重,耗时稍长。'},
  'asr.secondary_model':{label:'次模型(对比)',group:'ASR',kind:'select',options:['','paraformer','sensevoice','whisper-turbo','whisper-large-v3'],
   hint:'仅在桌面端打开「次模型对比」开关时生效。空=禁用。与主模型重复会被自动跳过。次模型只跑识别(不参与润色/翻译),用于对比中文识别能力。首次有会话启用时才会真正加载权重。'},
  'asr.spk_threshold':{label:'声纹匹配阈值',group:'ASR',
