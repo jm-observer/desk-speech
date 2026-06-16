@@ -64,7 +64,12 @@ fn parse_hotwords(raw: &str) -> Vec<String> {
     raw.lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+        // 行尾可选权重("词 1.5")仅当最后一个 token 是数字时剥掉;否则整行都是词面,
+        // 以保留 "claude code" 这类含空格的多词术语(否则会被截成 "claude")。
+        .map(|l| match l.rsplit_once(char::is_whitespace) {
+            Some((head, tail)) if tail.parse::<f32>().is_ok() => head.trim_end().to_string(),
+            _ => l.to_string(),
+        })
         .filter(|w| !w.is_empty())
         .collect()
 }
@@ -109,13 +114,10 @@ fn optimize_prompt_with_hotwords(prompt: String, hotwords_raw: &str) -> String {
     }
     let list = words.join("、");
     format!(
-        "{prompt}\n\n【ASR 术语纠错】本场景必出现术语:{list}。\
-         请主动检查原文是否包含与上列任一术语读音相同/相近的字串,若有则一律改为术语词,\
-         即使字面看起来已通顺也要改。两类都要查:\
-         (1) 汉字同音/近音(汉字不同但读音相同相近,例如 huìhuà 既可写作\"绘画\"也可写作\"会话\");\
-         (2) 英文术语被识别成的英文近音串(例如术语 \"Claude Code\" 可能被错听成 \"cloud cold\"/\"cud cold\"/\"cloud code\",\
-         术语 \"codex\" 可能被错听成 \"co decks\"/\"codecs\");纠正后请用术语本身的标准写法与大小写。\
-         这是高优先级修正,优先于一般的口语病规整。"
+        "{prompt}\n\n【ASR 同音字纠错】本场景必出现术语:{list}。\
+         请主动检查原文是否包含与上列任一术语同音或近音的字串(汉字不同但读音相同/相近,例如 \
+         huìhuà 既可写作\"绘画\"也可写作\"会话\");若有,即使字面看起来已通顺,\
+         也应改为术语词。这是高优先级修正,优先于一般的口语病规整。"
     )
 }
 
@@ -409,6 +411,13 @@ async fn asr_reader(
     stream_ctx: TraceContext,
 ) -> u64 {
     let mut seg_count: u64 = 0;
+    // 会话墙上时钟锚点:音频 t=0 ≈ asr_reader 起点的真实时刻。每段 wall = anchor + 偏移,
+    // 把音频时间线整体映射到真实时间线(单调、不重叠、时长准确)。
+    let session_anchor = chrono::Local::now();
+    fn wall_at(anchor: chrono::DateTime<chrono::Local>, secs: f64) -> String {
+        let dt = anchor + chrono::Duration::milliseconds((secs * 1000.0).round() as i64);
+        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
     type CliTx = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
     async fn send(tx: &CliTx, json: String) {
         let _ = tx.lock().await.send(Message::Text(json)).await;
@@ -538,6 +547,8 @@ async fn asr_reader(
                         t_start: Some(seg_t0 as f32),
                         t_end: Some(seg_t1 as f32),
                         speaker: speaker.map(str::to_string),
+                        wall_start: Some(wall_at(session_anchor, seg_t0)),
+                        wall_end: Some(wall_at(session_anchor, seg_t1)),
                     }
                     .json(),
                 )

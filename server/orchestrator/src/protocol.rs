@@ -53,6 +53,12 @@ pub enum ServerEvent {
         t_end: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         speaker: Option<String>,
+        /// 权威墙上时钟（"%Y-%m-%d %H:%M:%S"）= 会话锚点 + 音频偏移 t_start/t_end。
+        /// 客户端直接展示，不再用收到时刻自行推算（避免跨会话/合并链区间重叠）。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wall_start: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wall_end: Option<String>,
     },
     Optimized {
         r#ref: u64,
