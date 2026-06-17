@@ -570,10 +570,16 @@ async fn asr_reader(
                 // optimize + translate run concurrently in a detached task so
                 // segment N+1 is forwarded without waiting on N's LLM. Results
                 // are keyed by `ref` id, so out-of-order arrival is fine.
-                if hello.want_optimize || hello.want_translate {
+                // 合并模式 + 次模型开启时,主模型润色推迟到 `secondary` 事件,
+                // 届时用主链+次链双候选一次性润色(见下方 secondary 分支),避免
+                // "先按主模型润一版、次模型来了再润一版"的翻倍调用与闪烁覆盖。
+                // 翻译只需主模型,仍在此处随段触发。
+                let defer_opt_to_secondary = merge_on && hello.want_secondary;
+                let do_opt_here = hello.want_optimize && !defer_opt_to_secondary;
+                if do_opt_here || hello.want_translate {
                     let model = db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
                     let base = db.config_get("vllm.base").unwrap_or_else(|| c.vllm_base.clone());
-                    let opt_sys = hello.want_optimize.then(|| {
+                    let opt_sys = do_opt_here.then(|| {
                         let base = db
                             .config_get("llm.optimize_prompt")
                             .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
@@ -676,9 +682,63 @@ async fn asr_reader(
                     db.segment_set_secondary(seg_id as i64, &full);
                     send(
                         &cli_tx,
-                        ServerEvent::Secondary { r#ref: seg_id, text: full, kind }.json(),
+                        ServerEvent::Secondary { r#ref: seg_id, text: full.clone(), kind }.json(),
                     )
                     .await;
+
+                    // 合并模式下主模型润色被推迟到此处:取该链当前累积的主链文本 +
+                    // 次链文本,以双候选(【模型A】/【模型B】)一次性整链润色。沿用合并
+                    // 模式"不喂历史上文"原则(链本身即上下文,且不喂回润色结果防滚雪球)。
+                    // 用 opt_emitted 按主链字符数 latest-wins 防并发乱序覆盖,与主路径
+                    // 共用同一守卫(两路都以主链长度为闸,单调递增)。
+                    if hello.want_optimize {
+                        if let Some(seg) = db.segment_get(seg_id as i64) {
+                            let prim = seg.text;
+                            let prim_len = prim.chars().count();
+                            if prim_len > 0 {
+                                let sys = {
+                                    let base = db
+                                        .config_get("llm.optimize_prompt")
+                                        .unwrap_or_else(|| DEFAULT_OPTIMIZE_PROMPT.into());
+                                    let hw = db.config_get("asr.hotwords").unwrap_or_default();
+                                    optimize_prompt_with_hotwords(base, &hw)
+                                };
+                                let user_msg = build_optimize_user_msg(&[], &prim, Some(&full));
+                                let model =
+                                    db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
+                                let base_url =
+                                    db.config_get("vllm.base").unwrap_or_else(|| c.vllm_base.clone());
+                                let db4 = db.clone();
+                                let tx4 = cli_tx.clone();
+                                let llm_ctx = stream_ctx.clone();
+                                let opt_emitted4 = opt_emitted.clone();
+                                llm_tasks.push(tokio::spawn(async move {
+                                    if let Ok(opt) =
+                                        llm(&base_url, &model, &sys, &user_msg, Some(&llm_ctx)).await
+                                    {
+                                        let pass = {
+                                            let mut g = opt_emitted4.lock().unwrap();
+                                            if prim_len >= g.get(&seg_id).copied().unwrap_or(0) {
+                                                g.insert(seg_id, prim_len);
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if pass {
+                                            db4.segment_set_optimized(seg_id as i64, &opt);
+                                            send(
+                                                &tx4,
+                                                ServerEvent::Optimized { r#ref: seg_id, text: opt }
+                                                    .json(),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }));
+                            }
+                        }
+                    }
                     continue;
                 }
 
