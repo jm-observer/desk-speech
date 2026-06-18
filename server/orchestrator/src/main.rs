@@ -181,6 +181,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/stream", get(ws_upgrade))
+        .route("/health", get(health))
         .route("/", get(console))
         .route("/segment/:id", get(console))
         .route("/api/stats", get(api_stats))
@@ -203,6 +204,14 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     tracing::info!("orchestrator listening on {bind} (asr={})", c.asr_ws);
     axum::serve(listener, app).await.expect("serve");
+}
+
+/// 健康端点：供 G10 部署面板探测连通性 + 版本（返回 2xx JSON）。
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 async fn ws_upgrade(State(ctx): State<AppCtx>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
