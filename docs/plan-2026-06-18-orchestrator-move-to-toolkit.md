@@ -18,10 +18,11 @@
 - [x] **Step 3** orchestrator `main` 重构为 clap CLI(`serve`/`install`/`update`)+ watchdog,
   env 默认改回环(`ASR_WS=ws://127.0.0.1:9100` 等),workspace 默认 `~/.config/orchestrator`。
 - [x] **Step 4** 移入 `toolkit/crates/orchestrator`,加入 workspace members;依赖对齐
-  (custom-utils→workspace 0.16.0 带 `updater`;rusqlite 保留 0.38)。
-  **实测:rusqlite 0.31(toolkit)与 0.38(orchestrator)在同 workspace 共存无冲突**
-  ——两者是独立 binary、`libsqlite3-sys` 子树不相交;`toolkit-server`/`toolkit-core`/`rag`
-  均仍正常编译。故无需对齐 rusqlite 版本。
+  (custom-utils→workspace 0.16.0 带 `updater`)。
+  **rusqlite 直接对齐到 toolkit 的 workspace 版本 0.31**(原仓用 0.38 仅为与 src-tauri 的
+  deadpool-sqlite 对齐,迁出后约束消失);db.rs 实测与 0.31 兼容,本地 `cargo check` +
+  aarch64 交叉编译均通过。SQLite 文件格式跨版本兼容,迁移的 app.db 不受影响。
+  (故不存在双版本共存问题——比原先设想更干净。)
 - [x] **Step 5** `deploy-g10.ps1`:`$Bins` 加 orchestrator;新增 `$DaemonBins`,install/重启
   分支泛化为按 `$Service` 通用处理(toolkit-server 与 orchestrator install CLI 一致)。
 - [ ] **Step 6** SQLite 数据迁移(GB10 现场,见下)。
@@ -32,6 +33,34 @@ LLM 超时/兜底修复(todo-2026-06-18)已先在原仓 `server/orchestrator` �
 
 > 迁移期 `server/orchestrator` 暂不删除(双存),待 Step 7 现场验收通过后再退役 +
 > 留 MOVED.md(参照 `server/asr-server/MOVED.md`)。
+
+## 现场执行结果(2026-06-19,Step 1/3/6/7 已上线)
+
+orchestrator 已从 Docker 容器切到 **toolkit 仓的 systemd 用户服务**,跑在 GB10,
+`active (running)`,客户端 URL `ws://192.168.0.68:8090/stream` 不变。验证:`/health` ok、
+`/api/stats` = 迁移后的 174 sessions / 3444 segments、`/api/asr-config` 热词+配置完整、
+trace 已启用、watchdog(Type=notify)正常。
+
+**现场发现的端口/配置实情(与初稿不同,已据此调整)**:
+- 宿主 `:9100` 被 **trace-hub** 进程占用 → asr 改映射到 **`127.0.0.1:9110`**(compose 已改),
+  orchestrator 用 `ASR_WS=ws://127.0.0.1:9110`。
+- vLLM 实际在宿主 **`:12340`**(不是 compose 写的 8085;live DB `vllm.base` 才是权威)。
+- DB `vllm.base` 原值 `http://host.docker.internal:12340/v1`(docker-only 名,宿主进程
+  解析不了)→ 迁移后 **改写为 `http://127.0.0.1:12340/v1`**。
+- TRACE_HUB_ENDPOINT 注入 `http://127.0.0.1:9100/v1/spans`(宿主 trace-hub)。
+- 数据:`server_orch-data` 卷的 `app.db`(147MB,无 WAL)→ `~/.config/orchestrator/app.db`
+  (以 uid 1000 拷贝,可写),config 表 9 键完整。
+
+**回滚保留**:旧 `server-orchestrator-1` 容器**已 stop 但未删**(restart=unless-stopped,
+stop 后重启机器不会自起)。若新服务异常:`systemctl --user stop orchestrator` 后
+`cd ~/server && docker compose start orchestrator` 即回旧版。
+
+> ⚠️ **footgun**:旧容器还在 GB10 compose 里。**别在 ~/server 跑 `docker compose up -d`
+> (无参)或 `release-server.ps1 -Service both/orchestrator`**——会拉起旧容器抢 8090
+> 与新 systemd 服务冲突。`release-server.ps1 -Service asr` 安全(只 up asr)。
+> 待真机客户端验收通过后做**最终退役**:GB10 compose 删 orchestrator 服务 +
+> `docker compose rm -f orchestrator` + 删卷;`release-server.ps1` 退 orchestrator/both 分支;
+> `server/orchestrator/` 留 MOVED.md;更新 CLAUDE.md / DEPLOYMENT.md。
 
 ## 0. 决策结论(先读)
 
@@ -154,7 +183,7 @@ cd ~/server && docker compose stop orchestrator && docker compose rm -f orchestr
 | 风险 | 说明 / 缓解 |
 |---|---|
 | axum 版本 | 已决策不升级:orchestrator 保留 0.7(独立 binary,与 toolkit 0.8 共存),零改动、已编译通过。 |
-| rusqlite 版本冲突 | 已验证 0.38(orchestrator)与 0.31(toolkit)同 workspace 共存,无需对齐。 |
+| rusqlite 版本 | orchestrator 直接对齐到 toolkit workspace 的 0.31(db.rs 兼容,已编译+交叉编译通过);SQLite 文件格式跨版本兼容。 |
 | asr 9100 暴露面 | 仅 `127.0.0.1`,不上 LAN;与 9101 同策略。 |
 | config 表丢失 | Step 6 显式校验 `config` 行数;迁移前后 diff。 |
 | 面板脚本只认 toolkit-server | Step 5 需泛化 daemon install 分支(否则 orchestrator 不会被 install/重启)。 |

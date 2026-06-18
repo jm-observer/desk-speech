@@ -22,9 +22,10 @@ services:
       - "9100"
     ports:
       # 内部 WS :9100 —— compose 内仍走服务名 `asr`;另发布到本机回环,供已迁出
-      # 容器的 orchestrator(toolkit 仓,宿主 systemd 进程)经 127.0.0.1:9100 连接。
-      # 仅本机回环,不上 LAN。
-      - "127.0.0.1:9100:9100"
+      # 容器的 orchestrator(toolkit 仓,宿主 systemd 进程)连接。
+      # **宿主 9100 已被 trace-hub 进程占用**,故映射到 9110;orchestrator 用
+      # ASR_WS=ws://127.0.0.1:9110。仅本机回环,不上 LAN。
+      - "127.0.0.1:9110:9100"
       # /embed + /transcribe HTTP 给同机外部消费(toolkit 抖音管线调 /transcribe);
       # 仅本机回环,避免无意暴露到 LAN。
       - "127.0.0.1:9101:9101"
