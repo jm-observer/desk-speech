@@ -5,8 +5,8 @@ mod db;
 mod protocol;
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Bytes,
@@ -77,10 +77,16 @@ fn parse_hotwords(raw: &str) -> Vec<String> {
 /// 构造发给 LLM 的 user message。
 /// - context: 20 秒内历史优化文本(按时序排列),供 LLM 感知话题连贯性。
 /// - primary: 主模型原始识别文本。
-/// - secondary: 可选的次模型识别文本;有则以双候选形式呈现,让 LLM 择优合并。
+/// - secondary: 可选的次模型双候选;有则以 `(主模型名, 次模型名, 次模型文本)` 形式
+///   呈现,两行各以真实模型名标注(「【sensevoice 识别】」/「【paraformer 识别】」),
+///   让 LLM 结合各模型已知强弱择优合并成一条。
 ///
 /// 无 context 且无 secondary 时直接返回 primary,与旧行为完全相同。
-fn build_optimize_user_msg(context: &[String], primary: &str, secondary: Option<&str>) -> String {
+fn build_optimize_user_msg(
+    context: &[String],
+    primary: &str,
+    secondary: Option<(&str, &str, &str)>,
+) -> String {
     if context.is_empty() && secondary.is_none() {
         return primary.to_string();
     }
@@ -94,10 +100,10 @@ fn build_optimize_user_msg(context: &[String], primary: &str, secondary: Option<
         s.push('\n');
     }
     match secondary {
-        Some(sec) => {
-            s.push_str("【模型A识别】");
+        Some((pname, sname, sec)) => {
+            s.push_str(&format!("【{pname} 识别】"));
             s.push_str(primary);
-            s.push_str("\n【模型B识别】");
+            s.push_str(&format!("\n【{sname} 识别】"));
             s.push_str(sec);
         }
         None => s.push_str(primary),
@@ -619,7 +625,18 @@ async fn asr_reader(
                         let opt_user = build_optimize_user_msg(&ctx_texts, &prim, None);
                         let opt_fut = async {
                             match &opt_sys {
-                                Some(s) => llm(&base, &model, s, &opt_user, Some(&llm_ctx)).await.ok(),
+                                // 润色失败/超时:回发原文兜底,让该段从"优化中"落定,
+                                // 不让客户端永久转圈(trace 里 llm() 已记 Err)。
+                                Some(s) => Some(
+                                    llm(&base, &model, s, &opt_user, Some(&llm_ctx))
+                                        .await
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!(
+                                                "[orch] optimize failed for seg {id}, fallback to raw: {e}"
+                                            );
+                                            prim.clone()
+                                        }),
+                                ),
                                 None => None,
                             }
                         };
@@ -691,7 +708,7 @@ async fn asr_reader(
                     db.segment_set_secondary(seg_id as i64, &full);
                     send(
                         &cli_tx,
-                        ServerEvent::Secondary { r#ref: seg_id, text: full.clone(), kind }.json(),
+                        ServerEvent::Secondary { r#ref: seg_id, text: full.clone(), kind: kind.clone() }.json(),
                     )
                     .await;
 
@@ -712,7 +729,14 @@ async fn asr_reader(
                                     let hw = db.config_get("asr.hotwords").unwrap_or_default();
                                     optimize_prompt_with_hotwords(base, &hw)
                                 };
-                                let user_msg = build_optimize_user_msg(&[], &prim, Some(&full));
+                                let pname =
+                                    db.config_get("asr.model").unwrap_or_else(|| "主模型".into());
+                                let sname = kind.clone().unwrap_or_else(|| "次模型".into());
+                                let user_msg = build_optimize_user_msg(
+                                    &[],
+                                    &prim,
+                                    Some((&pname, &sname, &full)),
+                                );
                                 let model =
                                     db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
                                 let base_url =
@@ -722,27 +746,33 @@ async fn asr_reader(
                                 let llm_ctx = stream_ctx.clone();
                                 let opt_emitted4 = opt_emitted.clone();
                                 llm_tasks.push(tokio::spawn(async move {
-                                    if let Ok(opt) =
-                                        llm(&base_url, &model, &sys, &user_msg, Some(&llm_ctx)).await
-                                    {
-                                        let pass = {
-                                            let mut g = opt_emitted4.lock().unwrap();
-                                            if prim_len >= g.get(&seg_id).copied().unwrap_or(0) {
-                                                g.insert(seg_id, prim_len);
-                                                true
-                                            } else {
-                                                false
-                                            }
-                                        };
-                                        if pass {
-                                            db4.segment_set_optimized(seg_id as i64, &opt);
-                                            send(
-                                                &tx4,
-                                                ServerEvent::Optimized { r#ref: seg_id, text: opt }
-                                                    .json(),
-                                            )
-                                            .await;
+                                    // 合并模式润色推迟到此处:失败/超时回发原文兜底,
+                                    // 否则该链客户端永久"优化中"(trace 里 llm() 已记 Err)。
+                                    let opt = llm(&base_url, &model, &sys, &user_msg, Some(&llm_ctx))
+                                        .await
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!(
+                                                "[orch] merge optimize failed for chain {seg_id}, fallback to raw: {e}"
+                                            );
+                                            prim.clone()
+                                        });
+                                    let pass = {
+                                        let mut g = opt_emitted4.lock().unwrap();
+                                        if prim_len >= g.get(&seg_id).copied().unwrap_or(0) {
+                                            g.insert(seg_id, prim_len);
+                                            true
+                                        } else {
+                                            false
                                         }
+                                    };
+                                    if pass {
+                                        db4.segment_set_optimized(seg_id as i64, &opt);
+                                        send(
+                                            &tx4,
+                                            ServerEvent::Optimized { r#ref: seg_id, text: opt }
+                                                .json(),
+                                        )
+                                        .await;
                                     }
                                 }));
                             }
@@ -757,7 +787,7 @@ async fn asr_reader(
                     ServerEvent::Secondary {
                         r#ref: seg_id,
                         text: text.clone(),
-                        kind,
+                        kind: kind.clone(),
                     }
                     .json(),
                 )
@@ -776,7 +806,14 @@ async fn asr_reader(
                                 let hw = db.config_get("asr.hotwords").unwrap_or_default();
                                 optimize_prompt_with_hotwords(base, &hw)
                             };
-                            let user_msg = build_optimize_user_msg(&ctx_texts, &seg.text, Some(&text));
+                            let pname =
+                                db.config_get("asr.model").unwrap_or_else(|| "主模型".into());
+                            let sname = kind.clone().unwrap_or_else(|| "次模型".into());
+                            let user_msg = build_optimize_user_msg(
+                                &ctx_texts,
+                                &seg.text,
+                                Some((&pname, &sname, &text)),
+                            );
                             let model = db.config_get("vllm.model").unwrap_or_else(|| c.vllm_model.clone());
                             let base_url = db.config_get("vllm.base").unwrap_or_else(|| c.vllm_base.clone());
                             let db3 = db.clone();
@@ -888,7 +925,7 @@ async fn api_speaker_enroll(
     if name.trim().is_empty() {
         return Json(json!({"ok": false, "error": "缺少名称"}));
     }
-    let resp = reqwest::Client::new()
+    let resp = http_client()
         .post(&ctx.cfg.asr_embed)
         .body(body.to_vec())
         .send()
@@ -1423,6 +1460,23 @@ fn pcm16_to_wav(pcm: &[u8]) -> Vec<u8> {
 /// OpenAI 兼容 chat completions(指向主机上的 vLLM)。
 /// base/model 由调用方从 DB config 解析(回退 env),提示词同理。
 /// `ctx` Some 时记 `llm_call` span(含 request/response body);None 时纯执行。
+/// 进程级共享 HTTP 客户端,**带超时**。`reqwest::Client::new()` 默认无超时:
+/// 若 vLLM 连上却迟迟不返回,`send()/text()` 的 future 永不 resolve,润色任务
+/// 永远 pending —— 客户端永久"优化中"、trace 也记不到这次调用(记录点在请求
+/// 返回之后)。给所有出站 HTTP 设统一超时,把"卡死"转成可观测的 `Err`。
+/// 详见 docs/todo-2026-06-18-optimize-hang-no-trace.md。
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            // 润色/翻译是短输出(max_tokens=256),正常一两秒;取宽松值兜底卡死。
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("build reqwest client")
+    })
+}
+
 async fn llm(
     base: &str,
     model: &str,
@@ -1444,7 +1498,7 @@ async fn llm(
     let start_ms = if traced { trace::now_ms() } else { 0 };
     let request_body = if traced { body.to_string() } else { String::new() };
     let result: anyhow::Result<(String, String)> = async {
-        let raw = reqwest::Client::new()
+        let raw = http_client()
             .post(format!("{}/chat/completions", base))
             .json(&body)
             .send()
