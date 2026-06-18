@@ -25,8 +25,12 @@
   (故不存在双版本共存问题——比原先设想更干净。)
 - [x] **Step 5** `deploy-g10.ps1`:`$Bins` 加 orchestrator;新增 `$DaemonBins`,install/重启
   分支泛化为按 `$Service` 通用处理(toolkit-server 与 orchestrator install CLI 一致)。
-- [ ] **Step 6** SQLite 数据迁移(GB10 现场,见下)。
-- [ ] **Step 7** 切流量 + 退役旧路径(GB10 现场 + 文档更新)。
+- [x] **Step 6** SQLite 数据迁移(`server_orch-data/app.db` → `~/.config/orchestrator/app.db`,
+  config 9 键完整,`vllm.base` 已改写)。
+- [x] **Step 7** 切流量 + 退役完成:旧容器删除、GB10 compose 仅剩 asr、stale 卷清理、
+  `release-server.ps1` 退 orchestrator 分支、`server/orchestrator/` 留 MOVED.md、根 Cargo.toml
+  移除成员、CLAUDE.md / DEPLOYMENT.md 更新。**真机客户端验收通过**(stats 段数实时增长印证写链路)。
+  保留:`server_orch-data` 卷作短期备份(可随时 `docker volume rm server_orch-data` 删)。
 
 LLM 超时/兜底修复(todo-2026-06-18)已先在原仓 `server/orchestrator` 落地,再随文件
 拷入 toolkit,故迁移版**已含**该修复。
