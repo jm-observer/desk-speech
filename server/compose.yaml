@@ -1,4 +1,7 @@
-# GB10 服务端编排(P0)。vLLM 维持主机现状,不在此 compose 内。
+# GB10 服务端 compose。**只剩 asr**——orchestrator 已于 2026-06 迁出至 toolkit 仓
+# (crates/orchestrator),改为宿主 systemd 服务部署(toolkit `deploy-g10.ps1 -Service
+# orchestrator`),不再容器化。vLLM 维持主机现状,不在此 compose 内。
+# orchestrator 作为宿主进程经 127.0.0.1:9110 连本 asr(见下 ports 注释)。
 services:
   asr:
     build: ./asr            # 薄层,FROM funasr-asr:arm64(已验证基镜像)
@@ -29,28 +32,3 @@ services:
       # /embed + /transcribe HTTP 给同机外部消费(toolkit 抖音管线调 /transcribe);
       # 仅本机回环,避免无意暴露到 LAN。
       - "127.0.0.1:9101:9101"
-
-  orchestrator:
-    build: ./orchestrator
-    image: orchestrator:latest
-    restart: unless-stopped
-    depends_on:
-      - asr
-    environment:
-      - ORCH_BIND=0.0.0.0:8090          # 对客户端的 WebSocket
-      - ASR_WS=ws://asr:9100            # 内部 ASR 服务
-      # vLLM 在主机上;host.docker.internal 经 extra_hosts 解析
-      - VLLM_BASE=http://host.docker.internal:8085/v1
-      - VLLM_MODEL=gemma-4-26B-A4B-it
-      - DATA_DIR=/data                  # SQLite persistence (sessions/segments/speakers/config)
-      # 全链路追踪(trace-hub 宿主进程在 :9100)。未设此变量则零追踪、零影响。
-      - TRACE_HUB_ENDPOINT=http://host.docker.internal:9100/v1/spans
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - orch-data:/data
-    ports:
-      - "8090:8090"
-
-volumes:
-  orch-data:

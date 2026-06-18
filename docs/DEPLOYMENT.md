@@ -3,6 +3,17 @@
 > 全系统部署与运维的**单一参考**。状态/续作看 `HANDOFF.md`;
 > TTS bake-off 细节看 `server/tts/README.md`(本文只做汇总与索引)。
 
+> ⚠️ **orchestrator 已迁出本仓(2026-06)**。现在 toolkit 仓 `crates/orchestrator`,
+> 改为 **GB10 宿主 systemd 用户服务**(非容器),用 toolkit 的
+> `deploy-g10.ps1 -Service orchestrator -Bind 0.0.0.0:8090` 部署。
+> **本文中所有把 orchestrator 当 Docker 服务的章节(部署/备份/卷/`server-orchestrator-1`
+> 容器名/`docker compose ... orchestrator`)均已过时**——orchestrator 的权威部署/运维见
+> [`plan-2026-06-18-orchestrator-move-to-toolkit.md`](plan-2026-06-18-orchestrator-move-to-toolkit.md)
+> 的「现场执行结果」与 `server/orchestrator/MOVED.md`。要点:
+> - 状态/日志:`ssh ... 'export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user status orchestrator'`
+> - DB 在宿主 `~/.config/orchestrator/app.db`(不再是 docker 卷;备份直接 `cp` 该文件)。
+> - asr 经宿主 `127.0.0.1:9110`;vLLM `127.0.0.1:12340`;trace-hub `127.0.0.1:9100`。
+>
 > ⚠️ **asr-server 已物理退役**。先从本仓迁至 toolkit 仓 `crates/asr-server`（2026-06 早），
 > 后因与本仓 FunASR 能力重叠在 toolkit 又被整 crate 删除（2026-06 中后期）。
 > 外部离线转写**统一改走本仓 FunASR 的 `/transcribe` 端点**（`server/asr` :9101，
@@ -15,11 +26,12 @@
 Windows 桌面客户端(Tauri/Rust,采麦+UI+剪贴板,远程模式)
    │  WebSocket  ws://192.168.0.68:8090/stream
    ▼
-GB10  192.168.0.68  (NVIDIA GB10 / arm64 / CUDA13 / Ubuntu24 / Docker)
-   ├─ orchestrator 容器   :8090  WS 编排 + SQLite + Web 管理台 + /api/*
-   ├─ asr 容器            :9100(内部 WS) | 127.0.0.1:9101(HTTP)
+GB10  192.168.0.68  (NVIDIA GB10 / arm64 / CUDA13 / Ubuntu24)
+   ├─ orchestrator 宿主 systemd 服务  :8090  WS 编排 + SQLite + Web 管理台 + /api/*
+   │                      (已迁出本仓 → toolkit crates/orchestrator;DB ~/.config/orchestrator/app.db)
+   ├─ asr 容器(Docker)  127.0.0.1:9110→9100(内部 WS) | 127.0.0.1:9101(HTTP)
    │                      FunASR 流式识别 + 声纹门控 + /embed + /transcribe
-   ├─ vLLM 主机进程       :8085  gemma-4-26B-A4B-it(润色/翻译)
+   ├─ vLLM 主机进程       :12340  gemma-4-26B-A4B-it(润色/翻译)
    └─ TTS(独立,与上面隔离;按需启动)
         └─ cosyvoice       :8095  CosyVoice 2(bake-off 胜出;GPT-SoVITS
                                   2026-05-28 弃用,已从 compose 移除)

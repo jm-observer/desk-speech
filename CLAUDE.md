@@ -10,11 +10,13 @@ Chinese/multilingual speech transcription with optional LLM polish & translation
 post-refactor thin-client form. See `docs/HANDOFF.md` for migration history.)
 
 ```
-Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24, Docker)
+Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24)
   mic capture → WS upload                ├─ orchestrator   :8090  WS + SQLite + Web 管理台 + /api/*
-                                         ├─ asr            :9100 (内部 WS) | 127.0.0.1:9101 (HTTP /embed + /transcribe)
+                                         │                **已迁出本仓 → toolkit 仓 crates/orchestrator,
+                                         │                现为宿主 systemd 服务(非容器)。见 server/orchestrator/MOVED.md**
+                                         ├─ asr (Docker)   127.0.0.1:9110→9100 (内部 WS) | 127.0.0.1:9101 (HTTP /embed + /transcribe)
                                          │                FunASR + 声纹门控
-                                         ├─ vLLM (主机)    :8085  gemma-4-26B (润色/翻译)
+                                         ├─ vLLM (主机)    :12340  gemma-4-26B (润色/翻译)
                                          └─ TTS bake-off   :8095/:8096 (CosyVoice2 / GPT-SoVITS,选型隔离)
 ```
 
@@ -38,21 +40,20 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24,
 |---|---|
 | `src-tauri/` | Tauri desktop client (Rust). Thin: mic + UI + clipboard + remote WS. **No** sherpa-onnx, **no** local models. |
 | `src/` | React 19 + TypeScript + Vite + Tailwind front-end of the Tauri app. |
-| `server/orchestrator/` | Rust/axum service on GB10: client WS termination + SQLite + Web admin + HTTP API. |
-| `server/asr/` | Python FunASR container: streaming VAD + Paraformer/SenseVoice/Whisper + speaker gating + HTTP `/embed`（声纹注册）+ HTTP `/transcribe`（离线整段，给同机 toolkit 抖音管线 multipart 上传 mp4 字节）。 |
+| `server/orchestrator/` | **已迁出（2026-06）**。仅留 `MOVED.md`。orchestrator(client WS + SQLite + Web admin + HTTP API)现在 toolkit 仓 `crates/orchestrator`,宿主 systemd 服务部署。 |
+| `server/asr/` | Python FunASR container: streaming VAD + Paraformer/SenseVoice/Whisper + speaker gating + HTTP `/embed`（声纹注册）+ HTTP `/transcribe`（离线整段，给同机 toolkit 抖音管线 multipart 上传 mp4 字节）。**本仓服务端现仅剩这一个容器。** |
 | `server/asr-server/` | **已退役**（2026-06）。仅留 `MOVED.md` 记录历史 + 指引新入口（同仓 `server/asr` 的 `/transcribe`）。 |
 | `server/tts/` | CosyVoice2 + GPT-SoVITS bake-off (independent compose, see its README). |
-| `server/compose.yaml` | Production-stack compose (asr + orchestrator). |
-| `scripts/release-server.ps1` | One-shot GB10 deploy (tar → scp → compose build/up → smoke). |
+| `server/compose.yaml` | GB10 compose,**现仅 asr**（orchestrator 已迁出）。 |
+| `scripts/release-server.ps1` | One-shot GB10 deploy,**现仅 asr**（tar → scp → compose build/up → smoke）。 |
 | `docs/` | Architecture, protocol, deploy, handoff. |
 
 ## Workspace
 
-Root `Cargo.toml` is a Cargo workspace with two members: `src-tauri` (desktop client)
-and `server/orchestrator` (Rust/axum GB10 service). They are intentionally independent
-crates; nothing is shared at the library level. (`server/asr-server` was a former member,
-later moved to toolkit, then physically retired in 2026-06 — see
-`server/asr-server/MOVED.md` for the full timeline and where ASR lives now.)
+Root `Cargo.toml` 现在只有一个成员:`src-tauri`(桌面客户端)。
+(`server/orchestrator` 曾是成员,2026-06 迁出至 toolkit 仓 `crates/orchestrator`——
+见 `server/orchestrator/MOVED.md`;`server/asr-server` 更早迁出后物理退役——见
+`server/asr-server/MOVED.md`。)
 
 ## Commands
 
@@ -69,14 +70,24 @@ cd src-tauri && cargo check              # back-end compile check
 cd src-tauri && cargo test               # inline unit tests
 ```
 
-### Server (from repo root)
+### Server: asr（from repo root）
 ```powershell
-.\scripts\release-server.ps1                     # default: sync + rebuild + restart asr + orchestrator
-.\scripts\release-server.ps1 -Service asr        # only asr
+.\scripts\release-server.ps1                     # sync + rebuild + restart asr + smoke
 .\scripts\release-server.ps1 -NoBuild            # sync + up -d, skip rebuild
 .\scripts\release-server.ps1 -SyncOnly           # push files only, don't touch containers
 ```
-Smoke endpoint: `curl http://192.168.0.68:8090/api/stats` (orchestrator).
+
+### Server: orchestrator（已迁出 → 在 toolkit 仓部署）
+```powershell
+# 在 D:\git\toolkit:
+pwsh ./deploy-g10.ps1 -Service orchestrator -Bind 0.0.0.0:8090
+# GB10 上是 systemctl --user 服务;状态/日志:
+ssh fengqi@192.168.0.68 'export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user status orchestrator'
+```
+⚠️ 别在 GB10 `~/server` 跑无参 `docker compose up -d`,会试图拉起已删的 orchestrator
+旧容器抢 8090(虽然 compose 里已删该服务,但别用 `-Service both` 之类的旧习惯)。
+
+Smoke endpoint: `curl http://192.168.0.68:8090/api/stats` (orchestrator, 现为宿主服务).
 
 ### Web admin
 Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime config).
@@ -86,8 +97,11 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
 - **Client ↔ orchestrator**: WebSocket `/stream` (protocol in `docs/protocol-draft.md`).
   Upstream 16 kHz PCM; downstream `segment` / `optimized` / `translated` events.
   Auto-reconnect lives in `src-tauri/src/commands/remote.rs`.
-- **orchestrator ↔ asr**: internal WS `ws://asr:9100`.
-- **orchestrator ↔ vLLM**: HTTP `host.docker.internal:8085/v1` (vLLM runs on host, not in compose).
+- **orchestrator ↔ asr**: orchestrator 现为宿主进程,经 `ws://127.0.0.1:9110`(asr 容器把
+  内部 9100 发布到宿主 9110;宿主 9100 被 trace-hub 占用)。声纹 embed 走 `127.0.0.1:9101`。
+  (容器时代是 `ws://asr:9100`。)
+- **orchestrator ↔ vLLM**: HTTP `http://127.0.0.1:12340/v1`(vLLM 宿主进程;权威值在
+  orchestrator SQLite 的 `vllm.base`,非默认 8085)。orchestrator 是宿主进程,直连回环。
 - **Runtime config**: many settings live in orchestrator's SQLite `config` table and are
   edited from the Web admin (`asr.model`, `asr.secondary_model`, `asr.spk_threshold`,
   `asr.sentence_gap_ms`, `asr.gate_to_enrolled`, `vllm.model`, `vllm.base`,
@@ -145,19 +159,20 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
 - **GB10 network gotchas**: GitHub direct is **unreliable** (clone/download often times out);
   use `hf-mirror.com` for HuggingFace assets and ModelScope (`~/ms_venv/bin/modelscope`)
   for ModelScope assets. crates.io is fronted by `rsproxy.cn` in every server Dockerfile.
-- **Production-stack autostart**: `asr` and `orchestrator` use `restart: unless-stopped`
-  so GB10 reboots bring the service back automatically.
-- **vLLM is a host process**, not in compose. It's maintained out-of-band; the orchestrator
-  reaches it via `host.docker.internal:8085`.
-- **Deploy = scp + rebuild**, not git pull. GitHub is blocked on GB10, and `~/server/`
-  is not a git checkout. Use `scripts/release-server.ps1` for sync.
+- **Autostart**: `asr` 容器 `restart: unless-stopped`(GB10 重启自起);orchestrator 现为
+  `systemctl --user enable` 的 systemd 服务 + `loginctl enable-linger`(登出/重启仍运行)。
+- **vLLM is a host process**, not in compose. 带外维护;orchestrator(宿主进程)经
+  `127.0.0.1:12340`(权威值在 SQLite `vllm.base`)连它。
+- **Deploy**:asr = scp + rebuild(`scripts/release-server.ps1`,`~/server/` 非 git checkout,
+  GitHub 在 GB10 被墙);orchestrator = toolkit 仓交叉编译 + scp 二进制(`deploy-g10.ps1`)。
 
 ## Deploy workflow (server-side iteration)
 
-1. Edit code locally under `server/*/`.
-2. `cd src-tauri && cargo check` (if Rust) or `python -c 'import server.asr.app'` smoke.
-3. `.\scripts\release-server.ps1 -Service <asr|orchestrator>`.
-4. Watch smoke output; on failure, `ssh fengqi@192.168.0.68 'docker compose logs --tail=80 <svc>'`.
+- **asr**(本仓):1) 改 `server/asr/*`;2) `python -c 'import server.asr.app'` smoke;
+  3) `.\scripts\release-server.ps1`;4) 失败看 `ssh fengqi@192.168.0.68 'cd ~/server && docker compose logs --tail=80 asr'`。
+- **orchestrator**(toolkit 仓):改 `D:\git\toolkit\crates\orchestrator`,`cargo check -p orchestrator`,
+  `pwsh ./deploy-g10.ps1 -Service orchestrator -Bind 0.0.0.0:8090`;失败看
+  `ssh ... 'export XDG_RUNTIME_DIR=/run/user/$(id -u); journalctl --user -u orchestrator -n 80'`。
 
 The script uses Windows `System32\tar.exe` (bsdtar) explicitly — Git Bash's GNU tar
 mis-parses Windows paths like `C:\...` as host:path.

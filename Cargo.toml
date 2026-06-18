@@ -2,11 +2,10 @@
 resolver = "2"
 members = [
     "src-tauri",
-    "server/orchestrator",
 ]
-# 注：asr-server 已迁出至 toolkit 仓库（jm-observer/toolkit，crates/asr-server），
-# 作为统一工具中台的权威来源。本仓不再维护该 crate，详见 server/asr-server/MOVED.md。
+# 注：orchestrator 已于 2026-06 迁出至 toolkit 仓库（jm-observer/toolkit,
+# crates/orchestrator),改为宿主 systemd 服务部署,本仓不再维护,详见
+# server/orchestrator/MOVED.md。asr-server 同样已迁出(crates/asr-server),
+# 详见 server/asr-server/MOVED.md。本仓服务端现仅剩 server/asr(FunASR Docker)。
 
-# 注：custom-utils（trace 客户端）不放 [workspace.dependencies]——两个服务都以自身
-# 子目录为 Docker 构建上下文独立编译，容器内无父 workspace，无法解析 `workspace = true`，
-# 故各 crate 直接写显式 registry 版本（custom-utils 0.15+ 已发布 crates.io，trace-model 已内联）。
+# 注：本 workspace 现仅 src-tauri 一个成员(桌面客户端)。

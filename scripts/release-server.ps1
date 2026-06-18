@@ -2,20 +2,20 @@
 # 一键发服务端到 GB10。开发期常用,不做 git 检查、不打 tag。
 #
 # 用法:
-#   .\scripts\release-server.ps1                       # 默认 both:同步 + 重建 + 重启 + 冒烟生产栈
-#   .\scripts\release-server.ps1 -Service asr          # 只动 asr
-#   .\scripts\release-server.ps1 -Service orchestrator # 只动 orchestrator
-#   .\scripts\release-server.ps1 -NoBuild              # 同步后只 up -d(改 compose/env 用)
-#   .\scripts\release-server.ps1 -SyncOnly             # 只推文件,不动容器
+#   .\scripts\release-server.ps1            # 同步 + 重建 + 重启 + 冒烟 asr
+#   .\scripts\release-server.ps1 -NoBuild   # 同步后只 up -d(改 compose/env 用)
+#   .\scripts\release-server.ps1 -SyncOnly  # 只推文件,不动容器
 #
 # 说明:
-#   - 'both' 指生产栈 asr + orchestrator(给桌面客户端用的核心链路)。
-#   - asr-server(OpenAI 兼容外部 ASR)已迁出至 toolkit 仓库,在那里部署(deploy/asr-tts);
-#     本脚本不再涉及,详见 server/asr-server/MOVED.md。
+#   - **本脚本现在只管 asr**。orchestrator 已于 2026-06 迁出至 toolkit 仓
+#     (crates/orchestrator),改为宿主 systemd 服务,用 toolkit 的
+#     `deploy-g10.ps1 -Service orchestrator` 部署 —— 不再走本脚本。
+#   - asr-server(OpenAI 兼容外部 ASR)亦已迁出至 toolkit(deploy/asr-tts);
+#     详见 server/asr-server/MOVED.md。
 
 param(
-  [ValidateSet('asr','orchestrator','both')]
-  [string]$Service = 'both',
+  [ValidateSet('asr')]
+  [string]$Service = 'asr',
   [switch]$NoBuild,
   [switch]$SyncOnly
 )
@@ -28,9 +28,7 @@ $Repo       = Split-Path -Parent $PSScriptRoot
 function Step($m) { Write-Host "→ $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "✓ $m" -ForegroundColor Green }
 
-$items = @('compose.yaml')
-if ($Service -in 'asr','both')          { $items += 'asr' }
-if ($Service -in 'orchestrator','both') { $items += 'orchestrator' }
+$items = @('compose.yaml', 'asr')
 
 $tar    = Join-Path $env:TEMP "release-server-$([guid]::NewGuid().ToString('N')).tar"
 $tarExe = Join-Path $env:WINDIR 'System32\tar.exe'   # bsdtar:认 Windows 路径(避开 Git Bash 的 GNU tar)
@@ -55,7 +53,7 @@ Ok "同步完成"
 if ($SyncOnly) { Ok "SyncOnly 模式,结束"; exit 0 }
 
 $composeBase = 'docker compose'
-$svcArg      = if ($Service -eq 'both') { '' } else { $Service }
+$svcArg      = $Service   # 只剩 asr
 
 if (-not $NoBuild) {
   Step "$composeBase build $svcArg(可能数分钟)"
