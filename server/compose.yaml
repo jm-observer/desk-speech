@@ -19,6 +19,14 @@ services:
       - ASR_PUNC_DIR=/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
       - ASR_DEVICE=cuda
       - ASR_PORT=9100
+      # 反向拉取声纹/配置:orchestrator 已迁出容器,现为宿主 toolkit-server 进程
+      # (:8788,其路由 nest 在 /api/asr 下)。容器经 host-gateway 回连宿主;
+      # 末段 /api/asr 让 app.py 的 `{ORCH_BASE}/api/voiceprints` 命中
+      # /api/asr/api/voiceprints。缺省 http://orchestrator:8090 在迁出后已失效
+      # (容器内 DNS 解析失败 → 声纹恒空 → 门控形同关闭)。
+      - ORCH_BASE=http://host.docker.internal:8788/api/asr
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${MODELS_DIR:-/home/fengqi/funasr-prep/models}:/models:ro
     expose:
@@ -26,9 +34,9 @@ services:
     ports:
       # 内部 WS :9100 —— compose 内仍走服务名 `asr`;另发布到本机回环,供已迁出
       # 容器的 orchestrator(toolkit 仓,宿主 systemd 进程)连接。
-      # **宿主 9100 已被 trace-hub 进程占用**,故映射到 9110;orchestrator 用
-      # ASR_WS=ws://127.0.0.1:9110。仅本机回环,不上 LAN。
-      - "127.0.0.1:9110:9100"
+      # orchestrator 默认 ASR_WS=ws://127.0.0.1:9100。仅本机回环,不上 LAN。
+      # (trace-hub 已让出 9100,挪到 :9120;见 trace-hub/deploy-g10.ps1。)
+      - "127.0.0.1:9100:9100"
       # /embed + /transcribe HTTP 给同机外部消费(toolkit 抖音管线调 /transcribe);
       # 仅本机回环,避免无意暴露到 LAN。
       - "127.0.0.1:9101:9101"

@@ -65,12 +65,17 @@ Step "$composeBase up -d $svcArg"
 & ssh -o BatchMode=yes $RemoteHost "cd $RemoteDir && $composeBase up -d $svcArg"
 if ($LASTEXITCODE -ne 0) { throw "up 失败" }
 
-Step "冒烟(等 3s 让容器起来)"
-Start-Sleep -Seconds 3
-
-$stats = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8090/api/stats"
-$cfg   = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:8090/api/asr-config"
-Write-Host "  /api/stats      $stats"
-Write-Host "  /api/asr-config $cfg"
-if (-not $stats -or -not $cfg) { throw "冒烟失败 — 检查 docker compose logs --tail=80" }
+# asr 服务 HTTP 在 :9101(/health /embed /transcribe),WS 在 :9100。
+# (旧的 :8090/api/stats 是 orchestrator 的独立端口,2026-06 已迁出至
+#  toolkit-server:8788 —— 那个冒烟恒为空、误报失败,故改打 asr 自己的 /health。)
+# FunASR 启动要加载模型,/health 可达通常需十几秒 —— 轮询而非死等固定秒数。
+Step "冒烟(轮询 :9101/health,最多 ~40s)"
+$health = $null
+foreach ($i in 1..20) {
+  Start-Sleep -Seconds 2
+  $health = & ssh -o BatchMode=yes $RemoteHost "curl -s -m 5 http://localhost:9101/health"
+  if ($health) { break }
+}
+Write-Host "  :9101/health    $health"
+if (-not $health) { throw "冒烟失败 — asr /health 无响应,检查 docker compose logs --tail=80 asr" }
 Ok "发布完成"

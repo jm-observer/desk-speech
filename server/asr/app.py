@@ -190,7 +190,10 @@ def best_speaker(audio: np.ndarray):
         return (None, 1.0)  # gating disabled -> accept all
     emb = spk_embed(audio)
     if emb is None:
-        return ("", 1.0)  # embed failed -> fail open (don't drop)
+        # Embed failed: return a non-matching sentinel. The caller treats an
+        # empty name as "not matched" and (when gating is on) drops the segment
+        # rather than emitting an unidentified record.
+        return ("", -1.0)
     best_n, best_s = None, -1.0
     for name, vp in ENABLED_VPS:
         s = cosine(emb, vp)
@@ -377,6 +380,22 @@ async def voiceprint_loop():
               f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms "
               f"hotwords={hw_n}", flush=True)
         await asyncio.sleep(VP_REFRESH_SEC)
+
+
+async def http_health(request: web.Request) -> web.Response:
+    """GET -> liveness + active runtime config. Cheap, no model invocation.
+
+    Used by the deploy smoke check (and any external prober) — replaces the
+    old orchestrator-era :8090 probe, which no longer exists here.
+    """
+    return web.json_response({
+        "status": "ok",
+        "model": ASR_KIND,
+        "spk_threshold": SPK_THRESHOLD,
+        "gate_to_enrolled": GATE_TO_ENROLLED,
+        "enrolled_voiceprints": len(ENABLED_VPS),
+        "sentence_gap_ms": SENTENCE_GAP_MS,
+    })
 
 
 async def http_embed(request: web.Request) -> web.Response:
@@ -682,13 +701,20 @@ async def finalize(ws, s: Session):
     text = recognize(seg)
     spk, score = best_speaker(seg)
     gated = GATE_TO_ENROLLED and bool(ENABLED_VPS)
-    if gated and spk and score < SPK_THRESHOLD:
-        print(f"[asr][spk] DROP non-target best={spk} score={score:.3f} "
+    # "matched" = positively hit an enrolled speaker above threshold. Below
+    # threshold AND embed failure (best_speaker -> ("", _)) both count as NOT
+    # matched — without a confirmed enrolled speaker we cannot claim a match.
+    matched = bool(spk) and score >= SPK_THRESHOLD
+    if gated and not matched:
+        # Gating on but no enrolled speaker confirmed -> drop, don't push a
+        # record. Previously a falsy `spk` (embed failure) slipped past the
+        # guard and got emitted with speaker=None despite gating.
+        print(f"[asr][spk] DROP unmatched best={spk!r} score={score:.3f} "
               f"thr={SPK_THRESHOLD} text={text!r}", flush=True)
-        return  # gated out: not an enrolled/enabled speaker
-    # Label the speaker when a known voiceprint matches confidently —
-    # informational even when gating is off.
-    speaker = spk if (ENABLED_VPS and spk and score >= SPK_THRESHOLD) else None
+        return
+    # Label the speaker when positively matched; otherwise leave it unlabeled
+    # (only reachable here when gating is off — informational).
+    speaker = spk if matched else None
     await emit_segment(ws, text, beg, end, speaker)
     # Fan out the same PCM slice to the secondary recognizer (if opted-in
     # for this session). Detached so primary path latency is unaffected.
@@ -816,6 +842,7 @@ async def main():
     # Default 1 MiB body limit blows up on multipart mp4 (抖音单条 5-50 MiB)
     # — bump to 256 MiB which covers any realistic short-video upload.
     httpd = web.Application(client_max_size=256 * 1024 * 1024)
+    httpd.router.add_get("/health", http_health)
     httpd.router.add_post("/embed", http_embed)
     httpd.router.add_post("/transcribe", http_transcribe)
     runner = web.AppRunner(httpd)
