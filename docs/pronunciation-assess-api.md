@@ -98,6 +98,36 @@
 > **消费方约定**（toolkit-server）：`GOP_BASE_URL` **未配 → 回退 v1-ASR 内核**（不破现网）；
 > 配了但本服务不可达 / 报错 → toolkit 回 **502**。
 
+## `GET /assess/stream`(WebSocket,流式发音评测)
+
+边收音频边出**临时**逐词分(partial),整句结束用批量 `/assess` 出**权威分**(final)。
+实现:`server/pronunciation-assess/streaming.py`(StreamingAssessor)+ `app.py`。
+消费侧设计:toolkit `docs/english-shadow-realtime-design.md` §6。
+
+**上行**:
+| 帧 | 内容 |
+|---|---|
+| `hello`(JSON,首帧) | `{ "type":"hello", "ref_text":"I think so", "granularity":"word"\|"sentence" }` |
+| audio(二进制) | 16k 单声道 PCM **s16le**,建议每帧 ~200–320ms |
+| `end`(JSON) | `{"type":"end"}` → 触发批量 finalize |
+
+**下行**(JSON 事件):
+| type | 关键字段 | 含义 |
+|---|---|---|
+| `ready` | — | 已就绪(模型加载完),可推音频 |
+| `partial` | `word_index`、`ref`、`score`、`pron_status`、`phones?`、`final:false` | **逐词落定**的临时分(committed→partial);`granularity=word` 带 `phones[]` |
+| `final` | `{sentence_score, words[], bad_phone_count, model}`(= 批量 `/assess` 响应) | 整句权威分,覆盖临时分 |
+| `error` | `message` | 错误 |
+
+> **临时分语义(重要)**:`partial` 只在音素「落定」(在线 Viterbi 前沿越过 commit 帧)后发,
+> **落定后稳**;但 commit 前的 live 抖动(尤其错读音素)**不发**,交前端 tentative 渲染。
+> 尾部未及落定的词仅在 `final` 出现。落库/通过判定**以 `final` 为准**。
+
+**最小调用**(Python,见 `test_stream_client.py`):
+```
+hello → 循环 send_bytes(PCM 320ms 块)→ end;读 ready/partial*/final。
+```
+
 ## `GET /health`
 
 ```jsonc

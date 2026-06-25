@@ -12,9 +12,10 @@ import os
 import shutil
 import tempfile
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 import gop
+import streaming
 
 # ---- 限额与超时:具名常量(可被同名 env 覆盖),禁止散落 magic number ----
 CLIENT_MAX_SIZE = int(os.environ.get("GOP_CLIENT_MAX_SIZE", str(64 * 1024 * 1024)))
@@ -107,6 +108,62 @@ async def _handle_in_tmpdir(reader, tmpdir: str) -> web.Response:
     return web.json_response(result)
 
 
+async def handle_assess_stream(request: web.Request) -> web.WebSocketResponse:
+    """流式发音评测 WS(契约见 docs/pronunciation-assess-api.md「/assess/stream」)。
+
+    上行:hello(JSON,首帧 ref_text/granularity)→ 二进制 PCM(s16le 16k 单声道)块 → end(JSON)。
+    下行:ready → partial(逐词落定,可含 phones)… → final(批量 GOP 权威分)。
+    GPU 推理用 run_in_executor + 复用 `_sem` 串行(与批量 /assess 共用一把锁,逐次 acquire)。
+    """
+    ws = web.WebSocketResponse(max_msg_size=8 * 1024 * 1024)
+    await ws.prepare(request)
+    loop = asyncio.get_event_loop()
+    assessor = None
+
+    async def infer(fn, *a):
+        async with _sem:
+            return await loop.run_in_executor(None, fn, *a)
+
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                try:
+                    d = __import__("json").loads(msg.data)
+                except ValueError:
+                    await ws.send_json({"type": "error", "message": "bad json"}); continue
+                t = d.get("type")
+                if t == "hello":
+                    ref = (d.get("ref_text") or "").strip()
+                    if not ref:
+                        await ws.send_json({"type": "error", "message": "missing ref_text"}); break
+                    gran = (d.get("granularity") or "word").strip().lower()
+                    assessor = streaming.StreamingAssessor(ref, gran)
+                    await ws.send_json({"type": "ready"})
+                elif t == "end":
+                    if assessor is None:
+                        await ws.send_json({"type": "error", "message": "no hello"}); break
+                    final = await infer(assessor.finish)
+                    await ws.send_json({"type": "final", **final})
+                    await ws.close(); break
+                else:
+                    await ws.send_json({"type": "error", "message": f"unknown type {t}"})
+            elif msg.type == WSMsgType.BINARY:
+                if assessor is None:
+                    await ws.send_json({"type": "error", "message": "no hello before audio"}); break
+                try:
+                    updates = await infer(assessor.push, bytes(msg.data))
+                except Exception as exc:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "message": f"push failed: {exc}"}); break
+                for u in updates:
+                    await ws.send_json({"type": "partial", **u})
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        if not ws.closed:
+            await ws.close()
+    return ws
+
+
 async def handle_health(_request: web.Request) -> web.Response:
     gpu = False
     try:
@@ -124,6 +181,7 @@ async def handle_health(_request: web.Request) -> web.Response:
 def make_app() -> web.Application:
     app = web.Application(client_max_size=CLIENT_MAX_SIZE)
     app.router.add_post("/assess", handle_assess)
+    app.router.add_get("/assess/stream", handle_assess_stream)
     app.router.add_get("/health", handle_health)
     return app
 
