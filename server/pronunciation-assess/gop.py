@@ -219,6 +219,10 @@ class PhoneEval:
     reliable: bool = True
     t_start: Optional[float] = None
     t_end: Optional[float] = None
+    # 诊断:canonical 在整段的**全局峰时间**(秒)。落在 [t_start,t_end] 外 = 对齐错位。
+    peak_t: Optional[float] = None
+    # 诊断:对齐段内 canonical 的峰值 log 后验(原始 GOP,≤0,越接近 0 证据越强)。
+    gop_raw: Optional[float] = None
 
 
 @dataclass
@@ -284,6 +288,10 @@ def _phone_to_json(p: PhoneEval) -> dict:
         d["t_start"] = p.t_start
     if p.t_end is not None:
         d["t_end"] = p.t_end
+    if p.peak_t is not None:
+        d["peak_t"] = p.peak_t
+    if p.gop_raw is not None:
+        d["gop_raw"] = p.gop_raw
     return d
 
 
@@ -471,8 +479,10 @@ def assess(audio_path: str, ref_text: str, opts: dict) -> dict:
         gop_raw = max(float(seg[:, c].max()) for c in canon_ids)
         score01 = calibrate(gop_raw, cal)
         st = pron_status(score01, cal)
-        # canonical 的**全局最佳**(整段任意帧):模型到底能不能在这段录音里听到这个音。
-        gmax_raw = max(float(emission[:, c].max()) for c in canon_ids)
+        # canonical 的**全局最佳**(整段任意帧):模型到底能不能在这段录音里听到这个音 + 在第几帧。
+        best_c = max(canon_ids, key=lambda c: float(emission[:, c].max()))
+        gmax_raw = float(emission[:, best_c].max())
+        peak_t = round(int(emission[:, best_c].argmax()) * frame_sec, 3)
 
         reliable = True
         actual_ph = None
@@ -504,7 +514,8 @@ def assess(audio_path: str, ref_text: str, opts: dict) -> dict:
                       expected_ph=ph if st in (PRON_BAD, PRON_WARN) else None,
                       actual_ph=actual_ph, hint=hint, reliable=reliable,
                       t_start=round(sp.start * frame_sec, 3),
-                      t_end=round((sp.end + 1) * frame_sec, 3))
+                      t_end=round((sp.end + 1) * frame_sec, 3),
+                      peak_t=peak_t, gop_raw=round(gop_raw, 3))
         )
 
     # ---- 聚合到词(剔除 uncertain:没对齐上的音素不参与词分,不冤枉用户)----
