@@ -76,10 +76,12 @@
 | `words[].phones` | array? | 逐音素明细。`granularity=sentence` 时**省略**。 |
 | `phones[].ph` | str | 期望音素（ARPAbet，如 `TH`）。 |
 | `phones[].score` | float | 该音素发音分 `0~1`。 |
-| `phones[].pron_status` | str | 同上三档。 |
+| `phones[].pron_status` | str | 发音四档:`ok`/`warn`/`bad`/**`uncertain`**(引擎没把这个音对齐好,不判对错)。 |
 | `phones[].expected_ph` | str? | 错读时的「期望音素」（结构化，**消费方/落库以此为准**）。`ok` 音素省略。 |
 | `phones[].actual_ph` | str? | 错读时的「实际最可能音素」。无明确替代（漏读/偏弱）时省略。 |
 | `phones[].hint` | str? | 人类可读纠音文案，由 `expected_ph`/`actual_ph` 拼出（如「/θ/ 读成了 /s/」）。**仅展示用**，消费方可自行本地化，不要解析它取信息。 |
+| `phones[].reliable` | bool? | `false` → 该音素**没对齐好**(`uncertain`),不计入 `bad_phone_count`、不拉低词分。`ok` 音素省略(默认可靠)。见 `english-shadow-scoring-ui-design.md` §3。 |
+| `phones[].t_start` / `t_end` | float? | 该音素对齐时间段(秒),供明细表/波形定位。 |
 | `bad_phone_count` | int | `pron_status==bad` 的音素总数。供「通过判定」（消费方 `passed = sentence_score>=阈值 && bad_phone_count==0`）。 |
 | `model` | str | 评测模型标识。 |
 
