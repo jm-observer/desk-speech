@@ -12,7 +12,7 @@
 > 的「现场执行结果」与 `server/orchestrator/MOVED.md`。要点:
 > - 状态/日志:`ssh ... 'export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user status orchestrator'`
 > - DB 在宿主 `~/.config/orchestrator/app.db`(不再是 docker 卷;备份直接 `cp` 该文件)。
-> - asr 经宿主 `127.0.0.1:9110`;vLLM `127.0.0.1:12340`;trace-hub `127.0.0.1:9100`。
+> - asr 经宿主 `127.0.0.1:9100`;vLLM `127.0.0.1:12340`;trace-hub `127.0.0.1:9120`。
 >
 > ⚠️ **asr-server 已物理退役**。先从本仓迁至 toolkit 仓 `crates/asr-server`（2026-06 早），
 > 后因与本仓 FunASR 能力重叠在 toolkit 又被整 crate 删除（2026-06 中后期）。
@@ -29,7 +29,7 @@ Windows 桌面客户端(Tauri/Rust,采麦+UI+剪贴板,远程模式)
 GB10  192.168.0.68  (NVIDIA GB10 / arm64 / CUDA13 / Ubuntu24)
    ├─ orchestrator 宿主 systemd 服务  :8090  WS 编排 + SQLite + Web 管理台 + /api/*
    │                      (已迁出本仓 → toolkit crates/orchestrator;DB ~/.config/orchestrator/app.db)
-   ├─ asr 容器(Docker)  127.0.0.1:9110→9100(内部 WS) | 127.0.0.1:9101(HTTP)
+   ├─ asr 容器(Docker)  127.0.0.1:9100→9100(内部 WS) | 127.0.0.1:9101(HTTP)
    │                      FunASR 流式识别 + 声纹门控 + /embed + /transcribe
    ├─ vLLM 主机进程       :12340  gemma-4-26B-A4B-it(润色/翻译)
    └─ TTS(独立,与上面隔离;按需启动)
