@@ -16,8 +16,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - GOP_PORT=8098
       - GOP_DEVICE=${GOP_DEVICE:-cuda}
-      # 换评测模型只改这里(需输出 ARPAbet 音素 token;见 README「模型」)。
-      - GOP_MODEL_ID=${GOP_MODEL_ID:-vitouphy/wav2vec2-xls-r-300m-timit-phoneme}
+      # 换评测模型只改这里(见 README「模型」)。默认 slplab L2-English phoneme(实测优于 timit)。
+      - GOP_MODEL_ID=${GOP_MODEL_ID:-slplab/wav2vec2-large-robust-L2-english-phoneme-recognition}
       # 标定参数文件(speechocean762 拟合);未挂载则用 gop.py 内置默认(须上线前重标)。
       - GOP_CALIBRATION=${GOP_CALIBRATION:-/calib/calibration.json}
       # 限额(可覆盖)。单句评测目标 < 2s,给 60s 兜底。

@@ -30,10 +30,19 @@ from typing import Optional
 # 纯函数区 —— 无重依赖,可被 test_gop.py 直接 import。
 # ======================================================================================
 
-# 发音三档(与契约 / toolkit pron_status 对齐)。
+# 发音四档(与契约 / toolkit pron_status 对齐)。
 PRON_OK = "ok"
 PRON_WARN = "warn"
 PRON_BAD = "bad"
+# uncertain:引擎没把该音素对齐好/没听准 → **不判对错**(灰、不计 bad、不拉低词分)。
+# 见 docs/english-shadow-scoring-ui-design.md §3。
+PRON_UNCERTAIN = "uncertain"
+
+# 可靠性判据(raw log-后验空间;与标定 a≈0.8,b≈-3 配套)。一个被判 bad 的音素:
+# 若「对齐段里 canonical 后验极低(基本没发出)」**且**「段内也没有明确的替代音」→ 多半没对齐上 → uncertain。
+# 若有明确替代音(如 /θ/ 段里 /s/ 很强)→ 真替换错读,仍 bad。
+UNCERTAIN_CANON_FLOOR = -5.0   # canonical 在对齐段的峰值后验低于此 = 基本没在这儿发出
+CONFIDENT_OTHER_RAW = -1.5     # 段内最强竞争音素峰值高于此 = 有明确替代音(真错读)
 
 
 @dataclass
@@ -156,6 +165,9 @@ def model_token_candidates(ph: str) -> list[str]:
     """
     base = strip_stress(ph)
     cands = [base]  # ARPAbet 模型:vocab 直接是大写 ARPAbet
+    # 弱读 schwa:有些模型(如 L2 phoneme)把 AH 的弱读形输出成独立的 ax,G2P 仍标 AH → 一并接受。
+    if base == "AH":
+        cands.append("AX")
     primary = _ARPABET_IPA.get(base)
     if primary and primary not in cands:
         cands.append(primary)
@@ -203,6 +215,10 @@ class PhoneEval:
     expected_ph: Optional[str] = None
     actual_ph: Optional[str] = None
     hint: Optional[str] = None
+    # 对齐可靠性 + 时间段(供 UI 明细表 / 区分"读错"vs"没对齐")。
+    reliable: bool = True
+    t_start: Optional[float] = None
+    t_end: Optional[float] = None
 
 
 @dataclass
@@ -214,7 +230,7 @@ class WordEval:
 
 
 def count_bad_phones(words: list[WordEval]) -> int:
-    """统计 status==bad 的音素总数(供 passed 判定 / toolkit bad_phone_count)。"""
+    """统计 status==bad 的音素总数(供 passed 判定)。**uncertain 不计**(没对齐上的不算读错)。"""
     return sum(1 for w in words for p in w.phones if p.status == PRON_BAD)
 
 
@@ -230,7 +246,8 @@ def assemble_response(
     `granularity=sentence` 时**省略 `phones[]`**(裁剪返回详尽度,省带宽;与 toolkit 落库单元正交)。
     句级 `sentence_score` 由词分聚合;`bad_phone_count` 始终给(即便 sentence 粒度也据音素算)。
     """
-    sentence_score = aggregate_sentence([w.score for w in words])
+    # 句分只聚合「非 uncertain」的词(没对齐上的词不拉低句分)。
+    sentence_score = aggregate_sentence([w.score for w in words if w.status != PRON_UNCERTAIN])
     bad_count = count_bad_phones(words)
     include_phones = granularity != "sentence"
 
@@ -261,6 +278,12 @@ def _phone_to_json(p: PhoneEval) -> dict:
         d["actual_ph"] = p.actual_ph
     if p.hint is not None:
         d["hint"] = p.hint
+    if not p.reliable:
+        d["reliable"] = False
+    if p.t_start is not None:
+        d["t_start"] = p.t_start
+    if p.t_end is not None:
+        d["t_end"] = p.t_end
     return d
 
 
@@ -268,9 +291,13 @@ def _phone_to_json(p: PhoneEval) -> dict:
 # 重推理区 —— torch / transformers / g2p_en 惰性导入,只在真正评测时触发。
 # ======================================================================================
 
-# 声学模型:wav2vec2 CTC 音素模型(输出 ARPAbet/类 ARPAbet token)。可经 env 覆盖。
-# 默认指向一个 TIMIT ARPAbet 音素模型;GB10 上线前在 README「模型」一节确认 vocab 形态。
-MODEL_ID = os.environ.get("GOP_MODEL_ID", "vitouphy/wav2vec2-xls-r-300m-timit-phoneme")
+# 声学模型:wav2vec2 CTC 音素模型(输出 ARPAbet/类 ARPAbet/IPA token)。可经 env 覆盖。
+# 默认 = slplab L2-English phoneme(wav2vec2-large-robust,专训非母语英语,带 *_err 误读 token)。
+# 实测远胜通用 TIMIT 版:连读长词(delicious)中段不再整段误杀,th→s 真错读仍抓。小写 ARPAbet +
+# 弱读 ax,gop 的多候选桥(含 AH→ax)已适配。见 README「模型」。
+MODEL_ID = os.environ.get(
+    "GOP_MODEL_ID", "slplab/wav2vec2-large-robust-L2-english-phoneme-recognition"
+)
 DEVICE = os.environ.get("GOP_DEVICE", "cuda")
 TARGET_SR = 16000
 CALIBRATION_PATH = os.environ.get("GOP_CALIBRATION")
@@ -318,11 +345,20 @@ def _load_model():
 
 
 def _resolve_token_id(ph: str) -> Optional[int]:
-    """ARPAbet 音素 → 模型 vocab id(多候选);未登录返回 None。"""
+    """ARPAbet 音素 → 模型 vocab **主** id(用作对齐目标);未登录返回 None。"""
+    ids = _resolve_token_ids(ph)
+    return ids[0] if ids else None
+
+
+def _resolve_token_ids(ph: str) -> list:
+    """ARPAbet 音素 → 所有可接受的 vocab id(去重,按候选优先级)。
+    GOP 打分取这组 id 后验的**最大值**(覆盖 ah/ax 这类同音素多写法),对齐仍用主 id。"""
+    ids = []
     for cand in model_token_candidates(ph):
-        if cand in _vocab:
-            return _vocab[cand]
-    return None
+        tid = _vocab.get(cand)
+        if tid is not None and tid not in ids:
+            ids.append(tid)
+    return ids
 
 
 def _load_audio_16k(path: str):
@@ -377,14 +413,16 @@ def assess(audio_path: str, ref_text: str, opts: dict) -> dict:
     # 展平为对齐目标 + 记录每音素归属词。每个 ARPAbet 音素经多候选解析到模型 vocab id
     # (兼容 IPA / ARPAbet 模型);解析不到的音素(模型无对应 token)降级跳过。
     flat_phones: list[str] = []   # ARPAbet 形,供展示 / hint
-    flat_ids: list[int] = []      # 对齐目标:模型 vocab id
+    flat_ids: list[int] = []      # 对齐目标:模型 vocab 主 id
+    flat_idsets: list[list] = []  # 打分用:同音素可接受的全部 id(取后验最大)
     owner_word: list[int] = []
     for wi, phs in enumerate(word_phones):
         for ph in phs:
-            tid = _resolve_token_id(ph)
-            if tid is not None:
+            ids = _resolve_token_ids(ph)
+            if ids:
                 flat_phones.append(strip_stress(ph))
-                flat_ids.append(tid)
+                flat_ids.append(ids[0])
+                flat_idsets.append(ids)
                 owner_word.append(wi)
 
     # ---- 录音解码 → 16k 单声道(ffmpeg,格式无关)----
@@ -414,7 +452,10 @@ def assess(audio_path: str, ref_text: str, opts: dict) -> dict:
     # 合并后的 spans 对应非 blank 目标,顺序与 flat_phones 一致。
     spans = [s for s in spans if s.token != _blank_id]
 
-    # ---- 逐音素 GOP ----
+    # 帧→秒(供时间段);emission T 帧覆盖整段 wav。
+    frame_sec = (wav.shape[0] / emission.shape[0]) / TARGET_SR
+
+    # ---- 逐音素 GOP + 对齐可靠性 ----
     phone_evals: list[Optional[PhoneEval]] = []
     for i, ph in enumerate(flat_phones):
         if i >= len(spans):
@@ -425,42 +466,96 @@ def assess(audio_path: str, ref_text: str, opts: dict) -> dict:
         if seg.shape[0] == 0:
             phone_evals.append(None)
             continue
-        canon_id = flat_ids[i]
-        # CTC 后验是「尖峰」的:一个音素只在少数帧发火,其余帧近 blank。对整段取均值会被
-        # blank 帧拖垮(每个音素都判 0)。改取**峰值帧的 canonical 后验**作为「这个音被听到的
-        # 最佳证据」——标准 GOP 变体,≤0,越接近 0 越像标准音。发音越偏,峰值越低。
-        gop_raw = seg[:, canon_id].max().item()
+        canon_ids = flat_idsets[i]
+        # CTC 后验「尖峰」:取**峰值帧的 canonical 后验**(同音素多写法取最大,如 ah/ax)作为最佳证据。
+        gop_raw = max(float(seg[:, c].max()) for c in canon_ids)
         score01 = calibrate(gop_raw, cal)
         st = pron_status(score01, cal)
+        # canonical 的**全局最佳**(整段任意帧):模型到底能不能在这段录音里听到这个音。
+        gmax_raw = max(float(emission[:, c].max()) for c in canon_ids)
+
+        reliable = True
         actual_ph = None
         hint = None
-        if st != PRON_OK:
-            # 实际最可能音素(整段 argmax 众数)→ 转回 ARPAbet。
-            actual_id = int(torch.mode(seg.argmax(dim=-1)).values.item())
-            actual_tok = model_token_to_arpabet(_vocab_inv.get(actual_id, ""))
-            if actual_tok and actual_tok != ph and actual_id != _blank_id:
-                actual_ph = actual_tok
-            hint = build_hint(ph, actual_ph)
+        if st == PRON_BAD:
+            # 段内最强竞争音素(非 canon、非 blank)。
+            peakc = seg.max(dim=0).values.clone()
+            for c in canon_ids:
+                peakc[c] = -1e30
+            if 0 <= _blank_id < peakc.shape[0]:
+                peakc[_blank_id] = -1e30
+            other_id = int(peakc.argmax())
+            other_raw = float(peakc[other_id])
+            # **安全口径**:仅当「canonical 在段内基本没发出」**且**「段内也没有任何明确替代音」
+            # 时,才判 uncertain(连"听到了什么"都说不上 → 多半没对齐上)。
+            # 只要有明确替代音(如 /θ/ 段里有 /s/),一律保留 bad —— 绝不漏判真错读。
+            if gop_raw < UNCERTAIN_CANON_FLOOR and other_raw < CONFIDENT_OTHER_RAW:
+                st = PRON_UNCERTAIN
+                reliable = False
+                hint = "引擎没把这个音对齐好(可能没听清),不计作读错"
+            else:
+                actual_tok = model_token_to_arpabet(_vocab_inv.get(other_id, ""))
+                if actual_tok and actual_tok != ph:
+                    actual_ph = actual_tok
+                hint = build_hint(ph, actual_ph)
+        _ = gmax_raw  # 全局峰仅诊断参考,不再据其判 uncertain(会漏判真替换错读)
         phone_evals.append(
             PhoneEval(ph=ph, score=round(score01, 4), status=st,
-                      expected_ph=ph if st != PRON_OK else None,
-                      actual_ph=actual_ph, hint=hint)
+                      expected_ph=ph if st in (PRON_BAD, PRON_WARN) else None,
+                      actual_ph=actual_ph, hint=hint, reliable=reliable,
+                      t_start=round(sp.start * frame_sec, 3),
+                      t_end=round((sp.end + 1) * frame_sec, 3))
         )
 
-    # ---- 聚合到词 ----
+    # ---- 聚合到词(剔除 uncertain:没对齐上的音素不参与词分,不冤枉用户)----
     words: list[WordEval] = []
     for wi, disp in enumerate(display_words):
         ph_evals = [pe for j, pe in enumerate(phone_evals)
                     if pe is not None and owner_word[j] == wi]
         if not ph_evals:
-            # 该词无可评音素(G2P 未登录) → 内容降级,发音维度留空(toolkit 端回退 status)。
+            # 该词无可评音素(G2P 未登录) → 发音维度留空。
             words.append(WordEval(ref=disp, score=0.0, status=PRON_WARN))
             continue
-        wscore = aggregate_word([p.score for p in ph_evals])
+        reliable_evals = [pe for pe in ph_evals if pe.status != PRON_UNCERTAIN]
+        if not reliable_evals:
+            # 整词都没对齐上 → 词也标 uncertain(不计分、不拦通过),但 phones 仍透出供展示。
+            words.append(WordEval(ref=disp, score=0.0, status=PRON_UNCERTAIN, phones=ph_evals))
+            continue
+        wscore = aggregate_word([pe.score for pe in reliable_evals])
         words.append(WordEval(ref=disp, score=wscore,
                               status=pron_status(wscore, cal), phones=ph_evals))
 
-    return assemble_response(ref_text, words, None, MODEL_ID, granularity)
+    resp = assemble_response(ref_text, words, None, MODEL_ID, granularity)
+    _debug_dump(wav, ref_text, resp)
+    return resp
+
+
+def _debug_dump(wav, ref_text: str, resp: dict) -> None:
+    """调试:env `GOP_DEBUG_DIR` 设了就把「模型实际听到的 16k wav + 逐音素结果」存盘。
+    用于排查"分数过不去"是音频问题还是判分太严。生产不设此 env 即 no-op。"""
+    dbg = os.environ.get("GOP_DEBUG_DIR")
+    if not dbg:
+        return
+    try:
+        import time
+        import wave
+
+        import numpy as np
+
+        os.makedirs(dbg, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        base = os.path.join(dbg, f"assess-{ts}")
+        arr = wav.numpy() if hasattr(wav, "numpy") else np.asarray(wav)
+        pcm = (np.clip(arr, -1, 1) * 32767).astype(np.int16)
+        with wave.open(base + ".wav", "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(TARGET_SR)
+            wf.writeframes(pcm.tobytes())
+        with open(base + ".json", "w", encoding="utf-8") as f:
+            json.dump({"ref_text": ref_text, "result": resp}, f, ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 if __name__ == "__main__":

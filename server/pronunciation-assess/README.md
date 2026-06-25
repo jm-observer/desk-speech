@@ -100,11 +100,14 @@ substitution 检测语言学合理(中式英语经典 th→f),证明 forced_alig
 评测靠一个 **wav2vec2 CTC 音素模型**,要求输出 **ARPAbet(或可去重音规范化为 ARPAbet)的音素
 token**——`gop.py` 用 `strip_stress()` 把 tokenizer vocab 与 G2P 输出对齐(大写、去重音数字)。
 
-- 默认 `vitouphy/wav2vec2-xls-r-300m-timit-phoneme`。**实测其 vocab 是 IPA**(`θ æ ə tʃ ŋ`…),
-  **非 ARPAbet**——`gop.py` 的 `model_token_candidates()` 用「ARPAbet 原形 + IPA 主形 + 备选」
-  多候选桥同时兼容 IPA / ARPAbet 两类模型(`AH→ʌ/ə`、`G→ɡ/g` 等高频写法差异已覆盖)。换模型只改 env。
-- **上线前确认 vocab 形态**(决定桥是否命中):
-  `curl -sL https://hf-mirror.com/<id>/resolve/main/vocab.json`。
+- 默认 **`slplab/wav2vec2-large-robust-L2-english-phoneme-recognition`**(wav2vec2-large-robust,
+  **专训非母语英语**音素识别,vocab 是**小写 ARPAbet** + 每音素带 `*_err` 误读 token + 弱读 `ax`)。
+  **实测远胜通用 `vitouphy/...timit-phoneme`**:连读长词(如 *delicious*)中段不再被强制对齐整段误杀
+  (L 从 0.04→0.86),而 `think→sink` 这类真错读的 /θ/ 仍判 bad。换模型只改 env。
+- **vocab 桥**:`gop.py` 的 `model_token_candidates()` 多候选同时兼容 ARPAbet(大小写)/ IPA;
+  对**弱读 schwa** 额外认 `AH→ax`(L2 模型把弱读 AH 输出成独立 ax),`_resolve_token_ids` 取
+  「同音素多写法」后验最大值。`*_err` token 暂未直接用(canonical GOP 已够;可作后续增强)。
+- **上线前确认 vocab 形态**:`curl -sL https://hf-mirror.com/<id>/resolve/main/vocab.json`。
 - **音频解码**:`gop.py` 用 **ffmpeg 子进程**解码任意格式(webm/opus/wav/mp4)→16k 单声道,
   **不走 `torchaudio.load`**(torchaudio 2.11 改依赖 torchcodec,且对 webm 不稳)。ffmpeg 在 base 镜像自带。
 
@@ -112,8 +115,9 @@ token**——`gop.py` 用 `strip_stress()` 把 tokenizer vocab 与 G2P 输出对
 
 GOP 原始分是 log 后验差(`≤0`,`0`=完美),**不可直接示人**,必须标定到 `0~1`:
 
-- `gop.py` 的 `Calibration` 用 `score01 = sigmoid(a*(gop_raw − b))`,默认 `a=4, b=−1`,
-  状态阈值 `ok_min=0.70 / warn_min=0.45`。**默认值仅占位**。
+- `gop.py` 的 `Calibration` 用 `score01 = sigmoid(a*(gop_raw − b))`。仓库 `calibration.json` 是按
+  **slplab L2 模型**真机 raw 后验手调的参考值(`a=1.2, b=−2.0, ok_min=0.6, warn_min=0.35`;L2 正确
+  音素 raw≈0、弱/错音 raw≈−2~−9)。**仍是手调临时值,正式版用 speechocean762 拟合。** 换模型必重标。
 - **正式标定**:在 [speechocean762](https://www.openslr.org/101/)(开源 L2 英语发音评测集,带
   音素/词/句三级人工分)上跑本引擎得到各音素 GOP 原始分,拟合 `a/b` 让模型分与人工分单调对齐,
   并据"通过线"反推 `ok_min/warn_min`。结果写 `calibration.json`,经 `GOP_CALIBRATION` env 挂载

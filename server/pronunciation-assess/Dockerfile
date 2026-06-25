@@ -31,7 +31,7 @@ COPY app.py /app/app.py
 # 权重经宿主缓存卷持久化(compose 挂 /root/.cache/huggingface),不进镜像。
 ENV GOP_PORT=8098 \
     GOP_DEVICE=cuda \
-    GOP_MODEL_ID=vitouphy/wav2vec2-xls-r-300m-timit-phoneme \
+    GOP_MODEL_ID=slplab/wav2vec2-large-robust-L2-english-phoneme-recognition \
     HF_ENDPOINT=https://hf-mirror.com
 
 EXPOSE 8098
