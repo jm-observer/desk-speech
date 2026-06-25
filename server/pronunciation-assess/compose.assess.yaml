@@ -1,0 +1,33 @@
+# 独立发音评测服务 — 刻意 NOT 放进 server/compose.yaml,避免扰动生产 asr。
+# 在 GB10 ~/server/pronunciation-assess 跑:
+#   docker compose -f compose.assess.yaml up -d --build
+#
+# 端口仅绑 127.0.0.1:8098 —— 同机 toolkit-server :8788 经 GOP 代理消费;zero-desktop 走
+# toolkit-server。不暴露到 LAN(要 LAN 用再改 ports 或走反代加鉴权)。
+services:
+  pronunciation-assess:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pronunciation-assess:gb10
+    runtime: nvidia
+    restart: unless-stopped       # 被 toolkit shadow 评测消费,需 GB10 重启后自愈
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - GOP_PORT=8098
+      - GOP_DEVICE=${GOP_DEVICE:-cuda}
+      # 换评测模型只改这里(需输出 ARPAbet 音素 token;见 README「模型」)。
+      - GOP_MODEL_ID=${GOP_MODEL_ID:-vitouphy/wav2vec2-xls-r-300m-timit-phoneme}
+      # 标定参数文件(speechocean762 拟合);未挂载则用 gop.py 内置默认(须上线前重标)。
+      - GOP_CALIBRATION=${GOP_CALIBRATION:-/calib/calibration.json}
+      # 限额(可覆盖)。单句评测目标 < 2s,给 60s 兜底。
+      - GOP_PROCESS_TIMEOUT_SEC=${GOP_PROCESS_TIMEOUT_SEC:-60}
+      - GOP_QUEUE_MAX=${GOP_QUEUE_MAX:-8}
+      - HF_ENDPOINT=https://hf-mirror.com
+    volumes:
+      # HuggingFace 权重缓存,宿主持久化、不进镜像(首启下模型,之后秒加载)。
+      - ${HF_CACHE:-/home/fengqi/pronunciation-assess/hf-cache}:/root/.cache/huggingface
+      # 标定参数(可选):宿主放 calibration.json,容器只读挂载。
+      - ${CALIB_DIR:-/home/fengqi/pronunciation-assess/calib}:/calib:ro
+    ports:
+      - "127.0.0.1:8098:8098"

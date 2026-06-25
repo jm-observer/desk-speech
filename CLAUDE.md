@@ -14,7 +14,7 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24)
   mic capture → WS upload                ├─ orchestrator   :8090  WS + SQLite + Web 管理台 + /api/*
                                          │                **已迁出本仓 → toolkit 仓 crates/orchestrator,
                                          │                现为宿主 systemd 服务(非容器)。见 server/orchestrator/MOVED.md**
-                                         ├─ asr (Docker)   127.0.0.1:9110→9100 (内部 WS) | 127.0.0.1:9101 (HTTP /embed + /transcribe)
+                                         ├─ asr (Docker)   127.0.0.1:9100→9100 (内部 WS) | 127.0.0.1:9101 (HTTP /embed + /transcribe)
                                          │                FunASR + 声纹门控
                                          ├─ vLLM (主机)    :12340  gemma-4-26B (润色/翻译)
                                          └─ TTS bake-off   :8095/:8096 (CosyVoice2 / GPT-SoVITS,选型隔离)
@@ -32,6 +32,7 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24)
 - `docs/DEPLOYMENT.md` — full deploy/ops reference (ports, volumes, redeploy flow)
 - `docs/redesign-architecture-overview.md` + `docs/protocol-draft.md` — design decisions, WS protocol
 - `docs/asr-transcribe-api.md` — FunASR `/transcribe` HTTP API contract (multipart in / JSON out, for toolkit + any外部消费方)
+- `docs/pronunciation-assess-api.md` — 发音评测 `:8098 /assess` 契约（multipart in / JSON out，供 toolkit shadow GOP 后端消费）；概念设计 `docs/pronunciation-coach-overview.md`
 - `server/tts/README.md` — TTS bake-off runbook (independent track)
 
 ## Top-level layout
@@ -44,6 +45,8 @@ Windows desktop (Tauri/Rust)         GB10 (192.168.0.68, arm64+CUDA13, Ubuntu24)
 | `server/asr/` | Python FunASR container: streaming VAD + Paraformer/SenseVoice/Whisper + speaker gating + HTTP `/embed`（声纹注册）+ HTTP `/transcribe`（离线整段，给同机 toolkit 抖音管线 multipart 上传 mp4 字节）。**本仓服务端现仅剩这一个容器。** |
 | `server/asr-server/` | **已退役**（2026-06）。仅留 `MOVED.md` 记录历史 + 指引新入口（同仓 `server/asr` 的 `/transcribe`）。 |
 | `server/tts/` | CosyVoice2 + GPT-SoVITS bake-off (independent compose, see its README). |
+| `server/audio-cleanup/` | Python 音频清洗容器(`:8097 /clean`,独立 compose)。人声分离/降噪/删停顿/响度归一。契约 `docs/audio-cleanup-api.md`。 |
+| `server/pronunciation-assess/` | Python 英语发音评测容器(`:8098 /assess`,独立 compose)。G2P + wav2vec2 CTC + 强制对齐 + GOP → 音素/词/句三级发音分。契约 `docs/pronunciation-assess-api.md`;供 toolkit shadow GOP 后端消费。 |
 | `server/compose.yaml` | GB10 compose,**现仅 asr**（orchestrator 已迁出）。 |
 | `scripts/release-server.ps1` | One-shot GB10 deploy,**现仅 asr**（tar → scp → compose build/up → smoke）。 |
 | `docs/` | Architecture, protocol, deploy, handoff. |
@@ -97,8 +100,8 @@ Browser → `http://192.168.0.68:8090/` (overview, history, voiceprints, runtime
 - **Client ↔ orchestrator**: WebSocket `/stream` (protocol in `docs/protocol-draft.md`).
   Upstream 16 kHz PCM; downstream `segment` / `optimized` / `translated` events.
   Auto-reconnect lives in `src-tauri/src/commands/remote.rs`.
-- **orchestrator ↔ asr**: orchestrator 现为宿主进程,经 `ws://127.0.0.1:9110`(asr 容器把
-  内部 9100 发布到宿主 9110;宿主 9100 被 trace-hub 占用)。声纹 embed 走 `127.0.0.1:9101`。
+- **orchestrator ↔ asr**: orchestrator 现为宿主进程,经 `ws://127.0.0.1:9100`(asr 容器把
+  内部 9100 发布到宿主 9100;trace-hub 已让出 9100 挪到 :9120)。声纹 embed 走 `127.0.0.1:9101`。
   (容器时代是 `ws://asr:9100`。)
 - **orchestrator ↔ vLLM**: HTTP `http://127.0.0.1:12340/v1`(vLLM 宿主进程;权威值在
   orchestrator SQLite 的 `vllm.base`,非默认 8085)。orchestrator 是宿主进程,直连回环。

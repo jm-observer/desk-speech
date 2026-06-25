@@ -301,6 +301,8 @@ ref wav 建议:**5–10s、24kHz、SNR > 50dB、峰值 -3 ~ -6 dBFS**(SNR 不够
 | `8090` | orchestrator(WS + 管理台 + `/api/*`) | ✅ | 桌面客户端连这个 |
 | `8091` | asr-server(OpenAI 兼容 HTTP) | ⚠️ 需 profile 启动 + 默认仅 `127.0.0.1` | 同机 ASR 调用(zero 等);LAN 需改 compose `ports` |
 | `8095` | CosyVoice2 TTS | ✅ | 外部 TTS 调用 |
+| `8097` | audio-cleanup(`/clean` 音频清洗) | ⚠️ 仅 `127.0.0.1` | 独立 compose;[`docs/audio-cleanup-api.md`](docs/audio-cleanup-api.md) |
+| `8098` | pronunciation-assess(`/assess` 发音评测 GOP) | ⚠️ 仅 `127.0.0.1` | 独立 compose;[`docs/pronunciation-assess-api.md`](docs/pronunciation-assess-api.md) |
 | `8085` | vLLM(host 进程) | 内部 | orchestrator 经 `host.docker.internal` 调 |
 | `9100` / `9101` | asr 容器内部 WS + `/embed` | 内部 | 仅 orchestrator 调,不暴露 |
 | `8096` | ~~GPT-SoVITS~~ | ❌ 已停 | bake-off 后移除,代码归档到 `server/tts/legacy/` |
