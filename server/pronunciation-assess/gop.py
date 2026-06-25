@@ -247,13 +247,15 @@ def assemble_response(
 ) -> dict:
     """把逐词/逐音素评测组装成 `/assess` 契约 JSON(见 docs/pronunciation-assess-api.md)。
 
-    `granularity=sentence` 时**省略 `phones[]`**(裁剪返回详尽度,省带宽;与 toolkit 落库单元正交)。
-    句级 `sentence_score` 由词分聚合;`bad_phone_count` 始终给(即便 sentence 粒度也据音素算)。
+    **始终返回 `phones[]`**:评分明细表(逐音素诊断)在整句 / 逐词模式下都要展示,故不再按
+    granularity 裁剪(一句几十个音素,带宽可忽略)。`granularity` 现仅保留兼容,不影响内容。
+    句级 `sentence_score` 由词分聚合;`bad_phone_count` 始终据音素算。
     """
+    _ = granularity  # 不再据此裁剪 phones(明细表整句也需要)
     # 句分只聚合「非 uncertain」的词(没对齐上的词不拉低句分)。
     sentence_score = aggregate_sentence([w.score for w in words if w.status != PRON_UNCERTAIN])
     bad_count = count_bad_phones(words)
-    include_phones = granularity != "sentence"
+    include_phones = True
 
     out_words = []
     for w in words:

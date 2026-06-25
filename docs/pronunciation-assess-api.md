@@ -31,7 +31,7 @@
 |---|---|---|---|---|
 | `audio` | ✅ | file | — | 用户跟读录音。任意 torchaudio/ffmpeg 可解码格式（webm/opus、wav、mp3、m4a…）；服务端解码并重采样到 16k 单声道。 |
 | `ref_text` | ✅ | str | — | 参考文本（用户应当读出的英文）。经 G2P 展开为期望音素序列。 |
-| `granularity` | ❌ | str | `word` | `word`=返回逐词 + 逐音素 `phones[]`；`sentence`=仅句分 + 词分，**省略 `phones[]`**（省带宽/算力）。**仅裁剪返回详尽度，与消费方落库单元正交。** |
+| `granularity` | ❌ | str | `word` | 兼容保留,**不再影响内容**:`phones[]` 现**始终返回**(评分明细表整句也需要)。落库单元仍由消费方 `kind` 决定,与此正交。 |
 | `lang` | ❌ | str | `en` | 语言。当前仅 `en`（G2P/模型为英语）。 |
 
 ## 响应（`200`）
@@ -73,7 +73,7 @@
 | `words[].ref` | str | 参考词原文（保留大小写/形态）。 |
 | `words[].score` | float | 词级发音分 `0~1`。 |
 | `words[].pron_status` | str | 发音三档：`ok` 达标 / `warn` 偏弱 / `bad` 明显错读。 |
-| `words[].phones` | array? | 逐音素明细。`granularity=sentence` 时**省略**。 |
+| `words[].phones` | array? | 逐音素明细。**始终返回**(评分明细表整句也需要)。 |
 | `phones[].ph` | str | 期望音素（ARPAbet，如 `TH`）。 |
 | `phones[].score` | float | 该音素发音分 `0~1`。 |
 | `phones[].pron_status` | str | 发音四档:`ok`/`warn`/`bad`/**`uncertain`**(引擎没把这个音对齐好,不判对错)。 |

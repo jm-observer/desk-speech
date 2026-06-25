@@ -83,16 +83,16 @@ def test_assemble_response_word_granularity():
     assert "expected_ph" not in resp["words"][1]["phones"][1]
 
 
-def test_assemble_response_sentence_granularity_omits_phones():
+def test_assemble_response_always_includes_phones():
     words = [
         gop.WordEval(ref="think", score=0.42, status=gop.PRON_BAD, phones=[
             gop.PhoneEval(ph="TH", score=0.18, status=gop.PRON_BAD),
         ]),
     ]
+    # 始终返回 phones[](明细表整句也需要),granularity 不再裁剪。
     resp = gop.assemble_response("think", words, transcript=None,
                                  model_id="m", granularity="sentence")
-    # sentence 粒度省略 phones[],但 bad_phone_count 仍据音素算。
-    assert "phones" not in resp["words"][0]
+    assert resp["words"][0]["phones"][0]["ph"] == "TH"
     assert resp["bad_phone_count"] == 1
     # transcript 为 None 时不出现该键。
     assert "transcript" not in resp
@@ -137,7 +137,7 @@ CASES = [
     test_model_token_candidates_covers_ipa_and_arpabet,
     test_model_token_to_arpabet_roundtrip,
     test_assemble_response_word_granularity,
-    test_assemble_response_sentence_granularity_omits_phones,
+    test_assemble_response_always_includes_phones,
     test_calibration_load_missing_returns_default,
 ]
 
