@@ -197,6 +197,12 @@ def model_token_to_arpabet(tok: str) -> str:
     return tok
 
 
+def strip_err_marker(tok: str) -> str:
+    """剥掉 L2 模型的误读/变体标记:`ih_err`→`ih`、`b*`→`b`。用于把"误读变体"还原成基础音素。"""
+    t = re.sub(r"_err$", "", tok, flags=re.IGNORECASE)
+    return t.rstrip("*")
+
+
 def build_hint(expected_ph: str, actual_ph: Optional[str]) -> str:
     """据「期望 vs 实际」音素拼人类可读纠音文案。`actual` 为空(漏读/无替代)时给通用提示。"""
     exp_ipa = arpabet_to_ipa(expected_ph)
@@ -506,10 +512,16 @@ def assess(audio_path: str, ref_text: str, opts: dict) -> dict:
                 reliable = False
                 hint = "引擎没把这个音对齐好(可能没听清),不计作读错"
             else:
-                actual_tok = model_token_to_arpabet(_vocab_inv.get(other_id, ""))
-                if actual_tok and actual_tok != ph:
-                    actual_ph = actual_tok
-                hint = build_hint(ph, actual_ph)
+                # 段内最强竞争音 → 还原成基础音素(剥 L2 模型的 _err / * 标记)。
+                other_base = model_token_to_arpabet(strip_err_marker(_vocab_inv.get(other_id, "")))
+                if not other_base or strip_stress(other_base) == strip_stress(ph):
+                    # 竞争音是 canonical 自己的「误读变体」(如 IH 的 ih_err)→ **发音不准**,非替换。
+                    actual_ph = None
+                    hint = f"/{arpabet_to_ipa(ph)}/ 发音不够准"
+                else:
+                    # 竞争音是**另一个**音素 → 真替换错读(如 /θ/→/s/)。
+                    actual_ph = other_base
+                    hint = build_hint(ph, actual_ph)
         _ = gmax_raw  # 全局峰仅诊断参考,不再据其判 uncertain(会漏判真替换错读)
         phone_evals.append(
             PhoneEval(ph=ph, score=round(score01, 4), status=st,

@@ -121,6 +121,14 @@ def test_model_token_to_arpabet_roundtrip():
     assert gop.model_token_to_arpabet("???") == "???"
 
 
+def test_strip_err_marker():
+    # L2 模型的误读/变体标记还原成基础音素。
+    assert gop.strip_err_marker("ih_err") == "ih"
+    assert gop.strip_err_marker("IH_ERR") == "IH"
+    assert gop.strip_err_marker("b*") == "b"
+    assert gop.strip_err_marker("s") == "s"
+
+
 def test_calibration_load_missing_returns_default():
     cal = gop.Calibration.load(None)
     assert cal.a == 4.0 and cal.b == -1.0
