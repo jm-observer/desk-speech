@@ -32,6 +32,9 @@ services:
       - ASR_CTX_PREFIX_SHADOW=1
       # 观测落盘目录（宿主机挂载卷；写容器内路径重建即丢，上次就是这么丢的）
       - ASR_CTX_OBS_DIR=/var/log/asr-ctx
+      # 容器是 root，bind mount 出来的目录默认 root:root，加 700 之后宿主上的
+      # fengqi 反而读不了自己的数据——而听审必须读 wav。把属主交回去。
+      - ASR_CTX_OBS_CHOWN=1000:1000
       - ASR_DEVICE=cuda
       - ASR_PORT=9100
       # 反向拉取声纹/配置:orchestrator 已迁出容器,现为宿主 toolkit-server 进程

@@ -1,0 +1,2 @@
+# shell 脚本必须是 LF：CRLF 会让 Linux 上的 shebang 变成 'bash'
+*.sh text eol=lf

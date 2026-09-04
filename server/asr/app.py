@@ -90,6 +90,9 @@ CTX_PREFIX_GAP_MS = int(os.environ.get("ASR_CTX_PREFIX_GAP_MS", "250"))
 CTX_PREFIX_SHADOW = os.environ.get("ASR_CTX_PREFIX_SHADOW", "0") not in ("0", "", "false", "off")
 # 观测落盘根目录（需是宿主机挂载卷；容器内路径重建即丢）。空 = 不落盘。
 CTX_OBS_DIR = os.environ.get("ASR_CTX_OBS_DIR", "").strip()
+# "uid:gid"——把观测目录的属主交回宿主上的操作者。容器是 root，不设的话目录
+# 会是 root:root 700，宿主上反而读不了，而听审必须读 wav。
+CTX_OBS_CHOWN = os.environ.get("ASR_CTX_OBS_CHOWN", "").strip()
 SR = 16000
 SAMPLES_PER_MS = SR // 1000
 
@@ -579,7 +582,7 @@ async def http_transcribe(request: web.Request) -> web.Response:
     return web.json_response(body)
 
 
-CTX_OBS = CtxObserver(CTX_OBS_DIR) if CTX_OBS_DIR else None
+CTX_OBS = CtxObserver(CTX_OBS_DIR, chown=CTX_OBS_CHOWN) if CTX_OBS_DIR else None
 if CTX_OBS is not None:
     print(f"[asr][ctx] observation -> {CTX_OBS_DIR} shadow={CTX_PREFIX_SHADOW}", flush=True)
 

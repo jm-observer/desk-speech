@@ -144,6 +144,15 @@ class TestCapacity:
         assert 0 < written < 6
 
 
+class TestOwnership:
+    def test_chown_is_best_effort(self, tmp_path):
+        """chown 失败（权限不足 / 参数畸形）不能让样本丢掉。"""
+        obs = CtxObserver(tmp_path, sr=SR, chown="not-a-uid")
+        assert obs.submit(_rec(), _audio(0.3), _audio(0.3))
+        obs.close()
+        assert obs.stats()["written"] == 1
+
+
 class TestRecordContract:
     """钉死 app.py::_observe_ctx 实际产出的记录形状。
 

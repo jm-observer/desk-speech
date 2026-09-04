@@ -74,9 +74,14 @@ class CtxObserver:
         sr: int = 16000,
         queue_max: int = DEFAULT_QUEUE_MAX,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        chown: str = "",
         _start_worker: bool = True,
     ):
         self.root = Path(root)
+        # 容器以 root 跑，bind mount 出来的目录默认 root:root——加上 700 之后
+        # **宿主上的操作者反而读不了自己的数据**，而听审是必须读 wav 的。
+        # 传 "uid:gid" 把属主交回去（chmod 不改属主，所以 700 仍然成立）。
+        self.chown = chown
         self.sr = sr
         self.max_bytes = max_bytes
         self._q: queue.Queue = queue.Queue(maxsize=queue_max)
@@ -150,6 +155,10 @@ class CtxObserver:
         written: list[Path] = []
         try:
             day.mkdir(parents=True, exist_ok=True)
+            # chown 是 POSIX-only（开发机是 Windows，跑的容器是 Linux），
+            # 且失败绝不能连累样本落盘——属主不对最多是读起来麻烦。
+            self._chown(self.root)
+            self._chown(day)
             try:
                 os.chmod(self.root, 0o700)  # 用户语音，别让别的账号读到
             except OSError:
@@ -176,6 +185,7 @@ class CtxObserver:
                 written.append(final)
                 record[field] = str(final.relative_to(self.root)).replace("\\", "/")
                 record[frames_field] = int(arr.shape[0])
+                self._chown(final)
 
             record.setdefault("ts", datetime.now(timezone.utc).astimezone().isoformat())
             line = json.dumps(record, ensure_ascii=False)
@@ -184,6 +194,7 @@ class CtxObserver:
                 fh.write(line + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+            self._chown(jsonl)
             with self._lock:
                 self._stats["written"] += 1
         except Exception as e:  # noqa: BLE001
@@ -202,6 +213,17 @@ class CtxObserver:
             with self._lock:
                 self._stats["write_errors"] += 1
             print(f"[asr][ctx-obs] write failed key={key}: {e}", flush=True)
+
+    def _chown(self, path: Path):
+        """把属主交回宿主上的操作者。失败一律吞掉——属主不对最多是读起来麻烦，
+        不该让一条样本丢掉。"""
+        if not self.chown or not hasattr(os, "chown"):
+            return
+        try:
+            uid, _, gid = self.chown.partition(":")
+            os.chown(path, int(uid), int(gid or uid))
+        except (OSError, ValueError):
+            pass
 
     @staticmethod
     def _fsync(path: Path):

@@ -19,6 +19,14 @@ TTL_DAYS="${ASR_CTX_SHADOW_TTL_DAYS:-30}"
 
 [ -d "$DIR" ] || { echo "$(date -Is) 目录不存在，跳过：$DIR"; exit 0; }
 
+# 读不了就喊出来，别静默跳过：容器以 root 跑，目录若变回 root:root 700，
+# 听审时会读不了 wav，而 TTL 也删不掉东西——两件事一起坏，且都没有症状。
+if [ ! -r "$DIR" ]; then
+  echo "$(date -Is) !! 无权读取 $DIR（应为 $(id -un):$(id -gn) 700）。修复："
+  echo "   docker exec server-asr-1 chown -R $(id -u):$(id -g) /var/log/asr-ctx"
+  exit 1
+fi
+
 before=$(du -sh "$DIR" 2>/dev/null | cut -f1 || echo '?')
 n=$(find "$DIR" -type f -mtime "+${TTL_DAYS}" -print -delete | wc -l)
 find "$DIR" -type d -empty -delete 2>/dev/null || true
