@@ -12,7 +12,7 @@ RUN pip3 install --break-system-packages --default-timeout=600 --retries 10 \
     "websockets>=12" "aiohttp>=3.9" openai-whisper
 
 WORKDIR /app
-COPY app.py spk_gate.py ctx_prefix.py ctx_observe.py /app/
+COPY app.py spk_gate.py ctx_prefix.py ctx_observe.py ctx_eval.py /app/
 
 ENV ASR_PARAFORMER_DIR=/models/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch \
     ASR_SENSEVOICE_DIR=/models/SenseVoiceSmall \

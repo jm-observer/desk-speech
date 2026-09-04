@@ -17,14 +17,19 @@ services:
       - ASR_WHISPER_LARGE_DIR=/models/Whisper-large-v3
       - ASR_VAD_DIR=/models/speech_fsmn_vad_zh-cn-16k-common-pytorch
       - ASR_PUNC_DIR=/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
-      # 2026-09-04 关停：上线 12 小时里它改写了 8 次输出，而当时没有任何手段判断
-      # 这些改写是好是坏（没音频、没参考转写、日志也没记下判断所需的字段）。
-      # 不是「已证明有害」，是「无法评估」。前缀上下文解码当前**关停**。要做影子采集时改成：
-      #   ASR_CTX_PREFIX_MAX_MS=3000  +  ASR_CTX_PREFIX_SHADOW=1
-      # 影子模式照跑整条路径并落盘，但始终返回原文，对用户输出零影响。
-      # 重开条件见 docs/asr-ctx-prefix-postmortem.md，别只把 MAX_MS 调回来就上。
-      - ASR_CTX_PREFIX_MAX_MS=0
-      - ASR_CTX_PREFIX_SHADOW=0
+      # 前缀上下文解码：2026-09-04 上线 12 小时即关停——它改写了 8 次输出，而当时
+      # 没有任何手段判断那些改写是好是坏（没音频、没参考转写、日志也没记下判断所需
+      # 的字段）。不是「已证明有害」，是「无法评估」。复盘见
+      # docs/asr-ctx-prefix-postmortem.md。
+      #
+      # 现在处于**影子采集**：照常跑重解 / 切分 / 两道闸并全程落盘，但 SHADOW=1
+      # 让它**始终返回原文**，对用户输出零影响；代价是每个短句多一次 GPU 解码、
+      # 出字略慢。采够样本就把 MAX_MS 改回 0（SHADOW 留着无所谓，MAX_MS=0 时
+      # 整条路径根本不进）。
+      #
+      # ⚠️ 真正重开 = SHADOW 改 0。那要先过离线评测，别只改这一个数就上。
+      - ASR_CTX_PREFIX_MAX_MS=3000
+      - ASR_CTX_PREFIX_SHADOW=1
       # 观测落盘目录（宿主机挂载卷；写容器内路径重建即丢，上次就是这么丢的）
       - ASR_CTX_OBS_DIR=/var/log/asr-ctx
       - ASR_DEVICE=cuda

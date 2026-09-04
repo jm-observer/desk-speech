@@ -267,6 +267,18 @@ orchestrator 的段音频只保留 1 天（每小时清理，`docs/DEPLOYMENT.md
 
 ### P0-b · 离线评测
 
+> **实现状态（2026-09-04）：离线部分已落地** —— `server/asr/ctx_eval.py`（15 条单测）。
+> 三个子命令：
+> - `reclassify <观测目录>` —— 用**当前**闸门对全部记录重新分类。`full` 已存盘，
+>   而两道闸都是纯文本函数，**改闸门后重新验收是零解码成本的**；输出会标出
+>   「新放行、必须补听审」的那批。
+> - `worklist <观测目录>` —— 产出待听审清单（wav 路径 + 无上下文结果 + 带上下文结果）。
+> - `verdict <标注.json>` —— 吃 `{key: [good|bad|neutral|skip, ...]}`，算通过线，
+>   不过则非零退出。
+>
+> **未做**：`--redecode`（重复 3 次解码那一步需要 GPU 模型，等有语料后在 G10 上补）。
+
+
 **语料只用 P0-a 落盘的 JSONL + wav。** 不要事后抓 history：orchestrator 的
 `segment_set_text` 是 `UPDATE segments SET text=?2` **原地覆盖**
 （toolkit `crates/orchestrator/src/db.rs:198-203`），人工经 `/segments/{id}/text` 改过之后
