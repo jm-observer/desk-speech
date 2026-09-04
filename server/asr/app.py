@@ -27,6 +27,9 @@ import websockets
 from aiohttp import web
 from funasr import AutoModel
 
+from ctx_prefix import accept_ctx_text, strip_known_prefix
+from spk_gate import ROLE_ENROLLED, ROLE_IMPOSTER, decide as spk_decide
+
 # SenseVoice emits leading meta tokens like <|zh|><|NEUTRAL|><|BGM|><|withitn|>.
 # We strip them to plain text. (funasr's rich_transcription_postprocess instead
 # turns emotion/audio-event tokens into emoji like 😡/🎼 — unwanted noise for a
@@ -58,12 +61,35 @@ VAD_MAX_END_SIL = int(os.environ.get("ASR_VAD_MAX_END_SIL", "1500"))
 # finalizes/emits. This is what actually controls "how often it splits"
 # (FunASR's own max_end_silence_time is not honored in streaming).
 SENTENCE_GAP_MS = int(os.environ.get("ASR_SENTENCE_GAP_MS", "1500"))
+# FSMN-VAD backdates its reported speech end to the energy drop-off, which
+# often cuts the last (tapering) word or two out of the sentence slice. Pad
+# the finalized slice end by this much (clamped to buffered audio) so the
+# offline pass — and the downstream archive that follows t_end — keep the
+# weak tail. Safe: finalize only fires after >= SENTENCE_GAP_MS of silence,
+# so the pad can never overlap the next sentence.
+SENT_TAIL_PAD_MS = int(os.environ.get("ASR_SENT_TAIL_PAD_MS", "400"))
+# 前缀上下文解码：短句孤立解码时中英混说的英文词常被解成汉字音节（实测段
+# #13340「review」→「伪略」）。把上一句的音频拼在前面重解一次即可解对，见
+# ctx_prefix.py 的说明。只对短句生效——长句本身material 就够，不值得多花一次解码。
+# 置 0 关闭。
+CTX_PREFIX_MAX_MS = int(os.environ.get("ASR_CTX_PREFIX_MAX_MS", "3000"))
+# 上一句超过这个时长就不拿来当前缀：整句一起重解太贵，而截取尾部又会让
+# prev_text（整句的文本）对不上前缀实际解出的内容，导致覆盖率判定失败、静默
+# 退回。宁可这一句不享受上下文，也不引入一条看不见的降级路径。
+CTX_PREFIX_MAX_PREV_MS = int(os.environ.get("ASR_CTX_PREFIX_MAX_PREV_MS", "10000"))
+# 前缀与本句之间插入的静音，避免两句音频直接黏在一起。
+CTX_PREFIX_GAP_MS = int(os.environ.get("ASR_CTX_PREFIX_GAP_MS", "250"))
 SR = 16000
 SAMPLES_PER_MS = SR // 1000
 
 # Speaker (voiceprint) gating — best model picked: CAM++ zh+en.
 SPK_DIR = os.environ.get("ASR_SPK_DIR") or None
 SPK_THRESHOLD = float(os.environ.get("ASR_SPK_THRESHOLD", "0.35"))
+# Below this, a slice is too short for its speaker embedding to mean anything
+# (measured: the enrolled user's own 0.94s slice scored 0.3587 against his own
+# voiceprint, *below* a stranger's 5.7s slice at 0.4894). When gating is on
+# such slices are dropped rather than guessed at.
+SPK_MIN_MS = int(os.environ.get("ASR_SPK_MIN_MS", "1200"))
 # True  -> only recognize enrolled+enabled speakers (drop others)
 # False -> recognize everyone (gating off, even if voiceprints exist)
 GATE_TO_ENROLLED = os.environ.get("ASR_GATE_TO_ENROLLED", "1") not in ("0", "off", "false")
@@ -151,7 +177,11 @@ SPK_MODEL = (AutoModel(model=SPK_DIR, device=DEVICE, disable_update=True)
 print(f"[asr] models ready (asr={ASR_KIND} speaker="
       f"{'on' if SPK_MODEL else 'off'})", flush=True)
 
-# Enabled voiceprints pulled from the orchestrator: list[(name, np.ndarray)].
+# Enabled voiceprints pulled from the orchestrator: list[(name, np.ndarray, role)].
+# `role` is "enrolled" (whose speech we want) or "imposter" (an anchor for a
+# known other voice — matching it means drop, not emit). Anchors exist because
+# with a single enrolled voiceprint argmax has nowhere else to land, so every
+# stranger is scored only against the one person we know.
 ENABLED_VPS: list = []
 
 
@@ -184,22 +214,19 @@ def cosine(a, b) -> float:
     return float(np.dot(a, b))  # both unit-normalized
 
 
-def best_speaker(audio: np.ndarray):
-    """(name, score) of best enabled voiceprint, or (None, -1)."""
+def score_speakers(audio: np.ndarray):
+    """[(name, role, score)] over every enabled voiceprint, or None.
+
+    None means the embedding itself could not be computed — distinct from an
+    empty list (nothing enrolled), because the caller must not read "no
+    candidate scored well" into what is really "we never got to look".
+    """
     if not ENABLED_VPS:
-        return (None, 1.0)  # gating disabled -> accept all
+        return []
     emb = spk_embed(audio)
     if emb is None:
-        # Embed failed: return a non-matching sentinel. The caller treats an
-        # empty name as "not matched" and (when gating is on) drops the segment
-        # rather than emitting an unidentified record.
-        return ("", -1.0)
-    best_n, best_s = None, -1.0
-    for name, vp in ENABLED_VPS:
-        s = cosine(emb, vp)
-        if s > best_s:
-            best_n, best_s = name, s
-    return (best_n, best_s)
+        return None
+    return [(name, role, cosine(emb, vp)) for name, vp, role in ENABLED_VPS]
 
 
 def _decode_audio(raw: bytes) -> np.ndarray:
@@ -225,7 +252,14 @@ def _refresh_voiceprints():
             v = np.asarray(item.get("embedding", []), dtype=np.float32).reshape(-1)
             n = np.linalg.norm(v)
             if n > 0:
-                vps.append((item.get("name", ""), v / n))
+                role = str(item.get("role") or ROLE_ENROLLED).strip().lower()
+                if role not in (ROLE_ENROLLED, ROLE_IMPOSTER):
+                    # Fail closed, matching the orchestrator side: a role we
+                    # cannot read must not quietly become "let this voice
+                    # through". Silencing a speaker gets noticed in an hour;
+                    # admitting the wrong one stays invisible for weeks.
+                    role = ROLE_IMPOSTER
+                vps.append((item.get("name", ""), v / n, role))
         ENABLED_VPS = vps
     except Exception:
         pass  # keep last known set on transient failure
@@ -240,7 +274,7 @@ def _refresh_asr_config():
     not interrupted (the new model takes effect from the next sentence).
     Secondary model is lazy — only built once a session actually opts in.
     """
-    global SPK_THRESHOLD, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND
+    global SPK_THRESHOLD, SPK_MIN_MS, SENTENCE_GAP_MS, ASR_MODEL, ASR_KIND
     global GATE_TO_ENROLLED, SECONDARY_KIND, SECONDARY_MODEL
     global HOTWORDS_PARAFORMER, HOTWORDS_WHISPER
     try:
@@ -250,6 +284,8 @@ def _refresh_asr_config():
         return  # keep current values on transient failure
     if "spk_threshold" in d:
         SPK_THRESHOLD = float(d["spk_threshold"])
+    if "spk_min_ms" in d:
+        SPK_MIN_MS = int(d["spk_min_ms"])
     if "sentence_gap_ms" in d:
         SENTENCE_GAP_MS = int(d["sentence_gap_ms"])
     if "gate_to_enrolled" in d:
@@ -374,10 +410,12 @@ async def voiceprint_loop():
             else (f"pending={SECONDARY_KIND}" if SECONDARY_KIND else "off")
         )
         hw_n = len(HOTWORDS_PARAFORMER.split()) if HOTWORDS_PARAFORMER else 0
+        n_imp = sum(1 for _n, _v, r in ENABLED_VPS if r == ROLE_IMPOSTER)
         print(f"[asr][cfg] model={ASR_KIND} secondary={sec_state} "
-              f"voiceprints={len(ENABLED_VPS)} "
+              f"voiceprints={len(ENABLED_VPS)}(imposter={n_imp}) "
               f"gate={'on' if GATE_TO_ENROLLED else 'off'} "
-              f"spk_thr={SPK_THRESHOLD} gap={SENTENCE_GAP_MS}ms "
+              f"spk_thr={SPK_THRESHOLD} spk_min={SPK_MIN_MS}ms "
+              f"gap={SENTENCE_GAP_MS}ms "
               f"hotwords={hw_n}", flush=True)
         await asyncio.sleep(VP_REFRESH_SEC)
 
@@ -392,8 +430,12 @@ async def http_health(request: web.Request) -> web.Response:
         "status": "ok",
         "model": ASR_KIND,
         "spk_threshold": SPK_THRESHOLD,
+        "spk_min_ms": SPK_MIN_MS,
         "gate_to_enrolled": GATE_TO_ENROLLED,
-        "enrolled_voiceprints": len(ENABLED_VPS),
+        "enrolled_voiceprints": sum(
+            1 for _n, _v, r in ENABLED_VPS if r == ROLE_ENROLLED),
+        "imposter_voiceprints": sum(
+            1 for _n, _v, r in ENABLED_VPS if r == ROLE_IMPOSTER),
         "sentence_gap_ms": SENTENCE_GAP_MS,
     })
 
@@ -548,6 +590,11 @@ class Session:
         # Background secondary-recognition tasks; awaited before `done` so the
         # client doesn't miss a trailing comparison result.
         self.sec_tasks: list = []
+        # 上一句已完成句子的音频尾部 + 它的识别文本，供下一句做前缀上下文解码。
+        # 存音频本身而不是「最近 N 秒缓冲」：两句之间可能隔着几分钟静音
+        # （段 #13340 与前一句相隔近 2 分钟），按时间取只会取到静音。
+        self.prev_seg = None
+        self.prev_text = ""
 
     def now_ms(self) -> int:
         return self.buf_beg_ms + len(self.buf) // SAMPLES_PER_MS
@@ -683,6 +730,38 @@ async def _run_secondary(ws, seg: np.ndarray, beg: int, end: int):
         pass  # client gone; nothing to do
 
 
+def _recognize_with_prev_context(s: "Session", seg, plain: str, dur_ms: int) -> str:
+    """短句用「上一句音频 + 本句音频」重解一次，切掉前缀文本后返回本句。
+
+    只对短句做：长句本身材料就够，不值得多花一次解码。任何一步不成立都退回
+    `plain`（无上下文的结果）——切错正文比不切更糟。判据与切分逻辑在
+    ctx_prefix.py（纯文本，有单测）。
+    """
+    if CTX_PREFIX_MAX_MS <= 0 or dur_ms >= CTX_PREFIX_MAX_MS:
+        return plain
+    if s.prev_seg is None or s.prev_seg.size == 0 or not s.prev_text:
+        return plain
+    if s.prev_seg.size > CTX_PREFIX_MAX_PREV_MS * SAMPLES_PER_MS:
+        return plain
+    gap = np.zeros(CTX_PREFIX_GAP_MS * SAMPLES_PER_MS, dtype=np.float32)
+    try:
+        full = recognize(np.concatenate([s.prev_seg, gap, seg]))
+    except Exception as e:  # noqa: BLE001
+        print(f"[asr][ctx] recognize failed: {e}", flush=True)
+        return plain
+    stripped = strip_known_prefix((full or "").strip(), s.prev_text)
+    if stripped is None:
+        print(f"[asr][ctx] prefix not located, keep plain; full={full!r} "
+              f"prev={s.prev_text!r}", flush=True)
+        return plain
+    if not accept_ctx_text(stripped, plain):
+        print(f"[asr][ctx] rejected {stripped!r} (plain={plain!r})", flush=True)
+        return plain
+    if stripped != plain:
+        print(f"[asr][ctx] {plain!r} -> {stripped!r}", flush=True)
+    return stripped
+
+
 async def finalize(ws, s: Session):
     """Recognize and emit the accumulated sentence, then reset it."""
     if s.sent_beg is None or s.last_end is None or s.last_end <= s.sent_beg:
@@ -690,6 +769,10 @@ async def finalize(ws, s: Session):
         s.last_end = None
         return
     beg, end = s.sent_beg, s.last_end
+    # Recover the weak tail the VAD end point tends to cut off (see
+    # SENT_TAIL_PAD_MS). Everything downstream — recognition slice, emitted
+    # t_end, secondary pairing key — uses the padded end consistently.
+    end = min(end + SENT_TAIL_PAD_MS, s.now_ms())
     # .copy() decouples seg from the session buffer so trim_to below can
     # actually release the old backing array.
     seg = s.slice_ms(beg, end).copy()
@@ -699,22 +782,29 @@ async def finalize(ws, s: Session):
     # backdates the next speech onset slightly).
     s.trim_to(end - 1000)
     text = recognize(seg)
-    spk, score = best_speaker(seg)
+    # 孤立短句里中英混说的英文词常被解成汉字音节；拼上一句音频重解可解对。
+    text = _recognize_with_prev_context(s, seg, text, end - beg)
+    # 声纹仍只看本句，不含前缀——否则前缀会把说话人判定带偏。
+    cands = score_speakers(seg)
     gated = GATE_TO_ENROLLED and bool(ENABLED_VPS)
-    # "matched" = positively hit an enrolled speaker above threshold. Below
-    # threshold AND embed failure (best_speaker -> ("", _)) both count as NOT
-    # matched — without a confirmed enrolled speaker we cannot claim a match.
-    matched = bool(spk) and score >= SPK_THRESHOLD
-    if gated and not matched:
-        # Gating on but no enrolled speaker confirmed -> drop, don't push a
-        # record. Previously a falsy `spk` (embed failure) slipped past the
-        # guard and got emitted with speaker=None despite gating.
-        print(f"[asr][spk] DROP unmatched best={spk!r} score={score:.3f} "
-              f"thr={SPK_THRESHOLD} text={text!r}", flush=True)
+    emit, speaker, reason = spk_decide(
+        cands, end - beg,
+        gated=gated, threshold=SPK_THRESHOLD, min_ms=SPK_MIN_MS,
+    )
+    if not emit:
+        # Log the full scoreboard, not just the winner: when a segment is
+        # dropped the question is always "how close was it", and that is
+        # unanswerable after the fact otherwise (scores are not persisted).
+        board = " ".join(f"{n}/{r}={s:.3f}" for n, r, s in (cands or []))
+        print(f"[asr][spk] DROP {reason} dur={end - beg}ms "
+              f"thr={SPK_THRESHOLD} min={SPK_MIN_MS}ms [{board}] "
+              f"text={text!r}", flush=True)
         return
-    # Label the speaker when positively matched; otherwise leave it unlabeled
-    # (only reachable here when gating is off — informational).
-    speaker = spk if matched else None
+    # 供下一句做前缀上下文。只在通过声纹闸之后才存：被判为别人说的话不该拿来
+    # 当本人的上下文。**整句存，不截断**——prev_text 是整句的文本，截音频会让
+    # 两者对不上（见 CTX_PREFIX_MAX_PREV_MS）。
+    s.prev_seg = seg.copy()
+    s.prev_text = text
     await emit_segment(ws, text, beg, end, speaker)
     # Fan out the same PCM slice to the secondary recognizer (if opted-in
     # for this session). Detached so primary path latency is unaffected.
