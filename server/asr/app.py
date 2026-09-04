@@ -72,7 +72,10 @@ SENT_TAIL_PAD_MS = int(os.environ.get("ASR_SENT_TAIL_PAD_MS", "400"))
 # #13340「review」→「伪略」）。把上一句的音频拼在前面重解一次即可解对，见
 # ctx_prefix.py 的说明。只对短句生效——长句本身material 就够，不值得多花一次解码。
 # 置 0 关闭。
-CTX_PREFIX_MAX_MS = int(os.environ.get("ASR_CTX_PREFIX_MAX_MS", "3000"))
+# **默认关闭**：2026-09-04 首次上线 12 小时内 8 次改写有 3 次把结果改坏（含把「。」
+# 编成「恶的打强起。」），净负。闸门重做 + 离线评测证明有效之前不要默认开，
+# 见 docs/asr-ctx-prefix-postmortem.md。设为正数（如 3000）即启用。
+CTX_PREFIX_MAX_MS = int(os.environ.get("ASR_CTX_PREFIX_MAX_MS", "0"))
 # 上一句超过这个时长就不拿来当前缀：整句一起重解太贵，而截取尾部又会让
 # prev_text（整句的文本）对不上前缀实际解出的内容，导致覆盖率判定失败、静默
 # 退回。宁可这一句不享受上下文，也不引入一条看不见的降级路径。

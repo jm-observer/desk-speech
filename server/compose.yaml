@@ -17,6 +17,10 @@ services:
       - ASR_WHISPER_LARGE_DIR=/models/Whisper-large-v3
       - ASR_VAD_DIR=/models/speech_fsmn_vad_zh-cn-16k-common-pytorch
       - ASR_PUNC_DIR=/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
+      # 2026-09-04 关停：前缀上下文解码在生产上净负（12h 内 8 次改写，3 次改坏，
+      # 含把「。」编成「恶的打强起。」）。待离线评测重做闸门后再开，见
+      # docs/asr-ctx-prefix-postmortem.md。
+      - ASR_CTX_PREFIX_MAX_MS=0
       - ASR_DEVICE=cuda
       - ASR_PORT=9100
       # 反向拉取声纹/配置:orchestrator 已迁出容器,现为宿主 toolkit-server 进程
