@@ -120,6 +120,14 @@ toolkit 早有现成的正确做法：prompt 回归集（`toolkit/scripts/asr-pr
 
 ### P0-a · 影子模式 + 观测（不改变任何对外输出）
 
+> **实现状态（2026-09-04）：已落地，未部署。** `server/asr/ctx_observe.py`（队列 +
+> 后台写线程 + 原子写 + 完整性校验，13 条单测）、`app.py` 的 `ASR_CTX_PREFIX_SHADOW` /
+> `ASR_CTX_OBS_DIR` / `Session.obs_session_id` / `_observe_ctx`、compose 的观测卷、
+> 宿主侧 TTL 清理 `scripts/asr-ctx-ttl.sh`。
+> **开启影子采集** = compose 里把 `ASR_CTX_PREFIX_MAX_MS` 改回 `3000` 且
+> `ASR_CTX_PREFIX_SHADOW=1`，重建镜像后重启。
+
+
 > 下面写的是**必须满足的性质**。实现时若有更简单的等价做法可以替换，但这些性质
 > 逐条都是被具体故障或具体代码约束逼出来的，不能省。
 

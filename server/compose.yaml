@@ -17,10 +17,16 @@ services:
       - ASR_WHISPER_LARGE_DIR=/models/Whisper-large-v3
       - ASR_VAD_DIR=/models/speech_fsmn_vad_zh-cn-16k-common-pytorch
       - ASR_PUNC_DIR=/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
-      # 2026-09-04 关停：前缀上下文解码在生产上净负（12h 内 8 次改写，3 次改坏，
-      # 含把「。」编成「恶的打强起。」）。待离线评测重做闸门后再开，见
-      # docs/asr-ctx-prefix-postmortem.md。
+      # 2026-09-04 关停：上线 12 小时里它改写了 8 次输出，而当时没有任何手段判断
+      # 这些改写是好是坏（没音频、没参考转写、日志也没记下判断所需的字段）。
+      # 不是「已证明有害」，是「无法评估」。前缀上下文解码当前**关停**。要做影子采集时改成：
+      #   ASR_CTX_PREFIX_MAX_MS=3000  +  ASR_CTX_PREFIX_SHADOW=1
+      # 影子模式照跑整条路径并落盘，但始终返回原文，对用户输出零影响。
+      # 重开条件见 docs/asr-ctx-prefix-postmortem.md，别只把 MAX_MS 调回来就上。
       - ASR_CTX_PREFIX_MAX_MS=0
+      - ASR_CTX_PREFIX_SHADOW=0
+      # 观测落盘目录（宿主机挂载卷；写容器内路径重建即丢，上次就是这么丢的）
+      - ASR_CTX_OBS_DIR=/var/log/asr-ctx
       - ASR_DEVICE=cuda
       - ASR_PORT=9100
       # 反向拉取声纹/配置:orchestrator 已迁出容器,现为宿主 toolkit-server 进程
@@ -33,6 +39,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ${MODELS_DIR:-/home/fengqi/funasr-prep/models}:/models:ro
+      # 影子期的观测数据（含用户语音副本）。保留期见 postmortem §性质 5，
+      # 宿主侧另有 TTL 清理（scripts/asr-ctx-ttl.sh），不依赖容器是否还在跑。
+      - ./asr-ctx-shadow:/var/log/asr-ctx
     expose:
       - "9100"
     ports:

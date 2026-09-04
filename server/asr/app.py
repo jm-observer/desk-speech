@@ -16,6 +16,7 @@ model is hot-switchable at runtime via the orchestrator's `asr.model`.
 import asyncio
 import json
 import os
+import uuid
 import re
 import subprocess
 import sys
@@ -27,6 +28,7 @@ import websockets
 from aiohttp import web
 from funasr import AutoModel
 
+from ctx_observe import CtxObserver
 from ctx_prefix import accept_ctx_text, strip_known_prefix
 from spk_gate import ROLE_ENROLLED, ROLE_IMPOSTER, decide as spk_decide
 
@@ -82,6 +84,12 @@ CTX_PREFIX_MAX_MS = int(os.environ.get("ASR_CTX_PREFIX_MAX_MS", "0"))
 CTX_PREFIX_MAX_PREV_MS = int(os.environ.get("ASR_CTX_PREFIX_MAX_PREV_MS", "10000"))
 # 前缀与本句之间插入的静音，避免两句音频直接黏在一起。
 CTX_PREFIX_GAP_MS = int(os.environ.get("ASR_CTX_PREFIX_GAP_MS", "250"))
+# 影子模式：照常执行重解 / 切分 / 两道闸并全程落盘，**但始终返回 plain**，
+# 对用户输出零影响。用来在不改写用户文本的前提下采集评测语料——功能关着的时候
+# 一条样本也产不出来，而评测通过前又不该让它改写输出，两者原本互相锁死。
+CTX_PREFIX_SHADOW = os.environ.get("ASR_CTX_PREFIX_SHADOW", "0") not in ("0", "", "false", "off")
+# 观测落盘根目录（需是宿主机挂载卷；容器内路径重建即丢）。空 = 不落盘。
+CTX_OBS_DIR = os.environ.get("ASR_CTX_OBS_DIR", "").strip()
 SR = 16000
 SAMPLES_PER_MS = SR // 1000
 
@@ -571,6 +579,11 @@ async def http_transcribe(request: web.Request) -> web.Response:
     return web.json_response(body)
 
 
+CTX_OBS = CtxObserver(CTX_OBS_DIR) if CTX_OBS_DIR else None
+if CTX_OBS is not None:
+    print(f"[asr][ctx] observation -> {CTX_OBS_DIR} shadow={CTX_PREFIX_SHADOW}", flush=True)
+
+
 class Session:
     """Per-connection streaming state with sentence-level endpointing."""
 
@@ -598,6 +611,11 @@ class Session:
         # （段 #13340 与前一句相隔近 2 分钟），按时间取只会取到静音。
         self.prev_seg = None
         self.prev_text = ""
+        # ASR 侧既没有段 ID（那是 orchestrator 持久化时才分配的）也没有会话 ID，
+        # 观测记录只能自己造一个键。reset 会新建 Session，于是自动换新 id——
+        # 只用时间键不行：reset 后时间可能重头开始，不同连接也会撞键。
+        self.obs_session_id = uuid.uuid4().hex[:12]
+        self.obs_seq = 0
 
     def now_ms(self) -> int:
         return self.buf_beg_ms + len(self.buf) // SAMPLES_PER_MS
@@ -733,36 +751,97 @@ async def _run_secondary(ws, seg: np.ndarray, beg: int, end: int):
         pass  # client gone; nothing to do
 
 
-def _recognize_with_prev_context(s: "Session", seg, plain: str, dur_ms: int) -> str:
-    """短句用「上一句音频 + 本句音频」重解一次，切掉前缀文本后返回本句。
+def _observe_ctx(s: "Session", obs, ctx_audio, seg, plain, emit, beg, end):
+    """在**声纹判定之后**把观测记录一次写完，不做回填。
 
-    只对短句做：长句本身材料就够，不值得多花一次解码。任何一步不成立都退回
-    `plain`（无上下文的结果）——切错正文比不切更糟。判据与切分逻辑在
+    「有没有发出去」在影子模式下是歧义的：`emit_segment` 会丢弃空文本，所以当
+    `plain` 为空、切分结果非空、两道闸都过时，影子线上实际不发段，而关掉 SHADOW
+    后这条会变成非空并被发出——那正是风险最高的一类（本来没输出，启用后凭空多一条）。
+    所以拆成三个字段，评测入选看 `would_emit_if_enabled`。
+    """
+    if CTX_OBS is None or obs is None:
+        return
+    stripped = obs.get("stripped")
+    enabled_text = stripped if obs.get("stage") in ("would_apply", "applied") else plain
+    obs.update({
+        "t_start_ms": int(beg),
+        "t_end_ms": int(end),
+        "spk_emit": bool(emit),
+        "shadow_emitted": bool(emit and (plain or "").strip()),
+        "would_emit_if_enabled": bool(emit and (enabled_text or "").strip()),
+    })
+    s.obs_seq += 1
+    CTX_OBS.submit(obs, ctx_audio, seg if ctx_audio is not None else None)
+
+
+def _recognize_with_prev_context(s: "Session", seg, plain: str, dur_ms: int):
+    """短句用「上一句音频 + 本句音频」重解一次，切掉前缀文本。
+
+    返回 `(text, obs, ctx_audio)`：
+
+    - `text` —— 要采用的文本。**影子模式下恒为 `plain`**（照跑不改输出）。
+    - `obs` —— 观测记录（`stage` + 各中间量），由调用方在**声纹判定之后**补齐
+      发送相关字段再落盘。这里不落盘：ctx 跑在声纹闸之前，此刻还不知道这一段
+      最终有没有发出去，而 JSONL 是追加式的、没法回填。
+    - `ctx_audio` —— 这次真正喂进模型的拼接输入（`prev + gap + seg`），供离线重放。
+      连 gap 一起存，分开存两段会在重放时引入长度差异。
+
+    任何一步不成立都退回 `plain`——切错正文比不切更糟。判据与切分逻辑在
     ctx_prefix.py（纯文本，有单测）。
     """
-    if CTX_PREFIX_MAX_MS <= 0 or dur_ms >= CTX_PREFIX_MAX_MS:
-        return plain
+    obs = {
+        "key": f"{s.obs_session_id}-{s.obs_seq:05d}",
+        "shadow": CTX_PREFIX_SHADOW,
+        "plain": plain,
+        "dur_ms": dur_ms,
+        "prev_text": s.prev_text or None,
+        "prev_dur_ms": int(s.prev_seg.size / SAMPLES_PER_MS) if s.prev_seg is not None else None,
+        "gap_ms": CTX_PREFIX_GAP_MS,
+        "full": None,
+        "stripped": None,
+    }
+
+    def done(stage, text):
+        obs["stage"] = stage
+        return text, obs, None
+
+    if CTX_PREFIX_MAX_MS <= 0:
+        return done("disabled", plain)
+    if dur_ms >= CTX_PREFIX_MAX_MS:
+        return done("too_long", plain)
     if s.prev_seg is None or s.prev_seg.size == 0 or not s.prev_text:
-        return plain
+        return done("no_prev", plain)
     if s.prev_seg.size > CTX_PREFIX_MAX_PREV_MS * SAMPLES_PER_MS:
-        return plain
+        return done("prev_too_long", plain)
+
     gap = np.zeros(CTX_PREFIX_GAP_MS * SAMPLES_PER_MS, dtype=np.float32)
+    ctx_audio = np.concatenate([s.prev_seg, gap, seg])
     try:
-        full = recognize(np.concatenate([s.prev_seg, gap, seg]))
+        full = recognize(ctx_audio)
     except Exception as e:  # noqa: BLE001
         print(f"[asr][ctx] recognize failed: {e}", flush=True)
-        return plain
+        obs["stage"] = "decode_error"
+        return plain, obs, None
+
+    obs["full"] = full
     stripped = strip_known_prefix((full or "").strip(), s.prev_text)
     if stripped is None:
-        print(f"[asr][ctx] prefix not located, keep plain; full={full!r} "
-              f"prev={s.prev_text!r}", flush=True)
-        return plain
+        obs["stage"] = "not_located"
+        return plain, obs, ctx_audio
+    obs["stripped"] = stripped
     if not accept_ctx_text(stripped, plain):
-        print(f"[asr][ctx] rejected {stripped!r} (plain={plain!r})", flush=True)
-        return plain
-    if stripped != plain:
-        print(f"[asr][ctx] {plain!r} -> {stripped!r}", flush=True)
-    return stripped
+        obs["stage"] = "rejected"
+        return plain, obs, ctx_audio
+    if stripped == plain:
+        # 两道闸都过但文本没变：不改动任何输出，不该混进「实际改写」的口径。
+        obs["stage"] = "unchanged"
+        return plain, obs, ctx_audio
+    if CTX_PREFIX_SHADOW:
+        obs["stage"] = "would_apply"
+        return plain, obs, ctx_audio
+    obs["stage"] = "applied"
+    print(f"[asr][ctx] {plain!r} -> {stripped!r}", flush=True)
+    return stripped, obs, ctx_audio
 
 
 async def finalize(ws, s: Session):
@@ -784,9 +863,10 @@ async def finalize(ws, s: Session):
     # This sentence is done; drop its audio (keep 1s margin in case VAD
     # backdates the next speech onset slightly).
     s.trim_to(end - 1000)
-    text = recognize(seg)
+    plain = recognize(seg)
     # 孤立短句里中英混说的英文词常被解成汉字音节；拼上一句音频重解可解对。
-    text = _recognize_with_prev_context(s, seg, text, end - beg)
+    # 影子模式下 text 恒等于 plain（照跑不改输出，只采样本）。
+    text, ctx_obs, ctx_audio = _recognize_with_prev_context(s, seg, plain, end - beg)
     # 声纹仍只看本句，不含前缀——否则前缀会把说话人判定带偏。
     cands = score_speakers(seg)
     gated = GATE_TO_ENROLLED and bool(ENABLED_VPS)
@@ -794,6 +874,8 @@ async def finalize(ws, s: Session):
         cands, end - beg,
         gated=gated, threshold=SPK_THRESHOLD, min_ms=SPK_MIN_MS,
     )
+    # 观测必须在声纹判定之后落盘：此刻才知道这一段最终有没有发出去。
+    _observe_ctx(s, ctx_obs, ctx_audio, seg, plain, emit, beg, end)
     if not emit:
         # Log the full scoreboard, not just the winner: when a segment is
         # dropped the question is always "how close was it", and that is
