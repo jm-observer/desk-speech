@@ -3,5 +3,5 @@
   "b": -2.0,
   "ok_min": 0.6,
   "warn_min": 0.35,
-  "_note": "按 slplab L2 模型的真机 raw 后验手调:正确音素 raw≈0、弱/错音 raw≈-2~-9。临时值,正式版用 speechocean762 拟合。挂载到 GOP_CALIBRATION 生效;改后重启容器即读。"
+  "_note": "标定输入是 gop_eff(段内 canonical 峰 - 竞争惩罚,见 README「标定」),不是响应里透出的 gop_raw。按 slplab L2 模型的真机 gop_eff 手调:正确音素≈0、弱/错音≈-2~-9。临时值,正式版用 speechocean762 拟合。挂载到 GOP_CALIBRATION 生效;改后重启容器即读。"
 }

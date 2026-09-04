@@ -16,7 +16,8 @@ GB10 `:8098 POST /assess`:参考文本 + 用户录音 → **音素 / 词 / 句�
 ref_text ──G2P(g2p_en/CMUdict, ARPAbet)──▶ 期望音素序列
 user_audio ──解码/重采样 16k──▶ wav2vec2 CTC 音素后验 ──forced_align──▶ 每音素时间段
                                                   │
-                          逐音素 GOP = mean(logP_canonical − logP_argmax) ≤ 0
+         逐音素分 = 段内 canonical 峰 − max(0, 段内最强竞争音峰 − canonical 峰)  ≤ 0
+       (取峰值而非逐帧均值:CTC 尖峰分布,一个音素常只有 1~2 帧,均值被过渡帧拉低)
                                                   │
                             标定(speechocean762)──▶ 0~1 ──聚合──▶ 词 / 句
 ```
@@ -113,13 +114,16 @@ token**——`gop.py` 用 `strip_stress()` 把 tokenizer vocab 与 G2P 输出对
 
 ## 标定(speechocean762)
 
-GOP 原始分是 log 后验差(`≤0`,`0`=完美),**不可直接示人**,必须标定到 `0~1`:
+打分量 `gop_eff` 是 log 后验尺度上的量(`≤0`,`0`=完美),**不可直接示人**,必须标定到 `0~1`。
+**它不是教科书 GOP**:竞争音不强时它就等于 canonical 峰,竞争音更强时等于
+`2*gop_raw − competitor_raw`——见上面链路图,别按 `logP(canonical) − logP(competitor)` 去理解:
 
-- `gop.py` 的 `Calibration` 用 `score01 = sigmoid(a*(gop_raw − b))`。仓库 `calibration.json` 是按
-  **slplab L2 模型**真机 raw 后验手调的参考值(`a=1.2, b=−2.0, ok_min=0.6, warn_min=0.35`;L2 正确
-  音素 raw≈0、弱/错音 raw≈−2~−9)。**仍是手调临时值,正式版用 speechocean762 拟合。** 换模型必重标。
+- `gop.py` 的 `Calibration` 用 `score01 = sigmoid(a*(gop_eff − b))`——**输入是带竞争惩罚的
+  `gop_eff`,不是响应里透出的 `gop_raw`**(后者只是 canonical 峰,给诊断看的)。仓库 `calibration.json` 是按
+  **slplab L2 模型**真机 `gop_eff` 手调的参考值(`a=1.2, b=−2.0, ok_min=0.6, warn_min=0.35`;L2 正确
+  音素 `gop_eff`≈0、弱/错音 `gop_eff`≈−2~−9)。**仍是手调临时值,正式版用 speechocean762 拟合。** 换模型必重标。
 - **正式标定**:在 [speechocean762](https://www.openslr.org/101/)(开源 L2 英语发音评测集,带
-  音素/词/句三级人工分)上跑本引擎得到各音素 GOP 原始分,拟合 `a/b` 让模型分与人工分单调对齐,
+  音素/词/句三级人工分)上跑本引擎得到各音素的 `gop_eff`,拟合 `a/b` 让模型分与人工分单调对齐,
   并据"通过线"反推 `ok_min/warn_min`。结果写 `calibration.json`,经 `GOP_CALIBRATION` env 挂载
   (compose 默认 `/calib/calibration.json`)。改标定**无需重编译/重启镜像**,重启容器即生效。
 - `calibration.json` 形如:`{"a": 5.2, "b": -0.8, "ok_min": 0.68, "warn_min": 0.42}`。

@@ -25,7 +25,10 @@ RUN python3 -c "import torch; v=torch.__version__; assert v.startswith('2.13') a
 
 WORKDIR /app
 COPY gop.py /app/gop.py
+COPY streaming.py /app/streaming.py
 COPY app.py /app/app.py
+# 流式 WS 测试客户端(runbook Tier 1 在容器内 docker exec 用)。
+COPY test_stream_client.py /app/test_stream_client.py
 
 # GOP_MODEL_ID:wav2vec2 CTC 音素模型(输出 ARPAbet);换模型只改这里(见 README「模型」)。
 # 权重经宿主缓存卷持久化(compose 挂 /root/.cache/huggingface),不进镜像。

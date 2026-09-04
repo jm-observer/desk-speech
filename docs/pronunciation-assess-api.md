@@ -76,17 +76,25 @@
 | `words[].phones` | array? | 逐音素明细。**始终返回**(评分明细表整句也需要)。 |
 | `phones[].ph` | str | 期望音素（ARPAbet，如 `TH`）。 |
 | `phones[].score` | float | 该音素发音分 `0~1`。 |
-| `phones[].pron_status` | str | 发音四档:`ok`/`warn`/`bad`/**`uncertain`**(引擎没把这个音对齐好,不判对错)。 |
+| `phones[].pron_status` | str | 发音四档:`ok`/`warn`/`bad`/**`uncertain`**(引擎没把这个音对齐好,不判对错)。**`uncertain` 只给"没对齐上"**:若 canonical 在整段任意一帧都弱(`peak_raw < -3.0`)即"这个音压根没发出来",判 `bad` 而非 `uncertain`——否则吞音会被当成引擎的锅放过去(放水比冤枉更难发现)。例外:辅音丛里的塞音(`products`→`prah-duks`)与词尾塞音,删除本就是标准读法,仍判 `uncertain`。 |
 | `phones[].expected_ph` | str? | 错读时的「期望音素」（结构化，**消费方/落库以此为准**）。`ok` 音素省略。 |
 | `phones[].actual_ph` | str? | 错读时的「实际最可能音素」。无明确替代（漏读/偏弱）时省略。 |
 | `phones[].hint` | str? | 人类可读纠音文案，由 `expected_ph`/`actual_ph` 拼出（如「/θ/ 读成了 /s/」）。**仅展示用**，消费方可自行本地化，不要解析它取信息。 |
 | `phones[].reliable` | bool? | `false` → 该音素**没对齐好**(`uncertain`),不计入 `bad_phone_count`、不拉低词分。`ok` 音素省略(默认可靠)。见 `english-shadow-scoring-ui-design.md` §3。 |
 | `phones[].t_start` / `t_end` | float? | 该音素对齐时间段(秒),供明细表/波形定位。 |
-| `phones[].peak_t` | float? | 诊断:该音素**全局峰时间**(秒)。落在 `[t_start,t_end]` 外 = 对齐错位(明细表据此标"错位")。 |
-| `phones[].gop_raw` | float? | 诊断:对齐段内 canonical 峰值 log 后验(原始 GOP,≤0,越接近 0 证据越强)。 |
+| `words[].heard` | array? | 该词时间范围内模型**实际听到**的音素串(ARPAbet,CTC greedy)。诊断/教学用,**不参与判分**;听不到任何东西时省略。让用户看到 `delicious` 被读成了 `D-IY-D-IY-S-AO-S`,错读才从"分低"变成"可照着改"。 |
+| `phones[].peak_t` | float? | 诊断:该音素**全局峰时间**(秒)。 |
+| `phones[].peak_raw` | float? | 诊断:`peak_t` 处的 log 后验(≤0)。**必须与 `peak_t` 一起看**——见下方警示。 |
+| `phones[].gop_raw` | float? | 诊断:对齐段内 canonical 的**峰值 log 后验**(≤0,越接近 0 证据越强)。**不是送进标定的打分量**——那是含竞争惩罚的 `gop_eff`,见「算法 / 标定要点」。 |
 | `bad_phone_count` | int | `pron_status==bad` 的音素总数。供「通过判定」（消费方 `passed = sentence_score>=阈值 && bad_phone_count==0`）。 |
 | `model` | str | 评测模型标识。 |
 
+> ⚠️ **`peak_t` 不带 `peak_raw` 就是误导**。只看峰的**位移**(「峰在 2.03s,对齐段却在
+> 1.45s」)很容易得出"对齐错位了、用户其实读对了"的结论——但峰值**弱**时,那只是整段里
+> "最不差"的一帧,不代表用户在那儿发出了这个音。2026-08-31 实测:`delicious` 的 /l/ 峰
+> 在 2.03s、看着偏了 0.54s,而该处后验只有 −2.8(整段根本没有 /l/);/ʃ/ 更是 −6.2。
+> **消费方展示"真实峰"时必须用 `peak_raw` 把弱峰渲染成「整段未听到」,不要只画位移。**
+>
 > `pron_status` **刻意不叫 `status`**：toolkit 端 v1 已有 `status`（`ok/wrong/missing`，语义是
 > 内容对错），两者是独立维度，不可混用。消费方据 `pron_status` 上色，回退时用 `status`。
 
@@ -145,6 +153,17 @@ hello → 循环 send_bytes(PCM 320ms 块)→ end;读 ready/partial*/final。
 - **G2P**：`g2p_en`（内置 CMUdict + OOV seq2seq 兜底），输出 ARPAbet（去重音）。
 - **声学模型**：wav2vec2 CTC 音素后验（`GOP_MODEL_ID`，须输出 ARPAbet 可规范化的 token）。
 - **强制对齐**：`torchaudio.functional.forced_align`（CTC），得每音素帧区间。
-- **GOP**：`mean_t(logP(canonical) − logP(argmax))`（`≤0`，`0`=完美）。
-- **标定**：`sigmoid(a*(gop−b))` → `0~1`，参数经 speechocean762 拟合，存 `calibration.json`
+- **打分量（不是教科书 GOP，别照公式反推）**：实现取的是**段内峰值 + 竞争惩罚**，
+  不是逐帧均值：
+  - `gop_raw` = 对齐段内 canonical 的**峰值** log 后验（同音素多写法如 `ah`/`ax` 取最大）；
+  - `competitor_raw` = 同段内最强**竞争 token** 的峰值（排除 blank、canonical 自身、
+    前后相邻的目标音素——协同发音溢出不算竞争）；
+  - `gop_eff = gop_raw − max(0, competitor_raw − gop_raw)`，**送进标定的是它**。
+  > 为什么取峰值而非逐帧均值：CTC 后验是**尖峰**分布，一个音素的对齐段常常只有 1~2 帧
+  > （20~40ms），且证据高度集中在尖峰那一帧；跨帧取均值会被过渡帧拉低，也对对齐误差更敏感。
+  > 这是经验选择，不是理论最优。竞争惩罚则是为了抓 `ship`/`sheep` 这类近邻音替换——模型对
+  > `[i]` 帧的 `IH` 后验也不低，但 `IY` 更高，**差距**才是证据。响应里透出的 `gop_raw` 仍是
+  > canonical 峰（诊断用），与送进标定的 `gop_eff` 不是同一个量，别混。
+- **标定**：`sigmoid(a*(gop_eff−b))` → `0~1`。**当前 `calibration.json` 是按真机后验手调的
+  参考值，尚未用 speechocean762 拟合**（正式版才拟合；换模型必重标），存 `calibration.json`
   （`GOP_CALIBRATION` 挂载，改之无需重编译）。详见 `server/pronunciation-assess/README.md`。
