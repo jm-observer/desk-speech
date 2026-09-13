@@ -10,7 +10,8 @@ score 1.0 against itself and the anchors would look better than they are.
 """
 import pytest
 
-from spk_gate import ROLE_ENROLLED, ROLE_IMPOSTER, decide
+from spk_gate import (ROLE_ENROLLED, ROLE_IMPOSTER, decide, margin,
+                      scoreboard)
 
 # (sample_id, truth, dur_ms, cos_fengqi, cos_imposter)
 SAMPLES = [
@@ -150,3 +151,58 @@ def test_single_voiceprint_library_cannot_reject_the_stranger():
     # With the anchor the same four are rejected by a 0.25 margin instead.
     for sid, _t, dur, fq, imp in IMPOSTERS:
         assert imp - fq > 0.20, f"sample {sid} margin too thin"
+
+
+# --- 打分板与余量（供日志行用的纯函数） -----------------------------------
+
+
+def test_scoreboard_is_empty_when_nothing_was_scored():
+    assert scoreboard(None) == ""
+    assert scoreboard([]) == ""
+
+
+def test_scoreboard_lists_every_candidate_not_just_the_winner():
+    board = scoreboard([
+        ("fengqi", ROLE_ENROLLED, 0.51234),
+        ("anchor-1", ROLE_IMPOSTER, 0.1),
+    ])
+    assert board == "fengqi/enrolled=0.512 anchor-1/imposter=0.100"
+
+
+def test_margin_is_none_when_nothing_was_scored():
+    assert margin(None, THRESHOLD) is None
+    assert margin([], THRESHOLD) is None
+
+
+def test_margin_is_the_signed_distance_from_the_threshold():
+    assert margin(candidates(0.55, 0.2, with_anchor=True), 0.45) == pytest.approx(0.10)
+    # Negative is a real state: gating off emits as "unlabeled" with nothing
+    # over the bar, so the emit path cannot assume a positive margin.
+    assert margin(candidates(0.35, 0.2, with_anchor=True), 0.45) == pytest.approx(-0.10)
+
+
+def test_margin_follows_the_board_max_not_the_enrolled_entry():
+    """An anchor out-scoring the enrolled voice has to show up in the margin.
+
+    Otherwise a near-false-accept — a stranger sitting just under the bar —
+    reads in the log as a comfortable pass by the enrolled user.
+    """
+    assert margin(candidates(0.30, 0.60, with_anchor=True), 0.45) == pytest.approx(0.15)
+
+
+def test_emitted_slices_hide_a_wide_margin_spread():
+    """Why the emit path logs the margin at all.
+
+    Every slice here is the enrolled user's own and every one is emitted, so
+    the segment table shows the same thing for all of them. The distance to
+    the threshold, however, spans roughly 0.05 to 0.32 — the thin end is one
+    capture-path shift away from dropping, and nothing downstream can tell
+    the two apart without this number.
+    """
+    margins = [
+        margin(candidates(fq, imp, with_anchor=True), THRESHOLD)
+        for _sid, _t, _dur, fq, imp in MINE_USABLE
+    ]
+    assert min(margins) < 0.05
+    assert max(margins) > 0.31
+    assert max(margins) - min(margins) > 0.25

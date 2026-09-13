@@ -29,6 +29,36 @@ def best_candidate(candidates):
     return max(candidates, key=lambda c: c[2])
 
 
+def scoreboard(candidates):
+    """The full "name/role=score" board for the log line.
+
+    Logged on **both** the drop and the emit path, on purpose. The drop case
+    needs it to answer "how close was it". The emit case needs it to answer
+    the mirror question — "how much margin did this have" — which is just as
+    unanswerable after the fact, because scores are not persisted anywhere.
+
+    Without it, a segment that cleared the threshold by 0.01 and one that
+    cleared it by 0.30 look identical in the segment table, yet the first is
+    a sentence about to start disappearing as soon as the capture path
+    shifts slightly (a different mic, audio enhancement toggled, a different
+    room). Recorded margins turn that from "one day sentences stopped coming
+    through" into something visible before it bites.
+    """
+    return " ".join(f"{n}/{r}={s:.3f}" for n, r, s in (candidates or []))
+
+
+def margin(candidates, threshold):
+    """Best score minus `threshold`; None when nothing could be scored.
+
+    Negative means nothing in the library cleared the bar. That is still a
+    valid emit state when gating is off (reason "unlabeled"), which is
+    exactly why the emit path logs the margin rather than assuming it is
+    positive.
+    """
+    best = best_candidate(candidates)
+    return None if best is None else best[2] - threshold
+
+
 def decide(candidates, dur_ms, *, gated, threshold, min_ms):
     """Decide whether to emit a finalized segment and whom to attribute it to.
 

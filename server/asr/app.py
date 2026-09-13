@@ -30,7 +30,9 @@ from funasr import AutoModel
 
 from ctx_observe import CtxObserver
 from ctx_prefix import accept_ctx_text, strip_known_prefix
-from spk_gate import ROLE_ENROLLED, ROLE_IMPOSTER, decide as spk_decide
+from spk_gate import (ROLE_ENROLLED, ROLE_IMPOSTER, best_candidate,
+                      decide as spk_decide, margin as spk_margin,
+                      scoreboard as spk_scoreboard)
 
 # SenseVoice emits leading meta tokens like <|zh|><|NEUTRAL|><|BGM|><|withitn|>.
 # We strip them to plain text. (funasr's rich_transcription_postprocess instead
@@ -879,15 +881,29 @@ async def finalize(ws, s: Session):
     )
     # 观测必须在声纹判定之后落盘：此刻才知道这一段最终有没有发出去。
     _observe_ctx(s, ctx_obs, ctx_audio, seg, plain, emit, beg, end)
+    # Log the full scoreboard, not just the winner, on **both** paths: when a
+    # segment is dropped the question is always "how close was it", and when
+    # one is emitted it is the mirror question "how much margin did it have".
+    # Neither is answerable after the fact otherwise — scores are not
+    # persisted. The emit side was missing for a long time, which made a pass
+    # at 0.41 and a pass at 0.70 indistinguishable; the first is a sentence
+    # about to vanish the next time the capture path shifts.
+    board = spk_scoreboard(cands)
     if not emit:
-        # Log the full scoreboard, not just the winner: when a segment is
-        # dropped the question is always "how close was it", and that is
-        # unanswerable after the fact otherwise (scores are not persisted).
-        board = " ".join(f"{n}/{r}={s:.3f}" for n, r, s in (cands or []))
         print(f"[asr][spk] DROP {reason} dur={end - beg}ms "
               f"thr={SPK_THRESHOLD} min={SPK_MIN_MS}ms [{board}] "
               f"text={text!r}", flush=True)
         return
+    _best = best_candidate(cands)
+    _mg = spk_margin(cands, SPK_THRESHOLD)
+    # 一次 print 出完整一行：拆成多次 print 在异步输出下会和别的日志交错，
+    # 拼出半行来，而这行的用途正是事后 grep。
+    _score = f"{_best[2]:.3f}" if _best else "-"
+    _margin = f"{_mg:+.3f}" if _mg is not None else "-"
+    print(f"[asr][spk] PASS {reason} dur={end - beg}ms spk={speaker or '-'} "
+          f"score={_score} margin={_margin} "
+          f"thr={SPK_THRESHOLD} min={SPK_MIN_MS}ms [{board}] "
+          f"text={text!r}", flush=True)
     # 供下一句做前缀上下文。只在通过声纹闸之后才存：被判为别人说的话不该拿来
     # 当本人的上下文。**整句存，不截断**——prev_text 是整句的文本，截音频会让
     # 两者对不上（见 CTX_PREFIX_MAX_PREV_MS）。
